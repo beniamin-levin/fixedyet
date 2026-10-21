@@ -2,7 +2,7 @@
   "_example": {
     "label": "Open bug (real run)",
     "illustrative": false,
-    "note": "Real run on 2026-10-21 on pallets/click#2827, a randomly picked closed bug issue, with the Docker sandbox backend and Nemotron 3 Super through Token Factory. The checkpoint image tags in the report name images on the machine that ran it."
+    "note": "- **Real run, 21 Oct 2026** on [pallets/click#2827](https://github.com/pallets/click/issues/2827), an issue picked at random from the closed bug issues\n- Docker sandbox, Nemotron 3 Super via Nebius Token Factory\n- **Open bug**: the test fails on `8.1.7` and still fails on `main`\n- Checkpoint image tags refer to images on the machine that ran it."
   },
   "issue_url": "https://github.com/pallets/click/issues/2827",
   "title": "No stdout/stderr is captured with `invoke` during tests in combination with structlog",

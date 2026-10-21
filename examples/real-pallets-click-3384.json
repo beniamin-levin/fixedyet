@@ -2,7 +2,7 @@
   "_example": {
     "label": "Fixed on main (real run)",
     "illustrative": false,
-    "note": "Real run on 2026-10-21 on pallets/click#3384, with the Docker sandbox backend and Nemotron 3 Super through Token Factory. The checkpoint image tags in the report name images on the machine that ran it."
+    "note": "- **Real run, 21 Oct 2026** on [pallets/click#3384](https://github.com/pallets/click/issues/3384)\n- Docker sandbox, Nemotron 3 Super via Nebius Token Factory\n- **Fixed on main**: the test fails on `8.3.3` and passes on `main`\n- Fixing commit [d959898](https://github.com/pallets/click/commit/d959898db264aaf07e70ad4eafa254286f9a5185), released in **8.4.0**\n- Checkpoint image tags refer to images on the machine that ran it."
   },
   "issue_url": "https://github.com/pallets/click/issues/3384",
   "title": "Click 8.3.3 breaks `pytest` when stream `fd` is duplicated",

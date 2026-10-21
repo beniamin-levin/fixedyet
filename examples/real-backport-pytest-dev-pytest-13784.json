@@ -2,7 +2,8 @@
   "_example": {
     "label": "Verified backport (real run)",
     "illustrative": false,
-    "note": "Real run on 2026-10-21 on pytest-dev/pytest#13784: fixedyet run, then fixedyet backport, with the Docker sandbox backend and Nemotron 3 Super through Token Factory. The fix from main was cherry-picked onto 8.4.x and checked there. A draft pull request was opened inside the owner's fork (https://github.com/beniamin-levin/pytest/pull/1); nothing was sent to the upstream project. The checkpoint image tags name images on the machine that ran it."
+    "note": "- **Real run, 21 Oct 2026** on [pytest-dev/pytest#13784](https://github.com/pytest-dev/pytest/issues/13784)\n- Ran `fixedyet run`, then `fixedyet backport`: Docker sandbox, Nemotron 3 Super via Nebius Token Factory\n- The fix from main was **cherry-picked onto 8.4.x and verified there**\n- **Draft PR** opened in the owner's fork: [beniamin-levin/pytest#1](https://github.com/beniamin-levin/pytest/pull/1). **Nothing was sent upstream.**\n- Checkpoint image tags refer to images on the machine that ran it.",
+    "pr_url": "https://github.com/beniamin-levin/pytest/pull/1"
   },
   "status": "verified",
   "reason": "the reproduction test fails on 8.4.x before the cherry-pick and passes after; the project's suite has no newly failing tests (3244 passed, 1 failed, 6 error, 124 skipped before, 3245 passed, 1 failed, 6 error, 124 skipped after)",
