@@ -18,7 +18,8 @@ answers 404, and a wrong token answers 401 with nothing else)
     POST   /api/reports/{id}/backport   step 1: verify the report's backport in the sandbox, no
                                         pull request (a job: progress over /api/runs)
     POST   /api/reports/{id}/backport/pr  step 2: for a verified backport, open a DRAFT pull
-                                        request in the token owner's fork
+                                        request in the token owner's fork, or on the upstream
+                                        project once the maintainer typed its name
     POST   /api/reports/{id}/hide       keep a report off the public page
     DELETE /api/reports/{id}/hide       show it again
 
@@ -139,13 +140,16 @@ async def fetch_target_activity(repo: str, branch: str, *, settings: Any) -> dic
 
 
 async def open_draft_pr(
-    result: BackportResult, *, token: str, say: Callable[[str], None]
+    result: BackportResult, *, token: str, say: Callable[[str], None], target: str = "fork"
 ) -> Any:
-    """Open the draft pull request. The target is the token owner's FORK, always: this app has no
-    parameter, setting or code path that asks for the upstream project."""
+    """Open the draft pull request: in the token owner's fork, or on the upstream project. The
+    endpoint only passes ``"upstream"`` after the maintainer typed the repository's name."""
     from fixedyet.pullrequest import open_backport_pr
 
-    return await open_backport_pr(result, token=token, target="fork", say=say)
+    return await open_backport_pr(
+        result, token=token, target="upstream" if target == "upstream" else "fork",
+        confirmed_upstream=target == "upstream", say=say,
+    )
 
 
 def render_report(assessment: Assessment) -> str:
@@ -617,7 +621,8 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             return _error(400, "invalid_issue_url", str(exc))
         store = get_store()
         examples_url = f"{request.scope.get('root_path', '')}/api/examples"
-        if store.runs_today() >= daily_limit():
+        admin = is_admin(request)  # the maintainer's runs skip the daily limit and its counter
+        if not admin and store.runs_today() >= daily_limit():
             if daily_limit() <= 0:  # a limit of 0 is "paused", not "used up today"
                 message = PAUSED_MESSAGE
             else:
@@ -645,7 +650,8 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
                 examples=examples_url,
             )
         run = store.create(ref.url)
-        store.count_run()
+        if not admin:
+            store.count_run()
         task = asyncio.create_task(_execute(store, run, get_settings()))
         store.tasks.add(task)
         task.add_done_callback(store.tasks.discard)
@@ -762,8 +768,9 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
 
     @app.post("/api/reports/{report_id}/backport/pr")
     async def open_backport_pull_request(report_id: str, request: Request) -> Response:
-        """Step 2: a DRAFT pull request in the token owner's fork, for a verified backport.
-        Body ``{"target": "fork"}``. Opening one on the upstream project is not offered here."""
+        """Step 2: a DRAFT pull request for a verified backport. Body ``{"target": "fork"}``, or
+        ``{"target": "upstream", "confirm": "<owner/repo>"}``: the upstream project only when
+        ``confirm`` names it, so the maintainer types the repository before anything is posted."""
         denied = admin_gate(request)
         if denied is not None:
             return denied
@@ -783,12 +790,23 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         except ValueError:
             body = None
         target = body.get("target") if isinstance(body, dict) else None
-        if target != "fork":
-            return _error(400, "invalid_request", 'Send JSON like {"target": "fork"}.')
-        existing = (record.get("prs") or {}).get("fork")
+        if target not in ("fork", "upstream"):
+            return _error(
+                400, "invalid_request",
+                'Send JSON like {"target": "fork"} or {"target": "upstream", "confirm": '
+                '"owner/repo"}.',
+            )
+        if target == "upstream":
+            confirm = body.get("confirm") if isinstance(body, dict) else None
+            if not isinstance(confirm, str) or confirm.strip().lower() != result.repo.lower():
+                return _error(
+                    400, "confirmation_mismatch",
+                    f"Type {result.repo} to confirm a pull request on the upstream project.",
+                )
+        existing = (record.get("prs") or {}).get(target)
         if isinstance(existing, dict) and existing.get("url"):  # this target has its PR already
             return JSONResponse({
-                "report_id": report_id, "target": "fork", "pr_url": existing["url"],
+                "report_id": report_id, "target": target, "pr_url": existing["url"],
                 "created": False, "backport": public_record(record),
             })
         settings = get_settings()
@@ -807,7 +825,7 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
 
         try:
             async with asyncio.timeout(PULL_REQUEST_TIMEOUT_S):
-                pr = await open_draft_pr(result, token=token, say=say)
+                pr = await open_draft_pr(result, token=token, say=say, target=target)
             if not str(getattr(pr, "url", "") or ""):
                 raise ValueError("GitHub returned no pull request URL")
         except TimeoutError:
@@ -819,10 +837,10 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         except Exception as exc:  # noqa: BLE001
             logger.exception("backport pr %s failed", report_id)
             return _error(502, "pull_request_failed", _public_job_error(exc, token))
-        record = _with_pr(record, "fork", pr)
+        record = _with_pr(record, target, pr)
         await asyncio.to_thread(reports.save_backport, report_id, record)
         return JSONResponse({
-            "report_id": report_id, "target": "fork", "pr_url": record["prs"]["fork"]["url"],
+            "report_id": report_id, "target": target, "pr_url": record["prs"][target]["url"],
             "created": bool(getattr(pr, "created", True)), "backport": public_record(record),
         })
 

@@ -122,6 +122,12 @@
 
   function clearNotice() { $('#notice').hidden = true; }
 
+  // The maintainer's key, saved by "Maintainer sign-in" on the reports page (same origin). Their
+  // runs skip the daily limit; the server checks the key, this only changes the hint and button.
+  function maintainerToken() {
+    try { return window.localStorage.getItem('fixedyet-maintainer-token') || ''; } catch { return ''; }
+  }
+
   async function refreshStatus() {
     try {
       const res = await fetch('api/status');
@@ -129,7 +135,11 @@
       const s = await res.json();
       const hint = $('#form-hint');
       const button = $('#run-button');
-      if (s.remaining <= 0) {
+      if (maintainerToken()) {
+        hint.textContent = `Signed in as maintainer: no daily limit. One run at a time` +
+          `${s.busy ? ', and one is in progress right now' : ''}.`;
+        button.disabled = false;
+      } else if (s.remaining <= 0) {
         hint.textContent = s.daily_limit <= 0
           ? 'Live runs are paused while the demo has no sandbox backend. The example reports below show what a run produces.'
           : 'Today\'s live runs are used up. The example reports below show what a run produces.';
@@ -266,7 +276,10 @@
     try {
       res = await fetch('api/runs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(maintainerToken() ? { Authorization: `Bearer ${maintainerToken()}` } : {}),
+        },
         body: JSON.stringify({ issue_url: url }),
       });
     } catch {

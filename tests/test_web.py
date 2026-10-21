@@ -492,6 +492,27 @@ async def test_daily_limit_resets_on_a_new_day(tmp_path: Path, fake: Fake) -> No
     assert counter["date"] == datetime.now(UTC).date().isoformat()
 
 
+async def test_the_maintainer_skips_the_daily_limit_and_its_counter(
+    tmp_path: Path, fake: Fake
+) -> None:
+    settings = make_settings(tmp_path, limit=0)  # paused for everyone else
+    settings.admin_token = "maintainer-key-0123456789abcdef"
+    async with make_client(settings) as client:
+        assert (await start(client)).status_code == 429
+        wrong = await client.post(
+            "/api/runs", json={"issue_url": ISSUE}, headers={"Authorization": "Bearer nope"}
+        )
+        assert wrong.status_code == 429
+        res = await client.post(
+            "/api/runs", json={"issue_url": ISSUE},
+            headers={"Authorization": f"Bearer {settings.admin_token}"},
+        )
+        assert res.status_code == 202
+        await wait_finished(client, res.json()["id"])
+        assert (await client.get("/api/status")).json()["runs_today"] == 0
+    assert len(fake.calls) == 1
+
+
 async def test_zero_limit_blocks_live_runs(tmp_path: Path, fake: Fake) -> None:
     async with make_client(make_settings(tmp_path, limit=0)) as client:
         assert (await start(client)).status_code == 429

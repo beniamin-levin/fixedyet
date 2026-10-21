@@ -225,7 +225,8 @@
       ];
     };
     return el('div', { class: 'panel', role: 'region', 'aria-label': 'How to open a pull request' },
-      el('p', null, el('strong', { text: 'Opening pull requests on this demo is limited to its maintainer.' })),
+      el('p', null, el('strong', { text: 'Opening pull requests on this demo is limited to its maintainer,' }),
+        ' who reviews each verified backport and types the project\'s name before a draft goes to it.'),
       el('p', { text: 'To do it yourself, install FixedYet and run one of these. Both reproduce and verify the backport in your own sandbox, then open a draft pull request.' }),
       command(`fixedyet backport ${url} --open-pr`, 'in your fork'),
       command(`fixedyet backport ${url} --open-pr --pr-target upstream`,
@@ -277,11 +278,31 @@
     if (result.patch) {
       parts.push(el('details', null, el('summary', { text: 'Review the patch' }), codeBlock(result.patch, 'diff')));
     }
-    const hasFork = record.prs && record.prs.fork && record.prs.fork.url;
-    if (!hasFork) {
-      const forkButton = el('button', { class: 'btn primary', type: 'button', text: 'Open draft PR in my fork' });
+    const prs = record.prs || {};
+    const upstreamRepo = result.repo || repo || '';
+    const actions = el('div', { class: 'pr-actions' });
+    if (!(prs.upstream && prs.upstream.url) && upstreamRepo) {
+      // Posting on someone else's project: the maintainer types its name first, as the CLI asks.
+      const open = el('button', { class: 'btn primary', type: 'button', text: `Open draft PR on ${upstreamRepo}` });
+      const input = el('input', { type: 'text', class: 'confirm-input', placeholder: upstreamRepo, autocomplete: 'off', spellcheck: 'false', 'aria-label': `Type ${upstreamRepo} to confirm` });
+      const submit = el('button', { class: 'btn primary', type: 'button', text: 'Open the draft PR', disabled: true });
+      const confirmRow = el('div', { class: 'confirm-row', hidden: true },
+        el('label', null, 'Type ', el('code', { text: upstreamRepo }), ' to confirm a draft pull request on the project itself'),
+        el('div', { class: 'confirm-controls' }, input, submit));
+      const matches = () => input.value.trim().toLowerCase() === upstreamRepo.toLowerCase();
+      input.addEventListener('input', () => { submit.disabled = !matches(); });
+      input.addEventListener('keydown', (event) => { if (event.key === 'Enter' && matches()) submit.click(); });
+      open.addEventListener('click', () => { confirmRow.hidden = false; open.hidden = true; input.focus(); });
+      submit.addEventListener('click', () => openPullRequest(d, 'upstream', submit, area, input.value.trim()));
+      actions.append(open);
+      parts.push(actions, confirmRow);
+    } else {
+      parts.push(actions);
+    }
+    if (!(prs.fork && prs.fork.url)) {
+      const forkButton = el('button', { class: 'btn small', type: 'button', text: 'Open in my fork only' });
       forkButton.addEventListener('click', () => openPullRequest(d, 'fork', forkButton, area));
-      parts.push(el('div', { class: 'pr-actions' }, forkButton));
+      actions.append(forkButton);
     }
     return parts;
   }
@@ -409,7 +430,7 @@
   }
 
   // Step 2: open the draft pull request for a verified backport. A short request, no log.
-  async function openPullRequest(d, target, button, area) {
+  async function openPullRequest(d, target, button, area, confirm) {
     button.disabled = true;
     area.replaceChildren(el('p', { class: 'muted', text: 'Opening the draft pull request…' }));
     let res;
@@ -417,7 +438,7 @@
       res = await api(`api/reports/${encodeURIComponent(d.id)}/backport/pr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target }),
+        body: JSON.stringify(target === 'upstream' ? { target, confirm } : { target }),
       });
     } catch {
       button.disabled = false;

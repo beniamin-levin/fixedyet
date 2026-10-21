@@ -557,11 +557,13 @@ class FakePullRequests:
 
     def __init__(self) -> None:
         self.calls: list[tuple[BackportResult, str]] = []
+        self.targets: list[str] = []
         self.error: Exception | None = None
         self.gate: asyncio.Event | None = None
 
-    async def __call__(self, result: BackportResult, *, token: str, say: Any):
+    async def __call__(self, result: BackportResult, *, token: str, say: Any, target: str = "fork"):
         self.calls.append((result, token))
+        self.targets.append(target)
         say("Opening a draft pull request")
         if self.gate is not None:
             await self.gate.wait()
@@ -1093,10 +1095,9 @@ async def test_step_2_refuses_an_unknown_report_and_a_stranger(
 
 @pytest.mark.parametrize(
     "body",
-    [None, {}, {"target": None}, {"target": "origin"}, {"target": "upstream"},
-     {"target": "upstream", "confirm": "acme/widgets"}, ["fork"], "fork"],
+    [None, {}, {"target": None}, {"target": "origin"}, {"target": "UPSTREAM"}, ["fork"], "fork"],
 )
-async def test_step_2_takes_only_the_fork_as_a_target(
+async def test_step_2_takes_only_the_fork_or_the_upstream_as_a_target(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
     pr_fake: FakePullRequests, body: Any,
 ) -> None:
@@ -1192,11 +1193,16 @@ async def test_a_record_from_the_first_deployment_counts_as_a_fork_pull_request(
     assert again.json()["created"] is False and pr_fake.calls == []
 
 
-# --- the pull request goes to the fork ------------------------------------------------------
+# --- the pull request: the fork by default, the upstream project only when confirmed --------
 
 
-async def test_the_web_app_opens_pull_requests_on_the_fork_only(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("target", "expected", "confirmed"),
+    [(None, "fork", False), ("fork", "fork", False), ("upstream", "upstream", True),
+     ("anything-else", "fork", False)],
+)
+async def test_open_draft_pr_confirms_the_upstream_only_when_asked_for_it(
+    monkeypatch: pytest.MonkeyPatch, target: str | None, expected: str, confirmed: bool,
 ) -> None:
     seen: dict[str, Any] = {}
 
@@ -1205,20 +1211,47 @@ async def test_the_web_app_opens_pull_requests_on_the_fork_only(
         return "pr"
 
     monkeypatch.setattr(pullrequest, "open_backport_pr", spy)
-    got = await web.open_draft_pr(make_result(), token=TOKEN, say=lambda m: None)
+    kwargs = {} if target is None else {"target": target}
+    got = await web.open_draft_pr(make_result(), token=TOKEN, say=lambda m: None, **kwargs)
     assert got == "pr"
-    assert seen["target"] == "fork" and "confirmed_upstream" not in seen
-    assert set(seen) == {"token", "target", "say"}
-    assert list(inspect.signature(web.open_draft_pr).parameters) == ["result", "token", "say"]
+    assert seen["target"] == expected and seen["confirmed_upstream"] is confirmed
 
 
-def test_no_code_path_in_the_web_app_names_the_upstream_target() -> None:
-    for name in ("app.py", "reports.py"):
-        source = (Path(web.__file__).parent / name).read_text(encoding="utf-8")
-        code = re.sub(r"#.*", "", re.sub(r'""".*?"""', "", source, flags=re.S))
-        assert "confirmed_upstream" not in code and "confirm_upstream" not in code
-        assert not re.search(r"""target\s*=\s*["']upstream""", code)
-        assert "yes_upstream" not in code
+@pytest.mark.parametrize(
+    "body",
+    [{"target": "upstream"}, {"target": "upstream", "confirm": ""},
+     {"target": "upstream", "confirm": "acme/other"}, {"target": "upstream", "confirm": 7},
+     {"target": "upstream", "confirm": "alice/widgets"}],
+)
+async def test_an_upstream_pr_needs_the_repository_typed_exactly(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests, body: Any,
+) -> None:
+    await verified(client, settings)
+    res = await client.post(f"/api/reports/{RUN_OLD}/backport/pr", headers=AUTH, json=body)
+    assert res.status_code == 400 and res.json()["error"] == "confirmation_mismatch"
+    assert "acme/widgets" in res.json()["message"]
+    assert pr_fake.calls == []
+
+
+async def test_a_confirmed_upstream_pr_is_opened_and_saved_beside_the_fork_one(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests,
+) -> None:
+    await verified(client, settings)
+    res = await client.post(
+        f"/api/reports/{RUN_OLD}/backport/pr", headers=AUTH,
+        json={"target": "upstream", "confirm": "  ACME/Widgets "},
+    )
+    assert res.status_code == 200 and res.json()["target"] == "upstream"
+    assert pr_fake.targets == ["upstream"]
+    again = await client.post(
+        f"/api/reports/{RUN_OLD}/backport/pr", headers=AUTH,
+        json={"target": "upstream", "confirm": "acme/widgets"},
+    )
+    assert again.status_code == 200 and again.json()["created"] is False
+    assert pr_fake.targets == ["upstream"]  # idempotent per target
+    assert set(saved_record(settings)["prs"]) == {"upstream"}
 
 
 @pytest.fixture
@@ -1243,13 +1276,13 @@ def github_api():
         yield router
 
 
-async def test_step_2_against_a_mocked_github_opens_only_a_draft_in_the_fork(
+async def test_step_2_against_a_mocked_github_opens_a_draft_in_the_fork(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
     github_api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real ``open_backport_pr`` against a mocked GitHub. Nothing is faked in between but
-    the git push. An upstream request is refused before any GitHub call; the fork request makes
-    the only pull request there is, a draft with the disclosure line."""
+    the git push. An unconfirmed upstream request is refused before any GitHub call; the fork
+    request makes the only pull request there is, a draft with the disclosure line."""
     pushed: list[pullrequest.PushRequest] = []
 
     async def push(request: pullrequest.PushRequest) -> str:
@@ -1262,7 +1295,7 @@ async def test_step_2_against_a_mocked_github_opens_only_a_draft_in_the_fork(
 
     refused = await client.post(
         f"/api/reports/{RUN_OLD}/backport/pr?target=upstream&pr_target=upstream&yes_upstream=1",
-        headers=AUTH, json={"target": "upstream", "confirm": "acme/widgets"},
+        headers=AUTH, json={"target": "upstream", "confirm": "alice/widgets"},
     )
     assert refused.status_code == 400 and len(github_api.calls) == 0
 
@@ -1413,3 +1446,31 @@ def test_github_url_builders_only_make_links_from_valid_parts() -> None:
         "pytest-dev/pytest",
         None,
     ]
+
+
+async def test_a_confirmed_upstream_pr_against_a_mocked_github_is_a_draft_on_the_project(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    github_api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real ``open_backport_pr``: the branch goes to the fork, the draft opens on upstream
+    with ``head`` naming the fork's owner, and the body ends with the disclosure line."""
+
+    async def push(request: pullrequest.PushRequest) -> str:
+        return "e" * 40
+
+    monkeypatch.setattr(pullrequest, "push_with_git", push)
+    monkeypatch.setattr(web, "github_token", lambda settings: TOKEN)
+    await verified(client, settings)
+    res = await client.post(
+        f"/api/reports/{RUN_OLD}/backport/pr", headers=AUTH,
+        json={"target": "upstream", "confirm": "acme/widgets"},
+    )
+    assert res.status_code == 200
+    assert res.json()["pr_url"] == "https://github.com/acme/widgets/pull/99"
+    post = next(c for c in github_api.calls
+                if c.request.method == "POST" and c.request.url.path == "/repos/acme/widgets/pulls")
+    body = json.loads(post.request.content)
+    assert body["draft"] is True and body["base"] == "8.1.x"
+    assert body["head"] == "alice:fixedyet/backport-42-8.1.x"
+    assert "reviewed and submitted by @alice." in body["body"]
+    assert saved_record(settings)["prs"]["upstream"]["base_repo"] == "acme/widgets"

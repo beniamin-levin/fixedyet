@@ -390,3 +390,8 @@ ul.plain li { margin: 0.25em 0; }
 @media (prefers-reduced-motion: reduce) {
   .timeline li.active .dot { animation: none; }
 }
+.confirm-row { margin-top: 12px; display: grid; gap: 8px; }
+.confirm-row label { font-size: 0.9rem; }
+.confirm-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.confirm-input { flex: 1 1 220px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border, #ccc); border-radius: 8px; font: 0.95rem var(--mono); }
+.pr-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }

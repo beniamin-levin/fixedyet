@@ -180,7 +180,7 @@ token (GITHUB_TOKEN | gh auth token) -> GET /user (login = the token's owner)
 - The module has no ready-for-review call, no comment call, no force-push and no push to upstream; `tests/test_pullrequest.py` asserts the set of requests a run makes, and that every `POST /pulls` carries `draft: true`.
 - The body ends with `DISCLOSURE` ("Prepared with FixedYet (AI-assisted: NVIDIA Nemotron via Nebius Token Factory); reviewed and submitted by @<login>."). It is a constant, not an option.
 - The host runs only `git` (`init`, `fetch`, `checkout`, `am`, `push`, `rev-parse`) with hooks off and without the user's git config. Nothing from the project is executed on the host.
-- The MCP tool `propose_backport` never imports `pullrequest`. The web app imports it in one place, the maintainer-only backport job (`web/app.py: open_draft_pr`), which passes `target="fork"` and has no parameter, setting or code path for the upstream target.
+- The MCP tool `propose_backport` never imports `pullrequest`. The web app imports it in one place, the maintainer-only backport job (`web/app.py: open_draft_pr`), which passes `target="fork"`, or `target="upstream"` with `confirmed_upstream=True` only after the maintainer typed the upstream repository's name into the step-2 request (`confirm`); any other text is a 400 before GitHub is called.
 
 ### Web: reports page and maintainer mode
 
