@@ -9,7 +9,7 @@ Built for the Nebius x NVIDIA Global AI Hackathon 2026, Coding and Agentic Engin
 - **Live demo:** https://benlevin.fyi/fixedyet/, and every saved report at https://benlevin.fyi/fixedyet/reports. **Video (3 min):** _link added on submission_.
 - **Start here:** the [jinja#2244 report](https://benlevin.fyi/fixedyet/reports#real-pallets-jinja-2244). An open bug, then a one-line fix that FixedYet verified in the sandbox (911 tests pass with and without it): the same check the jinja maintainer asked for in the open upstream pull request.
 - **Run one yourself:** paste an issue from a pure-Python project tested with pytest. The judge code in the Devpost testing instructions gives judges their own daily runs.
-- **Measured:** on SWE-bench Verified, two full runs of 15 issues reproduced **12/15 and 10/15**, at **about $0.03 per issue**. Ten recent real issues run live gave **8 of 10** correct verdicts. Details in [Evaluation](#evaluation).
+- **Measured:** on SWE-bench Verified, three full runs of 15 issues reproduced **12/15, 10/15 and 11/15**, at **about $0.03 per issue**. The third run, with the rules v2 checks, called **no fixed bug open** (the first two had 3 and 4 such wrong `open_bug` verdicts; two more runs of the 7 instances that had ever had one still had 2 and 1). Ten recent real issues run live gave **8 of 10** correct verdicts, and the other 2 are now flagged `inconsistent` instead of wrong. Details in [Evaluation](#evaluation).
 - **Upstream pull requests:** [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043) is a backport FixedYet verified onto `v2.14-fixes` (6,250 tests, no new failure), open and ready for review. [nedbat/cog#98](https://github.com/nedbat/cog/pull/98) and [RDFLib/rdflib#3603](https://github.com/RDFLib/rdflib/pull/3603) start from FixedYet's reproductions and fixes, but were completed with Claude's help after FixedYet's first version, and the rdflib change needed a different approach after review.
 - **NVIDIA and Nebius:** every model call is NVIDIA Nemotron on Nebius Token Factory; [where, and what it changed](#where-nemotron-and-token-factory-are-used).
 - **Scope, plainly:** pure-Python projects tested with pytest. Every result here ran on the Docker sandbox backend; the Nebius Sandboxes backend is implemented and waiting for beta access.
@@ -68,8 +68,10 @@ flowchart LR
 | Reported version | Fix side (main) | Verdict |
 |---|---|---|
 | test fails | test passes | `fixed_on_main` |
-| test fails | test fails, same kind of error | `open_bug` |
-| test fails | test fails, different error | `inconsistent`, confidence low |
+| test fails | test fails the same way (the same error text) | `open_bug` |
+| test fails | test fails, different error or different error text | `inconsistent`, confidence low |
+| test fails | test fails the same way, on an exception the issue never names | `open_bug`, confidence low |
+| test fails | test fails the same way, and GitHub shows the issue closed as completed or a merged pull request that closes or mentions it | `open_bug`, confidence low |
 | test passes | test passes | `not_reproduced` |
 | test passes | test fails | `inconsistent` |
 | setup or collection error, or the environment could not be built | any | `unsupported` |
@@ -149,28 +151,29 @@ https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app
 
 The claim "reproduce before you answer" is only worth something if it is measured. The evaluation uses SWE-bench Verified: the base commit plays the reported version, the base commit plus the gold patch plays `main`, and the agent never sees the patch or SWE-bench's own tests. An instance counts as reproduced when the agent's own test fails at the base commit and passes with the patch, in every run.
 
-**Measured on 2026-10-21: 12 of 15 instances reproduced in one full run and 10 of 15 in the other** (80% and 67%; 95% intervals 55-93% and 42-85%). The 15 instances (`eval/instances.txt`) come from light pure-Python projects (requests, pytest, pylint, Flask) whose fixing pull requests date from 2014 to 2023. Both runs used the same code (commit `348a63f`), Nemotron 3 Super with Nemotron 3 Nano for intake, and a **local Docker sandbox** (Colima on an Apple-silicon Mac). The live demo uses the same Docker backend on a 1 GB Oracle Cloud VM.
+**Measured on 2026-10-21: 12, 10 and 11 of 15 instances reproduced in three full runs** (80%, 67% and 73%; 95% intervals 55-93%, 42-85% and 48-89%). The 15 instances (`eval/instances.txt`) come from light pure-Python projects (requests, pytest, pylint, Flask) whose fixing pull requests date from 2014 to 2023. Runs A and B used commit `348a63f` (rules v1); run C used the rules v2 commits (`5032c35` to `1341466`). All three used Nemotron 3 Super with Nemotron 3 Nano for intake and a **local Docker sandbox** (Colima on an Apple-silicon Mac). The live demo uses the same Docker backend on a 1 GB Oracle Cloud VM.
 
-| Metric | Run A | Run B |
-|---|---|---|
-| Reproduction rate (`fixed_on_main`) | 12/15 (80.0%) | 10/15 (66.7%) |
-| Wrong open-bug rate (`open_bug`) | 3/15 (20.0%) | 4/15 (26.7%) |
-| Not reproduced rate | 0/15 (0.0%) | 0/15 (0.0%) |
-| Inconsistent rate | 0/15 (0.0%) | 0/15 (0.0%) |
-| Setup failure rate (`unsupported`) | 0/15 (0.0%) | 1/15 (6.7%) |
-| Needs-info rate | 0/15 (0.0%) | 0/15 (0.0%) |
-| Mean cost per issue | $0.031 | $0.031 |
-| Median cost per issue | $0.025 | $0.022 |
-| Mean wall time per issue | 1m24s | 1m33s |
-| Total cost of the run | $0.47 | $0.46 |
+| Metric | Run A (v1) | Run B (v1) | Run C (rules v2) |
+|---|---|---|---|
+| Reproduction rate (`fixed_on_main`) | 12/15 (80.0%) | 10/15 (66.7%) | 11/15 (73.3%) |
+| Wrong open-bug rate (`open_bug`) | 3/15 (20.0%) | 4/15 (26.7%) | 0/15 (0.0%) |
+| Wrong open bug at high confidence | 3/15; 1 after the v2 re-score | 4/15; 2 after the v2 re-score | 0/15 |
+| Not reproduced rate | 0/15 (0.0%) | 0/15 (0.0%) | 1/15 (6.7%) |
+| Inconsistent rate | 0/15 (0.0%) | 0/15 (0.0%) | 1/15 (6.7%) |
+| Setup failure rate (`unsupported`) | 0/15 (0.0%) | 1/15 (6.7%) | 1/15 (6.7%) |
+| Needs-info rate | 0/15 (0.0%) | 0/15 (0.0%) | 1/15 (6.7%) |
+| Mean cost per issue | $0.031 | $0.031 | $0.027 |
+| Median cost per issue | $0.025 | $0.022 | $0.021 |
+| Mean wall time per issue | 1m24s | 1m33s | 1m17s |
+| Total cost of the run | $0.47 | $0.46 | $0.41 |
 
-What went wrong, plainly: **the misses are the model's tests, not the environment.** In 3 instances (pytest-7432, pylint-4970, pylint-6528) the test fails on both sides in both runs, so FixedYet would have called a fixed bug still open (the "wrong open-bug" rate); requests-2317 and pylint-4604 each missed once. Each time the test asked for more than the fix delivers, had a wrong expectation or called an API that does not exist. The one "setup failure" in run B is that last kind: a test naming a class that does not exist. All 15 environments built in both runs, after the harness fixes the development runs found (listed in the evaluation page).
+What went wrong, plainly: **the misses are the model's tests, not the environment.** In runs A and B every wrong verdict was an `open_bug` from a test that fails on both sides for its own reason: it asked for more than the fix delivers, had a wrong expectation or called an API that does not exist. Rules v2 reads that from the two logs, with no model: a failure whose text changes between the sides is `inconsistent`, an exception the issue never names lowers the confidence, and so does an issue GitHub shows as closed as completed or closed by a merged pull request. The agent is also told when its own test fails for the wrong reason. Re-scoring the saved runs with no model call cut the wrong open bugs at high confidence from 3 to 1 (run A) and from 4 to 2 (run B); in two more runs of the seven instances that had ever come out `open_bug`, 2 and 1 remained. Those that remain (pylint-6528, requests-2317) fail the same way on both sides with an assertion, which no rule over two logs can tell from a real open bug. `fixedyet rescore` applies the rules to saved reports; the numbers, the per-instance history and the limits are in [`docs/evaluation.md`](docs/evaluation.md#results-rules-v2).
 
 What the numbers do not say:
 
-- **Contamination.** Nemotron may have seen these public issues and their fixes during training, and several reproduced tests are the issue's own snippet. The score partly measures recall. The live check on ten recent real issues (none from SWE-bench, opened July to October 2026) gave **8 correct verdicts out of 10** after two environment fixes it exposed (6 of 10 before them); both misses were wrong model-written tests. The table is in [`docs/evaluation.md`](docs/evaluation.md#live-check-on-real-issues).
-- **Small sample, noisy model.** One instance is 6.7 points, and the two runs differ by two instances.
-- **`fixed_on_main` is necessary, not sufficient.** I read all 22 reproduced tests against their issues; that audit was done by an AI (Claude), not a person, and found a few weaknesses (one test calls a live server). A person has not audited them.
+- **Contamination.** Nemotron may have seen these public issues and their fixes during training, and several reproduced tests are the issue's own snippet. The score partly measures recall. The live check on ten recent real issues (none from SWE-bench, opened July to October 2026) gave **8 correct verdicts out of 10** after two environment fixes it exposed (6 of 10 before them); both misses were wrong model-written tests, and rules v2 flags both as `inconsistent`. Four controls on real open bugs keep `open_bug` under rules v2 (jinja#2244, dateutil#1588 and marshmallow#3072 at high confidence; click#2827 at low, because it was closed by an opt-in pull request). The table is in [`docs/evaluation.md`](docs/evaluation.md#live-check-on-real-issues).
+- **Small sample, noisy model.** One instance is 6.7 points, and runs A and B differ by two instances.
+- **`fixed_on_main` is necessary, not sufficient.** I read all 22 reproduced tests of runs A and B against their issues; that audit was done by an AI (Claude), not a person, and found a few weaknesses (one test calls a live server). A person has not audited them, and the 11 of run C have not been read.
 
 The per-instance verdicts, costs and failure causes, the metric definitions, the audit and how to rerun are in [`docs/evaluation.md`](docs/evaluation.md). The raw results are in `eval/results/`.
 
@@ -183,7 +186,7 @@ Measured: **$0.031 on average and $0.024 at the median** per issue at Token Fact
 - **Pure-Python projects that test with pytest.** That is what the environment builder installs and what the verdict runs.
 - **No services or databases.** An issue that needs a running database, a message broker or a browser is reported as `unsupported`, not guessed at.
 - **Old versions can fail to install.** Setup failures are their own verdict and their own metric.
-- **A failing test is not proof of the reported bug.** The model can write a test that fails for another reason. Two runs per side and the `inconsistent` verdict reduce this, but a person should still read the test.
+- **A failing test is not proof of the reported bug.** The model can write a test that fails for another reason. Two runs per side, the `inconsistent` verdict and the rules v2 checks reduce this, but a test that fails the same way on both sides for its own reason still reads as an open bug, so a person should read the test.
 - **Training contamination.** Nemotron may have seen SWE-bench issues and their fixes; the live runs on recent issues are the check against it.
 - **The Nebius Sandboxes backend has not run against the live service yet.** Every result came from the Docker backend.
 

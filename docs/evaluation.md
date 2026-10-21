@@ -1,6 +1,6 @@
 # Evaluation
 
-This page says how FixedYet is measured on SWE-bench, what counts as a success, what the numbers cannot tell you, and how to rerun them. The results section at the end is the measured run, copied from `eval/results/`.
+This page says how FixedYet is measured on SWE-bench, what counts as a success, what the numbers cannot tell you, and how to rerun them. The results sections at the end are the measured runs, copied from `eval/results/`: rules v2 first, then the first measurement (rules v1), kept as history.
 
 ## What is measured
 
@@ -25,6 +25,7 @@ An instance counts as **reproduced** when the verdict is `fixed_on_main`: the ag
 | Reproduction rate | `fixed_on_main` | the test fails at the base commit and passes with the patch |
 | of which high confidence | `fixed_on_main`, confidence high | both runs agree on both sides |
 | Wrong open-bug rate | `open_bug` | the test fails on both sides, so the tool would wrongly call the bug still open |
+| Wrong open bug at high confidence | `open_bug`, confidence high | the wrong open bugs no rule flagged: the ones a maintainer would have trusted |
 | Not reproduced rate | `not_reproduced` | the test passes at the base commit |
 | Inconsistent rate | `inconsistent` | the test passes at base but fails with the patch, or runs disagree |
 | Setup failure rate | `unsupported` | the environment could not be built, or the test errored |
@@ -87,6 +88,29 @@ FIXEDYET_SANDBOX=docker .venv/bin/fixedyet eval --dataset verified \
 
 `main(argv)` in `src/fixedyet/eval/run.py` is the same entry point behind `fixedyet eval`.
 
+### Re-scoring saved results
+
+`fixedyet rescore` runs the verdict rules again over results that are already on disk, with no model call and no sandbox run: the stored side runs go through `verdict.decide` again, with the issue thread (the cached SWE-bench problem statement, or the issue from GitHub) and the issue's GitHub status. It is how a change to the rules is measured before any money is spent, and how old reports on a server catch up with new rules.
+
+```sh
+# The saved eval runs and the saved live reports, with the labels of the live issues
+fixedyet rescore eval/results/20261021T114507Z.json eval/results/20261021T115553Z.json \
+    eval/live/20261021 --labels eval/live-labels.txt --md eval/results/rescore.md
+
+# A server's runs directory: read only first, then in place
+fixedyet rescore /var/lib/fixedyet/runs
+fixedyet rescore /var/lib/fixedyet/runs --write
+```
+
+| Flag | Effect |
+|---|---|
+| `--write` | update each changed `assessment.json` and its `report.md`, atomically, keeping the file's mode and owner. The first verdict is kept in `Assessment.rescored`, and the basis ends with "re-scored by rules v2". A second run changes nothing. Eval results and saved web reports are never written |
+| `--offline` | no GitHub and no dataset download. The rule about an exception the issue never names then keeps what the assessment says, and the issue status is the stored one |
+| `--labels FILE` | `<issue URL or instance id> <open\|fixed\|bad_test>` per line: the truth for live issues, for the "wrong open bug" and "real open bugs kept" counts. Eval instances are `fixed` by construction |
+| `--md FILE` | also write the summary |
+
+The labels of the live issues are in `eval/live-labels.txt`; the reports they label, as the demo saved them on 2026-10-21, are in `eval/live/20261021/`.
+
 Needs: a filled-in `.env` (Token Factory key and sandbox access; see `.env.example`), or `FIXEDYET_SANDBOX=docker` with a local Docker daemon. The first run downloads the dataset from the Hugging Face datasets-server (free, no key) and caches it as JSON in `eval/cache/`, which is not committed.
 
 | Flag | Default | Effect |
@@ -114,11 +138,110 @@ Behaviour worth knowing:
 - **The fix side is the gold patch.** In live mode the fix side is the current main branch, which has other changes too. Eval mode isolates the one fix.
 - **Contamination.** Nemotron may have seen SWE-bench issues and their fixes during training. A high score on these instances partly measures recall. The live runs on open issues, which have no public fix yet, are the check against this, and the results below keep the two apart.
 - **Environment gap.** See above: plain editable installs against SWE-bench's pinned images. The fix side reinstalls the project after the gold patch is applied, and a reinstall can change dependency versions, so the two sides are only guaranteed to share one environment when the baseline already satisfies what the project declares. That is how the flask-5014 bug below showed up: the base side errored while the fix side ran.
-- **Local Docker, not the demo's sandbox.** The numbers were measured on a local Docker daemon. The live demo runs on Nebius microVMs, with the same scripts but a different base image and different wall times.
+- **A laptop's Docker, not the demo's server.** The SWE-bench numbers were measured on a local Docker daemon (Colima on an Apple-silicon Mac). The live demo uses the same Docker backend and the same scripts on a 1 GB Oracle Cloud VM, so its wall times differ. The Nebius Sandboxes backend is implemented but has never run against the live service: no number on this page comes from it.
 
-## Results
+## Results, rules v2
 
-Measured on 2026-10-21. Two complete runs of the 15 instances on the same code (A and B), preceded by three development runs that found harness bugs and are listed at the end. The tables below put the two final runs side by side. Every number comes from the files the runner wrote (`eval/results/20261021T114507Z` for A, `eval/results/20261021T115553Z` for B); nothing was edited by hand.
+Measured on 2026-10-21 (UTC, evening), after the first measurement further down. Every wrong verdict of that first measurement, on SWE-bench and on the live issues, was an `open_bug` from a model-written test that failed on both sides for a reason other than the bug. Rules v2 (`verdict.RULES_VERSION`, commits `5032c35` to `1341466`) changes two things.
+
+The verdict rules (no model, see [the decision matrix](architecture.md#decision-matrix-verdictpy)):
+
+- **The failure text must match.** A fail/fail whose `E` lines differ between the sides is `inconsistent`, low. The lines come from the last run's whole log (`SideRun.failure_detail`), with memory addresses, durations, line numbers, `/tmp` and `pytest-of` paths and the `.dYYYYMMDD` local version suffix normalised; the basis quotes the first line that differs on each side.
+- **An exception the issue never names** (not AssertionError, not pytest's `Failed`) keeps `open_bug` but at low confidence: it is more often the test's own misuse of the API than the bug.
+- **The issue's state on GitHub.** An open bug whose issue was closed as completed, or that a merged pull request of the same repository closes or mentions, gets low confidence and a basis line naming the date and the pull request (GraphQL `closedByPullRequestsReferences` and the closing event when there is a token, the REST timeline without). Open linked pull requests are stored in the report and listed in it, and fix mode warns about them before it starts.
+
+The test-writing agent is also told when its test fails for the wrong reason: a pytest plugin in its own runs flags `==` between unrelated types, a crash on the test's own line with "has no attribute" or "unexpected keyword argument" (or "no such option" anywhere) is flagged as an API that may not exist, and a first submit whose failure lacks the exception or message the issue reports is sent back once.
+
+### Offline re-score of the saved runs
+
+No model call: `fixedyet rescore` ran the v2 rules over the stored sandbox runs of the five SWE-bench runs and the fifteen reports the demo saved on 2026-10-21 (`eval/live/20261021/`, labelled in `eval/live-labels.txt`). The full output is `eval/results/rescore-20261021.md`.
+
+| Saved results | Instances | `fixed_on_main` | `open_bug` | Wrong open bug at high confidence | Real open bugs kept |
+|---|---|---|---|---|---|
+| Run A (`20261021T114507Z`) | 15 | 12 (unchanged) | 3 → 2 | **3 → 1** | - |
+| Run B (`20261021T115553Z`) | 15 | 10 (unchanged) | 4 → 3 | **4 → 2** | - |
+| Development run `110000Z` | 15 | 9 | 4 → 3 | 4 → 2 | - |
+| Development run `111954Z` | 15 | 11 | 2 | 2 | - |
+| Development run `113010Z` | 15 | 11 | 2 | 2 → 1 | - |
+| Live reports from the demo | 15 reports of 13 issues | 8 (unchanged) | 6 → 4 | **2 → 0** | 4 of 4 (3 at high confidence) |
+
+What moved:
+
+- pytest-7432 (A, B and a development run): `open_bug` → `inconsistent`. At the base commit the skip line names `src/_pytest/skipping.py`, the bug; with the gold patch it names the test file, under another name than the test expects. The failure changed, so the fix side does not show the same bug.
+- pylint-4970 (A, B and a development run) and pylint-4604 (a development run): `open_bug` stays, at low confidence: the tests died on `TypeError`, `OptionError` and `AttributeError`, which the issues never name.
+- pytest-mock#639: `open_bug` → `inconsistent`. The introspection the issue is about is gone on main; the test failed on both sides only because its own call can never pass.
+- pyparsing#693: `open_bug` → `inconsistent`. On main the comment is no longer in the result (`ParseResults(['x'])`), and the test still fails because it compares a `ParseResults` with a list.
+- click#2827: `open_bug` stays, at low confidence: the issue was closed as completed on 2026-05-16 by pull request #3391. That pull request added an opt-in capture mode; the default behaviour the issue reports is unchanged on main, so `open_bug` is right and the closing is worth the warning.
+- marshmallow#3072, dateutil#1588 and jinja#2244, the real open bugs, keep `open_bug` at high confidence. Each now lists its open pull request.
+- Unchanged: every `fixed_on_main`. The rules only read fail/fail rows.
+
+What did not move, and cannot by rule: pylint-6528 (four of the five saved runs), requests-2317 (B and a development run) and pytest-6202 (a development run). Each fails the same way on both sides with an AssertionError. In pylint-6528 the issue itself is wrong about pylint's default ignore pattern and the test asks for what the issue asks; in requests-2317 the test checks `compat.builtin_str` directly while the gold patch fixes `Session.request`; in pytest-6202 the test expects a node id without its file path. Only a reader of the test can see these. The fourth miss of development run `110000Z`, requests-5414, was a harness bug fixed before run A (a pytest crash read as a failure).
+
+### New live runs
+
+Same setup as the first measurement: SWE-bench Verified, local Docker (Colima on an Apple-silicon Mac), Nemotron 3 Super with Nemotron 3 Nano for intake, concurrency 2. The seven-id runs used commit `ec644cb`, run C `cb2d662` (the same code plus a re-score input). Three runs, in this order: the seven instances that ever came out `open_bug` (in any of the five saved runs), twice, and then the full fifteen once, to check that the new rules and notes did not cost reproductions.
+
+| Run | Results file | Instances | `fixed_on_main` | Wrong `open_bug` | of which high confidence | `inconsistent` | Other | Cost |
+|---|---|---|---|---|---|---|---|---|
+| **C, the full set** | `20261021T210757Z` | 15 | **11 (73.3%)** | **0** | **0** | 1 | 1 `not_reproduced`, 1 `unsupported`, 1 `needs_info` | $0.41 |
+| Seven ids, run 1 | `20261021T205338Z` | 7 | 2 | 3 | 2 | 1 | 1 `not_reproduced` | $0.37 |
+| Seven ids, run 2 | `20261021T205948Z` | 7 | 4 | 1 | 1 | 1 | 1 `not_reproduced` | $0.20 |
+
+Run C against the first measurement: 11 of 15 reproduced, between run A's 12 and run B's 10, so the reproduction rate did not drop (95% Wilson interval 48% to 89%). The wrong open bugs went from 3 and 4 to none. Mean cost per issue $0.027 (median $0.021), mean wall time 1m17s.
+
+The seven instances across all five runs (verdict, confidence):
+
+| Instance | v1, run A | v1, run B | v2, ids run 1 | v2, ids run 2 | v2, run C |
+|---|---|---|---|---|---|
+| pytest-7432 | **open_bug, high** | **open_bug, high** | inconsistent, low | inconsistent, low | inconsistent, low |
+| pylint-4970 | **open_bug, high** | **open_bug, high** | open_bug, low | not_reproduced | not_reproduced |
+| pylint-6528 | **open_bug, high** | **open_bug, high** | **open_bug, high** | **open_bug, high** | fixed_on_main |
+| requests-5414 | fixed_on_main | fixed_on_main | fixed_on_main | fixed_on_main | fixed_on_main |
+| pytest-6202 | fixed_on_main | fixed_on_main | fixed_on_main | fixed_on_main | fixed_on_main |
+| pylint-4604 | fixed_on_main | unsupported | not_reproduced | fixed_on_main | unsupported |
+| requests-2317 | fixed_on_main | **open_bug, high** | **open_bug, high** | fixed_on_main | needs_info |
+| **Wrong open bug at high confidence** | 3 of 7 | 4 of 7 | 2 of 7 | 1 of 7 | 0 of 7 |
+| Reproduced | 4 of 7 | 2 of 7 | 2 of 7 | 4 of 7 | 4 of 7 |
+
+Read per instance:
+
+- pytest-7432 is `inconsistent` in all three new runs, by the failure-text rule, every time for the reason above.
+- pylint-4970 was caught once by the exception rule (`TypeError`, low confidence); in the other two runs the model wrote a test that passes at the base commit, so `not_reproduced`. It has not been reproduced in any of the eight runs.
+- pylint-6528 and requests-2317 are the two wrong open bugs at high confidence that remain. They fail the same way on both sides with an assertion, which no rule can tell from a real open bug (see above). pylint-6528 was reproduced in run C, as in one of the development runs.
+- pylint-4604 in run C is the same test as run B: it names `variables.UnusedImportChecker`, which does not exist, and pytest cannot collect it on either side. The agent was told so after its run (an error before any assertion) and submitted it anyway. In the other runs the model kept sending files without a test function (rejected before a run), which is not new.
+- requests-2317 in run C is `needs_info`: Nemotron Nano read the issue as having no runnable reproduction, which it did not do in the other seven runs.
+
+The agent's notes, as the transcripts show them: the type-mismatch or API note appeared in 2 of the 29 new instance runs (requests-2317 run 1, pylint-7277 run C), and the symptom check sent a test back 4 times (requests-5414 three times, pytest-10051 once). For requests-5414 the issue reports a `UnicodeError` that this environment does not raise (urllib3 raises `LocationParseError`); the model said so and resubmitted, and the instance was reproduced each time. For pytest-10051 the bounce was a false alarm: a failed plain `assert` does not print the word AssertionError. That was fixed after run C (`1341466`); the runs above were made before it.
+
+Total model spend of the three runs and the four controls: $1.05 at list price, counted in the spend ledger.
+
+### Controls on real open bugs
+
+Run with `fixedyet run` on the local Docker backend at commit `ec644cb`, with a GitHub token (for the linked pull requests).
+
+| Issue | What is true | Before (demo, rules v1) | Now (rules v2) | Cost |
+|---|---|---|---|---|
+| [pallets/jinja#2244](https://github.com/pallets/jinja/issues/2244) | open; open pull request #2259 | `open_bug`, high | `open_bug`, high; lists #2259 | $0.027 |
+| [dateutil/dateutil#1588](https://github.com/dateutil/dateutil/issues/1588) | open; open pull requests #1589 (closes it) and #1575 (mentions it) | `open_bug`, high | `open_bug`, high; lists both | $0.008 |
+| [marshmallow-code/marshmallow#3072](https://github.com/marshmallow-code/marshmallow/issues/3072) | open; open pull request #3073 | `open_bug`, high | `open_bug`, high; lists #3073 | $0.023 |
+| [pallets/click#2827](https://github.com/pallets/click/issues/2827) | closed as completed by #3391, an opt-in; the default behaviour is unchanged | `open_bug`, high | `open_bug`, **low**: "the issue was closed as completed on 2026-05-16 by pull request #3391" | $0.005 |
+
+No real open bug lost its verdict. The four controls are few, and three of them were picked because FixedYet had already called them correctly, so they show that the new rules do not break known-good results, not how often they would on new issues.
+
+### Limits of rules v2
+
+- **Same failure, wrong test.** A test that fails the same way on both sides for its own reason (pylint-6528, requests-2317) is still an `open_bug` at high confidence. No rule over two pytest logs can tell it from a real open bug.
+- **Different text, same bug.** A fix side whose message changed for an unrelated reason (a reworded error, a newer pytest after the fix side's reinstall) now reads `inconsistent` although the bug is still there. Nothing like it happened in these runs; it would cost a real open bug its verdict, not create a wrong one.
+- **The exception rule reads only the issue.** An exception the reporter did not name but the bug really raises lowers a real open bug to low confidence. It needs the thread: `fixedyet rescore --offline` keeps whatever an assessment already says.
+- **GitHub's state is one more signal, not proof.** "Closed as completed" can mean an opt-in (click#2827), a fix in another repository, or a wrong closing. A merged pull request that only mentions the issue may be unrelated. Both only lower the confidence. Without a token the Development sidebar is not read.
+- **The agent's notes do not decide anything.** The type note, the API note and the symptom check change what the model reads; the verdict still comes from the two side runs, which do not load the plugin. The symptom check matches names and the first words of a quoted message, so it can send back a correct test once, at the price of one more model turn (it did for pytest-10051 before the fix for plain asserts).
+- **Small numbers.** Seven instances twice, one full run of fifteen, four controls. One instance is 6.7 points of a full run.
+- **Labels by an AI.** The truth of the live issues in `eval/live-labels.txt` was judged by Claude, not by a person.
+- **No second test.** The optional second test (a different angle, Nemotron 3 Ultra, on fail/fail only) was not built: Ultra's price is not in FixedYet's price table, so the spend ledger would have counted it at a guessed rate.
+
+## Results, rules v1 (first measurement)
+
+Kept as history: the numbers before rules v2, measured earlier on 2026-10-21. Two complete runs of the 15 instances on the same code (A and B), preceded by three development runs that found harness bugs and are listed at the end. The tables below put the two final runs side by side. Every number comes from the files the runner wrote (`eval/results/20261021T114507Z` for A, `eval/results/20261021T115553Z` for B); nothing was edited by hand.
 
 ### Run
 
@@ -127,7 +250,7 @@ Measured on 2026-10-21. Two complete runs of the 15 instances on the same code (
 | Date | 2026-10-21. Run A started 11:45 UTC, run B 11:55 UTC |
 | FixedYet commit | `348a63f` |
 | Model | `nvidia/nemotron-3-super-120b-a12b` writes the test; `NVIDIA-Nemotron-3-Nano-30B-A3B` extracts the issue contract. Both through Nebius Token Factory |
-| Sandbox backend | **Local Docker** (`FIXEDYET_SANDBOX=docker`; Colima on an Apple-silicon Mac, linux/arm64 `python:3.9` and `python:3.11` images). Not the Nebius microVM sandbox the live demo uses |
+| Sandbox backend | **Local Docker** (`FIXEDYET_SANDBOX=docker`; Colima on an Apple-silicon Mac, linux/arm64 `python:3.9` and `python:3.11` images). The live demo uses the same Docker backend on its own VM; the Nebius Sandboxes backend has not run live |
 | Dataset and ids | SWE-bench Verified, the 15 ids of `eval/instances.txt` |
 | Settings | concurrency 2, 1800 s per-instance timeout, $8 budget (never close: each run cost under $0.50) |
 | Results files | `eval/results/20261021T114507Z.{md,json}` (A), `eval/results/20261021T115553Z.{md,json}` (B) |
@@ -224,7 +347,7 @@ On 21 October 2026, ten real issues from ten pure-Python projects were run on th
 | [theskumar/python-dotenv#697](https://github.com/theskumar/python-dotenv/issues/697) | 2026-09-08 | `unsupported` at first; `fixed_on_main` after the fix below | yes after the fix: fixing commit `e0310e5`, released in 1.2.4 |
 | [pallets/jinja#2244](https://github.com/pallets/jinja/issues/2244) | 2026-08-27 | `unsupported` at first; `open_bug` after the fix below | yes after the fix: still open (an unmerged PR exists) |
 
-**First pass: 6 correct, 2 wrong, 2 without a verdict.** The two `unsupported` runs were environment failures, not model failures. python-dotenv's tests need its `cli` extra (click), which was never installed. jinja ships a requirements file for Python 3.7 that downgraded `trio` below what Python 3.13 can import. Both were fixed in general terms (`6a5d38d`, `a952ec1`: a project's own extras, other Pythons' requirements files skipped, a conftest that cannot load repaired from the project's own declared requirements), and both issues were then rerun on the demo. **After those fixes: 8 correct and 2 wrong out of 10.** Both wrong verdicts are `open_bug` from a wrong model-written test, the same failure mode as the SWE-bench misses.
+**First pass: 6 correct, 2 wrong, 2 without a verdict.** The two `unsupported` runs were environment failures, not model failures. python-dotenv's tests need its `cli` extra (click), which was never installed. jinja ships a requirements file for Python 3.7 that downgraded `trio` below what Python 3.13 can import. Both were fixed in general terms (`6a5d38d`, `a952ec1`: a project's own extras, other Pythons' requirements files skipped, a conftest that cannot load repaired from the project's own declared requirements), and both issues were then rerun on the demo. **After those fixes: 8 correct and 2 wrong out of 10.** Both wrong verdicts are `open_bug` from a wrong model-written test, the same failure mode as the SWE-bench misses. Re-scored by rules v2 (above, no model call), both become `inconsistent`, so none of the ten is wrong any more, and none of the eight correct verdicts changed.
 
 Two of the open bugs went on to [fix mode](../README.md#fix-mode-open-bugs-to-verified-draft-prs), and jinja#2244 was verified on the demo server. One fixed-on-main report went on to a backport: pydantic#13991 was backported to `v2.14-fixes` and opened upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043).
 

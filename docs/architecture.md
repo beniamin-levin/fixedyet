@@ -8,19 +8,21 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 |---|---|---|
 | `src/fixedyet/models.py` | lead | shared Pydantic models (done) |
 | `src/fixedyet/config.py` | core | `Settings` loaded from env and `.env` |
-| `src/fixedyet/github.py` | core | fetch issue and comments, duplicate search via GitHub search API |
+| `src/fixedyet/github.py` | core | fetch issue and comments, duplicate search via GitHub search API, the issue's status (`issue_status`: state, why it was closed, linked pull requests; GraphQL with a token, REST timeline without) |
 | `src/fixedyet/llm.py` | core | Token Factory client, usage and cost accounting, per-run and total budget guards |
 | `src/fixedyet/ledger.py` | core | persistent total-spend ledger (`FIXEDYET_LEDGER_PATH`, default `~/.local/state/fixedyet/spend-ledger.json`; an old `<runs_dir>/spend-ledger.json` is carried over), atomic and locked |
 | `src/fixedyet/untrusted.py` | core | `strip_hidden`: removes what GitHub hides from readers (HTML comments outside code, markdown comment definitions, invisible characters, a bot's `<details>`) before thread text reaches a model; `UNTRUSTED_RULE` for every system prompt |
 | `src/fixedyet/agent.py` | core | hand-written tool-calling loop that writes the reproduction test |
-| `src/fixedyet/verdict.py` | core | pure decision matrix |
+| `src/fixedyet/verdict.py` | core | pure decision matrix (`RULES_VERSION`), the failure-text comparison, the issue-state lines |
+| `src/fixedyet/rescore.py` | eval | `fixedyet rescore`: the rule table again over saved assessments and eval results, no model call; `--write` updates `assessment.json` in place |
+| `src/fixedyet/repro_plugin.py` | core | pytest plugin shipped into the agent's own test runs (not the side runs): a note on a failed `==` between unrelated types (standard library only) |
 | `src/fixedyet/evidence.py` | core | Tavily search and extract, fixing-commit and release lookup |
 | `src/fixedyet/report.py` | core | markdown rendering of an `Assessment` |
 | `src/fixedyet/pipeline.py` | core | `reproduce()` and `reproduce_instance()` |
 | `src/fixedyet/backport.py` | backport | branch detection, cherry-pick and suite gates, `backport()` and `BackportResult` |
 | `src/fixedyet/pullrequest.py` | backport | fork, push of the sandbox patch, draft pull request (`--open-pr` only), for backports and fixes |
 | `src/fixedyet/fixmode.py` | fix | fix mode for open bugs: localization, model edits, validation, sandbox verification, `attempt_fix()` and `FixResult` |
-| `src/fixedyet/cli.py` | core | `fixedyet run|backport|fix|doctor|eval|serve|mcp|gc` |
+| `src/fixedyet/cli.py` | core | `fixedyet run|backport|fix|doctor|eval|rescore|serve|mcp|gc` |
 | `src/fixedyet/sandbox/*` | sandbox | `Sandbox` protocol, Nebius and Docker backends |
 | `src/fixedyet/envbuild.py` | sandbox | baseline checkpoint builder |
 | `src/fixedyet/testdeps.py` | sandbox | test dependency installer; shipped into the baseline sandbox and run there (standard library only) |
@@ -100,7 +102,17 @@ class LLM:
 
 # verdict.py
 def decide(reported: SideRun | None, fix: SideRun | None, *, runnable: bool,
-           env_ok: bool) -> tuple[Verdict, Confidence, list[str]]
+           env_ok: bool, thread: str | None = None) -> tuple[Verdict, Confidence, list[str]]
+    # thread: the issue's title, body and comments; None skips the unnamed-exception rule
+def issue_state_lines(verdict: Verdict, status: IssueStatus | None) -> list[str]
+    # basis lines for an open bug GitHub says may be fixed; each caps confidence at low
+def is_rule_line(line: str) -> bool   # a basis line the rules wrote (any version); rescore uses it
+RULES_VERSION: str                    # "v2"; Assessment.rules records it
+
+# rescore.py
+def rescore_assessment(a: Assessment, *, thread: str | None = None,
+                       status: IssueStatus | None = None, at: datetime | None = None) -> Assessment
+    # pure; returns `a` itself when nothing changes. Never touches needs_info or unsupported.
 
 # pipeline.py
 async def reproduce(issue_url: str, *, fix_ref: str | None = None, settings: Settings | None = None,
@@ -165,15 +177,21 @@ def confirm_upstream(repo: str, *, assume_yes: bool = False) -> bool       # typ
 | Reported side | Fix side | Verdict |
 |---|---|---|
 | FAIL | PASS | fixed_on_main |
-| FAIL | FAIL, same kind of failure | open_bug |
+| FAIL | FAIL, the same failure text | open_bug |
 | FAIL | FAIL, different kind of failure (say AssertionError, then TypeError) | inconsistent, low |
+| FAIL | FAIL, same kind, different failure text (the `E` lines, normalised) | inconsistent, low |
+| FAIL | FAIL on an exception other than AssertionError or `Failed` that the thread never names | open_bug, low |
 | PASS | PASS | not_reproduced |
 | PASS | FAIL | inconsistent |
 | ERROR, or env build failed | any | unsupported |
 | contract not runnable | - | needs_info |
 | runs disagree on either side | - | inconsistent, confidence low |
 
-Confidence is high only when every run on both sides agrees and neither side errored.
+Confidence is high only when every run on both sides agrees and neither side errored, and no rule or caveat lowered it.
+
+Rules v2 (`verdict.RULES_VERSION`). The failure text is `SideRun.failure_detail`, the `E` lines of the last run read from the whole run log (its last 8,000 bytes), not from the 3,000-character excerpt; a report saved before the field falls back to the excerpt. `normalise_failure` removes what differs between two runs of the same failure: memory addresses, durations, line numbers, `/tmp` and `pytest-of` paths, the `.dYYYYMMDD` local version of a dirty tree, pytest's "Use -v" hints. An open bug also gets low confidence, with a basis line naming the date and the pull request, when GitHub says the issue was closed as completed or a merged pull request of the same repository closes or mentions it (`issue_state_lines`). The pipeline's caveats (no version stated, an extra that could not be installed) cap it too.
+
+The Assessment keeps what the rules need to run again without a model call: the sides (with `failure_detail`), the contract, the issue status (`IssueStatus`, with the linked pull requests) and `rules`. `fixedyet rescore` reads them back; the lines of the old basis that `is_rule_line` does not recognise are the caveats, which it keeps.
 
 An `unsupported` verdict caused by an errored side says why in its basis (`verdict.error_reason`: pytest could not load the project's conftest or a plugin, could not collect the test file, or the ref needs a newer Python than the sandbox has). `verdict.is_setup_error` is the same reading for the test-writing agent, which is told that such an error is not a failure of its test.
 

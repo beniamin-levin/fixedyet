@@ -1,5 +1,5 @@
 # Ground truth for the live issues of docs/evaluation.md ("Live check on real issues"), read by
-# `fixedyet rescore --labels eval/live-labels.txt`. Judged on 2026-10-21 and 2026-10-22 against
+# `fixedyet rescore --labels eval/live-labels.txt`. Judged on 2026-10-21 against
 # each issue thread, the project's history and the saved runs, by an AI (Claude), not by a person.
 #
 #   open      the reported behaviour is still there on the default branch
