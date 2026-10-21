@@ -38,7 +38,7 @@ Other parts: **Tavily** search and extract find duplicates, upstream reports and
 How Token Factory sped the work up:
 
 - **An OpenAI-compatible endpoint.** The agent loop is the stock `openai` client with a different base URL: no SDK and no agent framework to learn, and Nano and Super sit behind the same client.
-- **The price made measuring cheap.** A run averages about 90,000 input and 5,000 output tokens, about $0.03 at $0.30 / $0.90 per million for Super. A full 15-issue SWE-bench run cost $0.47, so the evaluation was run twice, and the ten live issues were run again after the environment fixes they exposed.
+- **The price made measuring cheap.** A run averages about 90,000 input and 5,000 output tokens, about $0.03 at $0.30 / $0.90 per million for Super. A full 15-issue SWE-bench run cost $0.47, so the evaluation was run twice, and live issues were run again after each environment fix they exposed.
 - **Fast enough for a live demo.** About 15 model calls a run fit in a mean wall time of 1.5 minutes per SWE-bench issue, sandbox time included.
 
 ## How it works
