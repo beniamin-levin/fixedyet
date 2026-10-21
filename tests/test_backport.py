@@ -179,6 +179,13 @@ def test_pick_script_rejects_anything_that_is_not_a_commit_hash() -> None:
             bp.pick_script(bad)
 
 
+def test_suite_script_switches_off_plugins_that_replace_the_summary_line() -> None:
+    # pytest-pretty (in pydantic's test dependencies) prints "Results (12.3s):" and a table in
+    # place of "N passed in 12.3s"; parse_suite would then see no summary and call it not run.
+    script = bp.suite_script()
+    assert "-p no:pretty" in script and "-p no:sugar" in script
+
+
 def test_suite_script_runs_everything_with_the_nine_hundred_second_limit() -> None:
     script = bp.suite_script()
     assert "timeout -k 10 900 python -m pytest" in script

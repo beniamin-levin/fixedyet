@@ -303,14 +303,17 @@ def suite_script(timeout_s: int = SUITE_TIMEOUT_S) -> str:
     """Run the project's own tests once, every test (no ``-x``), and echo the end of the log.
 
     ``--continue-on-collection-errors`` keeps one module that cannot be imported from hiding the
-    rest; ``--maxfail=0`` undoes a ``-x`` the project's own addopts might set.
+    rest; ``--maxfail=0`` undoes a ``-x`` the project's own addopts might set. ``-p no:pretty``
+    and ``-p no:sugar`` switch off plugins that replace pytest's summary line, which
+    `parse_suite` reads (pydantic's test dependencies bring pytest-pretty).
     """
     return "\n".join(
         [
             "set -u",
             "export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1",
             f"cd {REPO_DIR} || {{ echo __SETUP_FAILED__=cd; exit 20; }}",
-            f"timeout -k 10 {int(timeout_s)} python -m pytest -q -p no:cacheprovider --maxfail=0 "
+            f"timeout -k 10 {int(timeout_s)} python -m pytest -q -p no:cacheprovider -p no:pretty "
+            "-p no:sugar --maxfail=0 "
             "--continue-on-collection-errors --tb=line -rfE > /tmp/ir_suite.log 2>&1",
             "rc=$?",
             f"tail -c {SUITE_LOG_BYTES} /tmp/ir_suite.log | {_PREFIX_LINES}",
