@@ -100,7 +100,7 @@ MAX_NAMES = 40
 MAX_READ_BYTES = 400_000
 FEEDBACK_CHARS = 3_500
 ISSUE_CHARS = 8_000
-FIX_MAX_TOKENS = 12_000  # the reasoning model spends part of this thinking before it answers
+FIX_MAX_TOKENS = 16_000  # the reasoning model spends part of this thinking before it answers
 APPLY_TIMEOUT_S = 300
 SURVEY_TIMEOUT_S = 300
 
@@ -722,6 +722,7 @@ _EXPLANATION = re.compile(r"^\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:\s*(?P<text>.*)
 
 @dataclass
 class Proposal:
+    cut_off: bool = False  # the answer ran out of tokens (the model thought too long)
     summary: str = ""
     explanation: str = ""
     edits: list[FileEdit] = field(default_factory=list)
@@ -1259,6 +1260,7 @@ class _FixRun:
     test_path: str = ""
     test_code: str = ""
     suite_before: SuiteRun | None = None
+    brief: bool = False  # ask without the model's reasoning (after an answer was cut off)
 
     async def go(self) -> None:
         result, rep = self.result, self.assessment.reproduction
@@ -1434,8 +1436,10 @@ class _FixRun:
         needed = estimate_max_cost_usd(self.settings.model, messages, None, FIX_MAX_TOKENS)
         return self.usage.cost_usd + needed <= self.budget + 1e-9, needed
 
-    async def _ask(self, messages: list[dict[str, Any]]) -> tuple[str, float] | None:
-        """One model call. None (and the result concluded) when the budget cannot cover it."""
+    async def _ask(self, messages: list[dict[str, Any]]) -> tuple[str, float, bool] | None:
+        """One model call: ``(text, cost, cut off)``. None (and the result concluded) when the
+        budget cannot cover it. After an answer that was cut off before it said anything, the
+        next call asks for the answer without the model's long reasoning."""
         affordable, needed = self._affordable(messages)
         if not affordable:
             _conclude(self.result, FixStatus.NOT_FIXED,
@@ -1444,11 +1448,16 @@ class _FixRun:
                       "verified fix was found")
             return None
         spent = self.usage.cost_usd
-        answer = await self.llm.chat(messages, max_tokens=FIX_MAX_TOKENS, temperature=0.2)
+        answer = await self.llm.chat(
+            messages, max_tokens=FIX_MAX_TOKENS, temperature=0.2,
+            thinking=False if self.brief else None,
+        )
+        cut_off = answer.finish_reason == "length"
         messages.append({"role": "assistant", "content": answer.content or ""})
-        if not answer.content.strip() and answer.finish_reason == "length":
+        if not answer.content.strip() and cut_off:
             messages[-1]["content"] = "(the answer was cut off before it began)"
-        return answer.content, self.usage.cost_usd - spent
+            self.brief = True
+        return answer.content, self.usage.cost_usd - spent, cut_off
 
     async def _attempts(self, context: _Context, prompt: str) -> None:
         result = self.result
@@ -1464,10 +1473,11 @@ class _FixRun:
             asked = await self._ask(messages)
             if asked is None:
                 return
-            text, cost = asked
+            text, cost, cut_off = asked
             cost += extra_cost
             extra_cost = 0.0
             proposal = parse_proposal(text)
+            proposal.cut_off = cut_off
             if proposal.needs and not proposal.edits and not proposal.gave_up and may_ask:
                 may_ask = False
                 extra_cost = cost  # the next answer's attempt carries this call's cost
@@ -1544,6 +1554,11 @@ class _FixRun:
         the model, or None when the whole fix was concluded here (the suite cannot run)."""
         if not proposal.edits:
             attempt.outcome = "no_edits"
+            if proposal.cut_off:
+                attempt.reason = ("the answer ran out of tokens before any edit (the model's "
+                                  "reasoning used them up)")
+                return ("Your answer was cut off before it gave any edit. Answer now, briefly: "
+                        "SUMMARY, EXPLANATION, then FILE and SEARCH/REPLACE blocks.")
             attempt.reason = "; ".join(proposal.problems) or "no edit block in the answer"
             return ("Your answer held no usable edit (" + attempt.reason + "). Answer in the "
                     "required format: SUMMARY, EXPLANATION, then FILE and SEARCH/REPLACE blocks.")

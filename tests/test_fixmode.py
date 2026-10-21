@@ -552,6 +552,9 @@ class ScriptedSandbox:
         return [c["kind"] for c in self.calls]
 
 
+CUT_OFF = "<cut off>"  # an answer that ran out of tokens before it said anything
+
+
 class FakeLLM:
     """Answers in turn; each answer costs ``cost`` dollars."""
 
@@ -560,14 +563,19 @@ class FakeLLM:
         self.usage = Usage()
         self.cost = cost
         self.prompts: list[list[dict[str, Any]]] = []
+        self.thinking: list[bool | None] = []
 
-    async def chat(self, messages: list[dict[str, Any]], **_: Any) -> ChatResult:
+    async def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> ChatResult:
         self.prompts.append([dict(m) for m in messages])
+        self.thinking.append(kwargs.get("thinking"))
         answer = self.answers.pop(0)
         if isinstance(answer, BaseException):
             raise answer
         self.usage.llm_calls += 1
         self.usage.cost_usd += self.cost
+        if answer == CUT_OFF:
+            return ChatResult(content="", finish_reason="length",
+                              usage=Usage(llm_calls=1, cost_usd=self.cost))
         return ChatResult(content=answer, usage=Usage(llm_calls=1, cost_usd=self.cost))
 
 
@@ -755,6 +763,15 @@ async def test_a_second_need_counts_as_an_attempt_without_edits() -> None:
     assert [a.outcome for a in result.attempts] == ["no_edits", "verified"]
 
 
+async def test_an_answer_cut_off_by_the_token_limit_is_named_and_the_next_call_is_brief() -> None:
+    result, _, llm = await run_fix([CUT_OFF, GOOD])
+    assert result.status is FixStatus.VERIFIED
+    first = result.attempts[0]
+    assert first.outcome == "no_edits" and "ran out of tokens" in first.reason
+    assert "cut off" in llm.prompts[1][-1]["content"]
+    assert llm.thinking == [None, False]
+
+
 async def test_cannot_fix_stops_at_once_with_the_models_reason() -> None:
     result, sandbox, _ = await run_fix(["CANNOT_FIX: the test compares ParseResults to a list"])
     assert result.status is FixStatus.NOT_FIXED
@@ -917,3 +934,14 @@ def test_the_fix_command_writes_the_result_and_the_preview(
     text = preview.read_text()
     assert "head: alice:fixedyet/fix-42" in text and text.count("reviewed and submitted by") == 1
     assert "# Verified fix" in capsys.readouterr().out
+
+
+async def test_an_assessment_with_a_fix_gains_a_fix_section() -> None:
+    from fixedyet.report import render_markdown
+
+    result, _, _ = await run_fix([GOOD])
+    a = assessment()
+    a.fix = result
+    text = render_markdown(a)
+    assert "## Fix" in text and "**Status:** `verified`" in text
+    assert text.index("## Fix") < text.index("## Usage")
