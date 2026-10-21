@@ -131,9 +131,15 @@ claude mcp add fixedyet -- /path/to/fixedyet/.venv/bin/fixedyet mcp
 
 Any other MCP client takes the same command as a stdio server, with `NEBIUS_API_KEY` and `TAVILY_API_KEY` in its environment. A run takes a few minutes and spends credits, so the assistant should call the tools on purpose.
 
+## Evidence and the fixing commit
+
+After the verdict, Tavily and GitHub look for reports of the same bug, the fix and the release that ships it. A web hit is kept only when it cites the issue or names the issue's own identifiers (`host_is_trusted`, `validate.Email`, the class the title quotes), with stricter rules the further it is from the project: on the 13 saved live reports the evidence went from 68 items with 43 noise (a company called Marshmallow, a blog post, an unrelated CVE, four unrelated pull requests) to 31 items with 1, for 2 more Tavily credits in all. A same-repository issue is a "similar issue" unless the thread calls it a duplicate. The release comes from the project's own changelog first, then its release notes.
+
+When the bug is fixed on `main` but no merged pull request references the issue, `git bisect run` finds the fixing commit in the sandbox, offline, with the reproduction test, at most 12 steps; only a commit the test confirms (fails at its parent, passes at it) is recorded, so that it can be backported. On werkzeug#3312 it found the merge that brought the fix to `main` in 5 test runs, and named the commit a maintainer had pointed to as its first candidate. Details and the measurement in [docs/evidence.md](docs/evidence.md).
+
 ## Verified backports (draft PRs)
 
-A bug fixed on `main` is still broken for everyone on the release they use. `fixedyet backport` cherry-picks the fixing commit onto the maintenance branch of the reported version and proves it there: the reproduction test must fail before and pass after, and the project's own suite must show no new failure. Conflicts stop it; the model never resolves them. `--open-pr` opens a **draft** pull request in your fork, or on the upstream project after you type its name, and the body says it was prepared with AI.
+A bug fixed on `main` is still broken for everyone on the release they use. `fixedyet backport` cherry-picks the fixing commit (from the merged pull request, or [found by bisecting](docs/evidence.md#finding-the-fixing-commit-by-bisecting)) onto the maintenance branch of the reported version and proves it there: the reproduction test must fail before and pass after, and the project's own suite must show no new failure. Conflicts stop it; the model never resolves them. `--open-pr` opens a **draft** pull request in your fork, or on the upstream project after you type its name, and the body says it was prepared with AI.
 
 Two real cases: [pytest-dev/pytest#13784](https://github.com/pytest-dev/pytest/issues/13784) (a draft in the owner's fork) and [pydantic/pydantic#13991](https://github.com/pydantic/pydantic/issues/13991), which went upstream after a human review as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043). The gates, the statuses and the pull request rules are in [docs/backports.md](docs/backports.md).
 
@@ -199,7 +205,7 @@ Measured: **$0.031 on average and $0.024 at the median** per issue at Token Fact
 ## Safety
 
 - **Issue text and web content are untrusted data.** Every prompt says so, and what GitHub hides from readers is stripped before the model sees the thread.
-- **Code runs only in sandboxes,** without network for the tests, as an unprivileged user. The host never runs code from an issue or from the model; fix mode checks the model's edits on the host as text only.
+- **Code runs only in sandboxes,** without network for the tests, as an unprivileged user. That includes the two runs per side that decide the verdict: a side that checks out another ref installs it first in a separate sandbox run with network, then tests offline. The host never runs code from an issue or from the model; fix mode checks the model's edits on the host as text only.
 - **It never posts on other people's repositories by default.** The only write paths are `--open-pr` and the demo's maintainer buttons: a draft pull request in the token owner's fork, or upstream only after the person types the repository's name. Nothing comments on an issue.
 - **Secrets stay in the environment,** masked when settings are printed and never returned by the web API or the MCP server.
 - **The demo is rate limited:** one run at a time, daily quotas and a total budget.

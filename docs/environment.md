@@ -23,9 +23,15 @@ Two more steps run in the sandbox with the same helper, after the dependencies a
 
 When a run still errors, the report's basis says why (`pytest could not load the project's tests/conftest.py (ModuleNotFoundError: No module named 'click')`), and the test-writing agent is told in the same words that a setup error is not a failure of its test; two in a row end its loop instead of burning the remaining turns.
 
+## Network: setup online, tests offline
+
+The baseline (clone, install, test dependencies, extras, repair) needs the network and has it. The runs that decide a verdict do not: the reported side runs its test twice in a fork of the checkpoint with no network at all. The fix side has to check out another ref (or apply the evaluation's patch) and reinstall, which does need the network, so that setup runs first in its own sandbox run (`envbuild.prepare_side`: checkout, reinstall, the project's extras, the conftest repair, the test file in place) and is kept as an image; the two test runs then fork that image without network. The backport's reproduction runs are offline too; the agent's own test runs and every project suite already were. A Docker test checks that a test on either side cannot open a connection.
+
+The fix side's `SideRun.checkpoint_image` is the prepared image, and the setup's log lines stay at the top of that side's log. The [bisection](evidence.md#finding-the-fixing-commit-by-bisecting) that looks for a fixing commit works the same way: one run with network fetches what the checkouts will need, then `git bisect run` runs offline.
+
 ## Disk use of the Docker backend
 
-Every checkpoint is a local Docker image of about 1.5 GB. After each run FixedYet keeps the newest `FIXEDYET_KEEP_CHECKPOINTS` images of the `fixedyet-ckpt` repository (default 6, so roughly the last three runs) and removes the rest. It never touches an image of another repository, skips an image a container still uses, and when several runs are in flight at once (an evaluation) it waits for the last one. To prune right now:
+Every checkpoint is a local Docker image of about 1.5 GB. After each run FixedYet keeps the newest `FIXEDYET_KEEP_CHECKPOINTS` images of the `fixedyet-ckpt` repository (default 6; a run makes two or three: the baseline, the fix side's prepared image, and the bisection's when it runs) and removes the rest. It never touches an image of another repository, skips an image a container still uses, and when several runs are in flight at once (an evaluation) it waits for the last one. To prune right now:
 
 ```bash
 fixedyet gc               # keep the newest FIXEDYET_KEEP_CHECKPOINTS images
