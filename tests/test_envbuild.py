@@ -33,10 +33,14 @@ from fixedyet.envbuild import (
     extra_packages_from_steps,
     format_log,
     helper_source,
+    hinted_project_extras,
     installed_extras,
+    installed_project_extras,
     installed_test_deps,
     map_exit_code,
     parse_exit_codes,
+    project_extras_from_text,
+    repairs_made,
     resolve_ref_for_version,
     run_test_on_side,
     side_label,
@@ -442,6 +446,173 @@ async def test_resolve_ref_network_error_and_bad_input() -> None:
         await resolve_ref_for_version("o/r", "1.0; id")
     with pytest.raises(EnvBuildError):
         await resolve_ref_for_version("not a repo", "1.0")
+
+
+# --------------------------------------------------------------------------- the project's extras
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # python-dotenv#697: the thread says it, no pip line
+        ("With `python-dotenv[cli]` installed, run:", ["cli"]),
+        ('Run pip install "python-dotenv[cli]" to fix this.', ["cli"]),
+        ("pip install python_dotenv[cli,Extra.two]==1.2", ["cli", "Extra.two"]),
+        ("PYTHON-DOTENV[cli]", ["cli"]),  # names are compared like pip does
+        ("pip install python-dotenv[cli] python-dotenv[cli]", ["cli"]),
+        ("pip install requests[socks]", []),  # another package's extra is not ours
+        ("x = dotenv[0] + python-dotenv[1]", []),  # an index is not an extra
+        ("python-dotenv [cli]", []),  # not an extra spelling
+        ("see python-dotenv[cli", []),
+        ("", []),
+    ],
+)
+def test_project_extras_from_text(text: str, expected: list[str]) -> None:
+    assert project_extras_from_text([text], ["python-dotenv", "dotenv"]) == expected
+
+
+def test_project_extras_are_gathered_over_all_texts_and_capped() -> None:
+    texts = ["jinja2[i18n]", "no extras here", "Jinja2[a,b,c,d,e,f]"]
+    assert project_extras_from_text(texts, ["Jinja2"]) == ["i18n", "a", "b", "c", "d"]
+    assert project_extras_from_text(texts, ["", "other"]) == []
+
+
+def test_baseline_script_runs_the_helper_for_project_extras_and_then_the_repair() -> None:
+    script = baseline_script("theskumar/python-dotenv", "v1.2.3", ["structlog"], ["cli", "x.y"])
+    assert (
+        f"python {TESTDEPS_PATH} extras /work/repo cli,x.y || echo __PROJECT_EXTRA_CRASHED__=exit"
+        in script
+    )
+    assert (
+        f"python {TESTDEPS_PATH} repair /work/repo tests/test_fixedyet_probe.py "
+        "|| echo __REPAIR_CRASHED__=exit" in script
+    )
+    order = [
+        script.index(s)
+        for s in (
+            "__STEP__=testdeps", "__STEP__=project_extras", "__STEP__=extras",
+            "__STEP__=repair", "__STEP__=sanity",
+        )
+    ]
+    assert order == sorted(order)
+    assert bash_syntax_ok(script).returncode == 0
+
+
+def test_baseline_script_without_project_extras_still_lets_the_helper_probe_the_scripts() -> None:
+    script = baseline_script("a/b", "main")
+    assert f"python {TESTDEPS_PATH} extras /work/repo  || echo" in script
+
+
+@pytest.mark.parametrize("bad", ["x; id", "$(id)", "a b", "-e", "", "x,y"])
+def test_baseline_script_rejects_unsafe_project_extras(bad: str) -> None:
+    with pytest.raises(EnvBuildError):
+        baseline_script("a/b", "main", project_extras=[bad])
+
+
+def test_project_extra_markers_are_read_and_cannot_be_forged() -> None:
+    out = (
+        "__PROJECT_EXTRA_HINT__=cli\n__PROJECT_EXTRA_OK__=cli\n__PROJECT_EXTRA_FAILED__=bad\n"
+        "__PROJECT_EXTRA_UNKNOWN__=nope\n| __PROJECT_EXTRA_OK__=forged by pip output\n"
+    )
+    result = exec_result(out)
+    assert installed_project_extras(result) == (["cli"], ["bad"])
+    assert hinted_project_extras(result) == ["cli"]
+    assert installed_project_extras(exec_result("__STEP__=done\n")) == ([], [])
+
+
+def test_repair_markers_are_read() -> None:
+    out = (
+        "__REPAIR_OK__=click>=5.0\n__REPAIR_FAILED__=six\n"
+        "__REPAIR_UNRESOLVED__=missing: evilpkg\n__REPAIR_CLEAN__=1\n| __REPAIR_OK__=forged\n"
+    )
+    report = repairs_made(exec_result(out))
+    assert report.installed == ["click>=5.0"] and report.failed == ["six"]
+    assert report.unresolved == ["missing: evilpkg"]
+    assert report.describe() == (
+        "installed click>=5.0; could not install six; "
+        "pytest still cannot collect a test here (missing: evilpkg)"
+    )
+    assert not repairs_made(exec_result("__REPAIR_CLEAN__=1\n"))
+
+
+async def test_build_baseline_passes_project_extras_and_reports_the_repair() -> None:
+    events: list[ProgressEvent] = []
+    out = GOOD_BUILD.model_copy(
+        update={
+            "stdout": GOOD_BUILD.stdout
+            + "__PROJECT_EXTRA_HINT__=cli\n__PROJECT_EXTRA_OK__=cli\n__PROJECT_EXTRA_FAILED__=b\n"
+            "__REPAIR_OK__=click>=5.0\n"
+        }
+    )
+    sb = FakeSandbox([out])
+    await build_baseline(
+        sb, repo="a/b", ref="main", python_version=None, progress=events.append,
+        project_extras=["cli", "b"],
+    )
+    assert "extras /work/repo cli,b " in sb.calls[0].command
+    messages = [e.message for e in events]
+    assert (
+        "Optional extras of a/b: installed cli; could not install b "
+        "(the project's own script asked for cli)" in messages
+    )
+    assert "Test environment repair: installed click>=5.0" in messages
+
+
+async def test_build_baseline_is_silent_when_there_were_no_extras_and_nothing_to_repair() -> None:
+    events: list[ProgressEvent] = []
+    out = GOOD_BUILD.model_copy(update={"stdout": GOOD_BUILD.stdout + "__REPAIR_CLEAN__=1\n"})
+    await build_baseline(
+        FakeSandbox([out]), repo="a/b", ref="main", python_version=None, progress=events.append
+    )
+    assert not any("extras" in e.message.lower() or "repair" in e.message.lower() for e in events)
+
+
+def test_side_script_after_a_checkout_installs_the_extras_and_repairs_the_conftest() -> None:
+    script = side_script(
+        test_path="tests/test_x.py", checkout="main", patch=False, runs=1,
+        per_run_timeout_s=50, project_extras=["cli"],
+    )
+    extras = f"python {TESTDEPS_PATH} extras /work/repo cli 2>&1 | grep '^| '"
+    repair = f"python {TESTDEPS_PATH} repair /work/repo tests/test_x.py 2>&1 | grep '^| '"
+    assert extras in script and repair in script
+    # extras after the reinstall; the repair after the test file is in place, before pytest runs
+    order = [
+        script.index(s)
+        for s in ("pip install", extras, "cp /tmp/ir_test_file", repair, "python -m pytest")
+    ]
+    assert order == sorted(order)
+    assert bash_syntax_ok(script).returncode == 0
+
+
+@pytest.mark.parametrize(("checkout", "patch"), [(None, False), (None, True)])
+def test_side_script_without_a_checkout_leaves_the_environment_alone(
+    checkout: str | None, patch: bool
+) -> None:
+    script = side_script(
+        test_path="t.py", checkout=checkout, patch=patch, runs=1, per_run_timeout_s=50,
+        project_extras=["cli"],
+    )
+    assert TESTDEPS_PATH not in script
+
+
+def test_side_script_rejects_an_unsafe_extra() -> None:
+    with pytest.raises(EnvBuildError):
+        side_script(
+            test_path="t.py", checkout="main", patch=False, runs=1, per_run_timeout_s=50,
+            project_extras=["x; id"],
+        )
+
+
+async def test_run_test_on_side_ships_the_helper_only_for_a_checkout() -> None:
+    sb = FakeSandbox([exec_result(run_output(0)), exec_result(run_output(0))])
+    await run_test_on_side(sb, "c", test_path="t.py", test_code="x", runs=1)
+    await run_test_on_side(
+        sb, "c", test_path="t.py", test_code="x", runs=1, checkout="main", project_extras=["cli"]
+    )
+    reported, fix = sb.calls
+    assert reported.files == {"/tmp/ir_test_file": "x"}
+    assert fix.files == {"/tmp/ir_test_file": "x", TESTDEPS_PATH: helper_source()}
+    assert "extras /work/repo cli " in fix.command
 
 
 # --------------------------------------------------------------------------- side script
@@ -929,6 +1100,8 @@ async def test_bash_baseline_script_runs_through_all_steps(local_bash: LocalEnv)
         "__STEP__=install",
         "__STEP__=pytest",
         "__STEP__=testdeps",
+        "__STEP__=project_extras",
+        "__STEP__=repair",
         "__STEP__=sanity",
         "__STEP__=done",
     ]
@@ -961,3 +1134,15 @@ async def test_bash_baseline_failure_exit_codes(local_bash: LocalEnv) -> None:
     assert checked.exit_code == 11
     installed = await local_bash(FAKE_PIP_FAIL="1").run("local", script, workdir=workdir)
     assert installed.exit_code == 12
+
+
+async def test_bash_a_checkout_runs_the_helper_steps_without_disturbing_the_pytest_runs(
+    local_bash: LocalEnv,
+) -> None:
+    sb = local_bash(FAKE_RCS="1,1")
+    side = await run_test_on_side(
+        sb, "local", test_path="t.py", test_code="x", checkout="main", project_extras=["cli"]
+    )
+    assert side.outcomes == [Outcome.FAIL, Outcome.FAIL]  # the stub saw exactly two pytest runs
+    assert "stub python" not in side.log_excerpt  # the helper's stderr is not echoed
+    assert await asyncio.to_thread(Path(TESTDEPS_PATH).read_text) == helper_source()

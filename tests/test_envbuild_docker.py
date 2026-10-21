@@ -277,3 +277,89 @@ async def test_a_test_dependency_that_cannot_be_installed_does_not_stop_the_othe
     assert report.ignored == 1  # the URL was refused, not attempted
     assert "six==1.16.0" in result.stdout
     assert "evil" not in result.stdout.split("---")[1]
+
+
+# --------------------------------------------------------------------------- extras and the repair
+
+WIDGETS_PROJECT = {
+    "/work/repo/pyproject.toml": (
+        '[build-system]\nrequires = ["setuptools>=61"]\nbuild-backend = "setuptools.build_meta"\n\n'
+        '[project]\nname = "widgets"\nversion = "1"\n\n'
+        '[project.optional-dependencies]\ncli = ["six==1.16.0"]\n\n'
+        '[project.scripts]\nwidgets = "widgets:main"\n\n'
+        '[tool.setuptools]\npackages = ["widgets"]\n'
+    ),
+    "/work/repo/widgets/__init__.py": (
+        "import sys\n\n\ndef main():\n"
+        "    try:\n        import six  # noqa: F401\n"
+        "    except ImportError:\n"
+        "        sys.stderr.write('Run pip install \"widgets[cli]\" to fix this.')\n"
+        "        sys.exit(1)\n"
+    ),
+}
+EXTRAS_RUN = (
+    "cd /work/repo && pip install --quiet -e . "
+    "&& python /tmp/ir_testdeps.py extras /work/repo {asked}; echo ---; pip list --format=freeze"
+)
+
+
+@pytest.mark.parametrize("asked", ["cli", ""], ids=["asked-by-the-issue", "only-the-script-asks"])
+async def test_an_optional_extra_is_installed_when_asked_for_or_when_the_script_asks(
+    asked: str,
+) -> None:
+    """The python-dotenv#697 case: the `dotenv` command needs `python-dotenv[cli]`."""
+    sandbox = DockerSandbox()
+    base = await sandbox.base_image("3.12")
+    result = await sandbox.run(
+        base,
+        EXTRAS_RUN.format(asked=asked),
+        files={**WIDGETS_PROJECT, envbuild.TESTDEPS_PATH: envbuild.helper_source()},
+        workdir="/work/repo",
+        timeout_s=600,
+    )
+    assert result.exit_code == 0, result.stderr
+    markers, _, frozen = result.stdout.partition("---\n")
+    assert "six==1.16.0" in frozen.splitlines()
+    assert "__PROJECT_EXTRA_OK__=cli" in markers
+    assert "__PROJECT_EXTRA_HINT__=cli" in markers  # the script cannot start without it
+    assert envbuild.installed_project_extras(result) == (["cli"], [])
+
+
+async def test_a_conftest_that_imports_a_declared_extra_is_made_loadable_by_the_repair() -> None:
+    """The conftest of python-dotenv imports click, which only the project's `cli` extra lists."""
+    sandbox = DockerSandbox()
+    base = await sandbox.base_image("3.12")
+    files = {
+        "/work/repo/pyproject.toml": '[project]\nname = "widgets"\nversion = "1"\n'
+        '[project.optional-dependencies]\ncli = ["six==1.16.0"]\n',
+        "/work/repo/tests/conftest.py": "import six\n",
+        envbuild.TESTDEPS_PATH: envbuild.helper_source(),
+    }
+    command = (
+        "cd /work/repo && pip install --quiet pytest && "
+        "python /tmp/ir_testdeps.py repair /work/repo tests/test_fixedyet_probe.py; "
+        "echo ---; ls tests; python -m pytest -q --collect-only tests 2>&1 | tail -2"
+    )
+    result = await sandbox.run(base, command, files=files, workdir="/work/repo", timeout_s=600)
+    assert result.exit_code == 0, result.stderr
+    markers, _, after = result.stdout.partition("---\n")
+    assert "__REPAIR_OK__=six==1.16.0" in markers and "__REPAIR_CLEAN__=1" in markers
+    assert "test_fixedyet_probe" not in after  # the stub is gone again
+    assert envbuild.repairs_made(result).installed == ["six==1.16.0"]
+
+
+async def test_the_requirements_file_of_another_python_does_not_replace_the_right_one() -> None:
+    """Jinja 3.1.6 ships requirements/tests.txt and requirements/tests37.txt side by side."""
+    sandbox = DockerSandbox()
+    base = await sandbox.base_image("3.12")
+    files = {
+        "/work/repo/requirements/tests.txt": "six==1.16.0\n",
+        "/work/repo/requirements/tests37.txt": "six==1.15.0\n",
+        envbuild.TESTDEPS_PATH: envbuild.helper_source(),
+    }
+    result = await sandbox.run(
+        base, DEPS_RUN, files=files, workdir="/work/repo", timeout_s=600
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "six==1.16.0" in result.stdout.split("---")[1].splitlines()
+    assert envbuild.installed_test_deps(result).installed == ["file:requirements/tests.txt"]

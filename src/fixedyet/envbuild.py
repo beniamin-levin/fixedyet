@@ -40,6 +40,8 @@ _TEST_FILE_STAGING = "/tmp/ir_test_file"  # noqa: S108 - inside the sandbox, not
 _PATCH_STAGING = "/tmp/ir_patch.diff"  # noqa: S108
 _PREFIX_LINES = "awk '{ print \"| \" $0 }'"
 """Prefixes every line, and always ends the last one with a newline (sed would not)."""
+_HELPER_LOG_ONLY = "grep '^| '"
+"""The sandbox helper prints machine markers and ``| `` log lines; a side run keeps the latter."""
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+@-]*$")
@@ -52,6 +54,14 @@ _LINE_PREFIX_RE = re.compile(r"^\| ?", re.MULTILINE)
 _RUN_START_RE = re.compile(r"^__RUN_START__=\d+$", re.MULTILINE)
 _EXTRA_OK_RE = re.compile(r"^__EXTRA_OK__=(\S+)$", re.MULTILINE)
 _EXTRA_FAILED_RE = re.compile(r"^__EXTRA_FAILED__=(\S+)$", re.MULTILINE)
+_PROJECT_EXTRA_RE = {
+    name: re.compile(rf"^__PROJECT_EXTRA_{name}__=(\S+)$", re.MULTILINE)
+    for name in ("OK", "FAILED", "UNKNOWN", "HINT")
+}
+_REPAIR_RE = {
+    name: re.compile(rf"^__REPAIR_{name}__=(.+)$", re.MULTILINE)
+    for name in ("OK", "FAILED", "UNRESOLVED")
+}
 _TESTDEPS_RE = {
     name: re.compile(rf"^__TESTDEPS_{name}__=(.+)$", re.MULTILINE)
     for name in ("OK", "PARTIAL", "FAILED", "MISSING", "IGNORED", "CRASHED")
@@ -63,6 +73,8 @@ PYTEST_SUMMARY_PATTERN = (
 NO_SUMMARY_EXIT_CODE = 70  # recorded instead of pytest's exit 1 when no summary line was printed
 
 TESTDEPS_PATH = "/tmp/ir_testdeps.py"  # noqa: S108 - inside the sandbox, not on the host
+PROBE_TEST_PATH = "tests/test_fixedyet_probe.py"
+"""The stub the baseline's repair step collects: it lives in the directory the real test will."""
 
 
 class EnvBuildError(RuntimeError):
@@ -152,6 +164,44 @@ def extra_packages_from_steps(
     return found[:MAX_EXTRA_PACKAGES]
 
 
+# `python-dotenv[cli]`, `"jinja2[i18n]"`, `requests[socks,security]`: the project's own name
+# followed by extras. A bracket without a letter in it (`dotenv[0]`) is an index, not an extra.
+_PROJECT_EXTRAS_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"\[(?P<extras>(?=[^\]]*[A-Za-z])[A-Za-z0-9._-]+(?:\s*,\s*[A-Za-z0-9._-]+)*)\]"
+)
+_EXTRA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MAX_PROJECT_EXTRAS = 5
+
+
+def project_extras_from_text(texts: Iterable[str], names: Iterable[str]) -> list[str]:
+    """The optional extras of the project itself that ``texts`` ask for, in order of appearance.
+
+    ``pip install "python-dotenv[cli]"`` and "with `python-dotenv[cli]` installed" both name the
+    extra ``cli`` of the project. ``names`` are the project's names (repository, distribution);
+    an extra of any other package is ignored here (`extra_packages_from_steps` handles those).
+    The sandbox installs only the extras the project declares, so a wrong guess costs nothing.
+    """
+    wanted = {_dist_name(name) for name in names if name}
+    found: list[str] = []
+    for text in texts:
+        for match in _PROJECT_EXTRAS_RE.finditer(text):
+            if _dist_name(match["name"]) not in wanted:
+                continue
+            for extra in re.split(r"\s*,\s*", match["extras"]):
+                if extra not in found:
+                    found.append(extra)
+    return found[:MAX_PROJECT_EXTRAS]
+
+
+def _extras_arg(extras: Sequence[str]) -> str:
+    """The comma list the sandbox helper takes, quoted; the empty string for no extras."""
+    for extra in extras:
+        if not _EXTRA_NAME_RE.match(extra):
+            raise EnvBuildError(f"invalid extra {extra!r}")
+    return shlex.quote(",".join(extras)) if extras else ""
+
+
 def _extras_lines(extras: Sequence[str]) -> list[str]:
     """Install each extra on its own, so one bad name cannot hide the others. Never fatal."""
     lines: list[str] = []
@@ -170,6 +220,50 @@ def _extras_lines(extras: Sequence[str]) -> list[str]:
 def installed_extras(result: ExecResult) -> tuple[list[str], list[str]]:
     """``(installed, failed)`` requirement names reported by the baseline script."""
     return _EXTRA_OK_RE.findall(result.stdout), _EXTRA_FAILED_RE.findall(result.stdout)
+
+
+def installed_project_extras(result: ExecResult) -> tuple[list[str], list[str]]:
+    """``(installed, failed)`` extras of the project itself, as the baseline script reports them."""
+    return (
+        _PROJECT_EXTRA_RE["OK"].findall(result.stdout),
+        _PROJECT_EXTRA_RE["FAILED"].findall(result.stdout),
+    )
+
+
+def hinted_project_extras(result: ExecResult) -> list[str]:
+    """Extras that no one asked for but the project's own console script asked for."""
+    return _PROJECT_EXTRA_RE["HINT"].findall(result.stdout)
+
+
+@dataclass
+class RepairReport:
+    """What the repair step did so that pytest can load the project's conftest (`testdeps.py`)."""
+
+    installed: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.installed or self.failed or self.unresolved)
+
+    def describe(self) -> str:
+        parts = []
+        if self.installed:
+            parts.append(f"installed {', '.join(self.installed)}")
+        if self.failed:
+            parts.append(f"could not install {', '.join(self.failed)}")
+        if self.unresolved:
+            parts.append(f"pytest still cannot collect a test here ({self.unresolved[-1]})")
+        return "; ".join(parts)
+
+
+def repairs_made(result: ExecResult) -> RepairReport:
+    """The `RepairReport` read from the baseline script's markers (empty when none apply)."""
+    return RepairReport(
+        installed=[v.strip() for v in _REPAIR_RE["OK"].findall(result.stdout)],
+        failed=[v.strip() for v in _REPAIR_RE["FAILED"].findall(result.stdout)],
+        unresolved=[v.strip() for v in _REPAIR_RE["UNRESOLVED"].findall(result.stdout)],
+    )
 
 
 @dataclass
@@ -225,19 +319,27 @@ def helper_source() -> str:
     return Path(testdeps.__file__).read_text(encoding="utf-8")
 
 
-def baseline_script(repo: str, ref: str, extras: Sequence[str] = ()) -> str:
+def baseline_script(
+    repo: str,
+    ref: str,
+    extras: Sequence[str] = (),
+    project_extras: Sequence[str] = (),
+) -> str:
     """Shell script that clones ``repo``, checks out ``ref`` and installs it with pytest.
 
     After the editable install it runs `fixedyet.testdeps` (shipped to `TESTDEPS_PATH` by
-    `build_baseline`): the project's PEP 735 test dependency groups and test requirements files.
-    ``extras`` are further requirements (see `extra_packages_from_steps`) installed last; a
-    failure to install one of them, or a test dependency, is reported on stdout and does not fail
-    the build.
+    `build_baseline`): the project's PEP 735 test dependency groups and test requirements files,
+    then ``project_extras`` (optional extras of the project itself that the issue names; the
+    helper adds the ones the project's console script asks for), then ``extras`` (further
+    requirements, see `extra_packages_from_steps`), and last a repair step that makes sure pytest
+    can load the project's conftest. A failure of any of these is reported on stdout and does not
+    fail the build.
     """
     url = shlex.quote(f"https://github.com/{_check_repo(repo)}")
     quoted_ref = shlex.quote(_check_ref(ref))
     repo_dir = shlex.quote(REPO_DIR)
     extra_lines = _extras_lines(extras)
+    project_extras_arg = _extras_arg(project_extras)
     if extra_lines:
         extra_lines = ["echo __STEP__=extras", *extra_lines]
     return "\n".join(
@@ -256,7 +358,13 @@ def baseline_script(repo: str, ref: str, extras: Sequence[str] = ()) -> str:
             "pip install pytest || exit 13",
             "echo __STEP__=testdeps",
             f"python {TESTDEPS_PATH} {repo_dir} || echo __TESTDEPS_CRASHED__=exit",
+            "echo __STEP__=project_extras",
+            f"python {TESTDEPS_PATH} extras {repo_dir} {project_extras_arg} "
+            "|| echo __PROJECT_EXTRA_CRASHED__=exit",
             *extra_lines,
+            "echo __STEP__=repair",
+            f"python {TESTDEPS_PATH} repair {repo_dir} {PROBE_TEST_PATH} "
+            "|| echo __REPAIR_CRASHED__=exit",
             "echo __STEP__=sanity",
             'python -c "import sys; print(sys.version)" || exit 14',
             "pip freeze | head -n 30",
@@ -285,17 +393,21 @@ async def build_baseline(
     progress: ProgressCallback | None = None,
     timeout_s: int = BUILD_TIMEOUT_S,
     extra_packages: Sequence[str] = (),
+    project_extras: Sequence[str] = (),
 ) -> tuple[str, ExecResult]:
     """Build and checkpoint the environment for ``repo`` at ``ref``.
 
     Clones github.com/<repo> into `REPO_DIR`, checks out ``ref``, installs it editable with
     test extras when available, installs pytest, the project's test dependency groups and
-    requirements files (`installed_test_deps` reads back what that did) and ``extra_packages``
-    (`installed_extras` reads back which of them worked), runs a sanity step, and saves the
-    filesystem.
+    requirements files (`installed_test_deps` reads back what that did), ``project_extras`` (the
+    project's own optional extras, plus those its console script asks for;
+    `installed_project_extras` reads back which worked) and ``extra_packages``
+    (`installed_extras` reads back which of them worked), repairs what stops pytest from loading
+    the project's conftest (`repairs_made`), runs a sanity step, and saves the filesystem.
     Returns ``(checkpoint_image, setup_result)``. Raises `EnvBuildError` on any failure.
     """
-    script = baseline_script(repo, ref, extra_packages)  # validates the inputs before any call
+    # validates the inputs before any call
+    script = baseline_script(repo, ref, extra_packages, project_extras)
     started = time.monotonic()
     py = python_version or "default"
     await _emit(progress, f"Building baseline for {repo} at {ref} (Python {py})")
@@ -335,6 +447,16 @@ async def build_baseline(
         note = f"installed {', '.join(installed) or 'none'}"
         note += f"; could not install {', '.join(failed)}" if failed else ""
         await _emit(progress, f"Extra packages named in the issue: {note}")
+    extras_ok, extras_failed = installed_project_extras(result)
+    if extras_ok or extras_failed:
+        note = f"installed {', '.join(extras_ok) or 'none'}"
+        note += f"; could not install {', '.join(extras_failed)}" if extras_failed else ""
+        hinted = hinted_project_extras(result)
+        note += f" (the project's own script asked for {', '.join(hinted)})" if hinted else ""
+        await _emit(progress, f"Optional extras of {repo}: {note}")
+    repaired = repairs_made(result)
+    if repaired:
+        await _emit(progress, f"Test environment repair: {repaired.describe()}")
     await _emit(
         progress,
         f"Baseline ready in {time.monotonic() - started:.0f}s, checkpoint {_short(result.image)}",
@@ -422,13 +544,22 @@ def side_script(
     patch: bool,
     runs: int,
     per_run_timeout_s: int,
+    project_extras: Sequence[str] = (),
 ) -> str:
     """Shell script: optional checkout and patch, reinstall, write the test, run pytest N times.
+
+    Another ref has its own test requirements and its own conftest, so after a checkout the
+    sandbox helper (`TESTDEPS_PATH`, shipped by `run_test_on_side`) installs ``project_extras``
+    again and, with the test file in place, repairs whatever stops pytest from loading the
+    conftest of that ref (a module the baseline never needed, a package pinned at a version this
+    interpreter cannot import). Only the helper's ``| `` log lines are echoed, never its markers.
 
     Each pytest run writes to its own log; only the last bytes of it are echoed, each line
     prefixed with ``| `` so test output can never forge a ``__RC__=`` marker line.
     """
     path = shlex.quote(_check_test_path(test_path))
+    repo_dir = shlex.quote(REPO_DIR)
+    extras_arg = _extras_arg(project_extras)
     lines = [
         "set -u",
         "export GIT_TERMINAL_PROMPT=0 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1",
@@ -451,9 +582,19 @@ def side_script(
             "|| { echo __SETUP_FAILED__=reinstall; "
             f"tail -n 40 /tmp/ir_reinstall.log | {_PREFIX_LINES}; exit 22; }}"
         )
-    lines += [
+    if checkout:
+        lines.append(
+            f"python {TESTDEPS_PATH} extras {repo_dir} {extras_arg} 2>&1 | {_HELPER_LOG_ONLY}"
+        )
+    lines.append(
         f'mkdir -p "$(dirname {path})" && cp {_TEST_FILE_STAGING} {path} '
-        "|| { echo __SETUP_FAILED__=write_test; exit 24; }",
+        "|| { echo __SETUP_FAILED__=write_test; exit 24; }"
+    )
+    if checkout:
+        lines.append(
+            f"python {TESTDEPS_PATH} repair {repo_dir} {path} 2>&1 | {_HELPER_LOG_ONLY}"
+        )
+    lines += [
         f"for i in $(seq 1 {runs}); do",
         '  echo "__RUN_START__=$i"',
         f"  timeout -k 5 {per_run_timeout_s} python -m pytest -x -q -p no:cacheprovider {path}"
@@ -575,6 +716,7 @@ async def run_test_on_side(
     ref: str | None = None,
     timeout_s: int = TEST_TIMEOUT_S,
     network: bool = True,
+    project_extras: Sequence[str] = (),
 ) -> SideRun:
     """Run the reproduction test ``runs`` times on one side, in ONE sandbox run from ``image``.
 
@@ -583,6 +725,9 @@ async def run_test_on_side(
     `SideRun.ref` (default: the checkout, ``gold_patch``, or ``HEAD``). Exit codes map 0 to PASS,
     1 to FAIL, anything else to ERROR. A setup failure or a sandbox timeout yields ERROR outcomes
     rather than an exception; only a broken sandbox (`SandboxError`) propagates.
+
+    After a ``checkout`` the sandbox helper also installs ``project_extras`` again and repairs a
+    conftest that cannot load (see `side_script`), which is why it travels with the test file.
     """
     if runs < 1:
         raise EnvBuildError("runs must be at least 1")
@@ -594,8 +739,11 @@ async def run_test_on_side(
         patch=patch is not None,
         runs=runs,
         per_run_timeout_s=per_run,
+        project_extras=project_extras,
     )
     files = {_TEST_FILE_STAGING: test_code}
+    if checkout:
+        files[TESTDEPS_PATH] = helper_source()
     if patch is not None:
         files[_PATCH_STAGING] = patch if patch.endswith("\n") else patch + "\n"
     result = await sb.run(
