@@ -522,8 +522,12 @@ class FakeBackport:
         self.calls: list[Assessment] = []
         self.gate: asyncio.Event | None = None
         self.result = make_result()
+        self.kwargs: dict[str, Any] = {}
 
-    async def __call__(self, assessment: Assessment, *, settings: Any, progress: Any):
+    async def __call__(
+        self, assessment: Assessment, *, settings: Any, progress: Any, **kwargs: Any
+    ):
+        self.kwargs = kwargs
         self.calls.append(assessment)
         await progress(ProgressEvent(stage="backport", message="Listing the branches"))
         if self.gate is not None:
@@ -1474,3 +1478,39 @@ async def test_a_confirmed_upstream_pr_against_a_mocked_github_is_a_draft_on_the
     assert body["head"] == "alice:fixedyet/backport-42-8.1.x"
     assert "reviewed and submitted by @alice." in body["body"]
     assert saved_record(settings)["prs"]["upstream"]["base_repo"] == "acme/widgets"
+
+
+async def test_step_1_takes_a_target_branch_the_name_rules_cannot_find(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+) -> None:
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    res = await client.post(
+        f"/api/reports/{RUN_OLD}/backport", headers=AUTH, json={"target_branch": " stable "}
+    )
+    assert res.status_code == 202
+    await wait_finished(client, res.json()["id"])
+    assert backport_fake.kwargs == {"target_branch": "stable"}
+
+
+async def test_step_1_without_a_branch_lets_the_name_rules_choose(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+) -> None:
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    res = await client.post(
+        f"/api/reports/{RUN_OLD}/backport", headers=AUTH, json={"target_branch": "  "}
+    )
+    assert res.status_code == 202
+    await wait_finished(client, res.json()["id"])
+    assert backport_fake.kwargs == {}
+
+
+@pytest.mark.parametrize("branch", ["../main", "a b", "-x", "x..y", "é", "a" * 201])
+async def test_step_1_refuses_a_target_branch_that_is_not_a_branch_name(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport, branch: str,
+) -> None:
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    res = await client.post(
+        f"/api/reports/{RUN_OLD}/backport", headers=AUTH, json={"target_branch": branch}
+    )
+    assert res.status_code == 400 and res.json()["error"] == "invalid_branch"
+    assert backport_fake.calls == []

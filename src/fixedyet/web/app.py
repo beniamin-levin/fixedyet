@@ -98,6 +98,10 @@ SECURITY_HEADERS = [
 # --- seams to the core modules (imported lazily; tests replace these) -----------------
 
 
+# A branch the maintainer names for a backport (git's rules, kept simple: no "..", no spaces).
+_TARGET_BRANCH_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_./+-]{0,199}$")
+
+
 def load_settings() -> Any:
     from fixedyet.config import get_settings
 
@@ -110,10 +114,14 @@ async def run_pipeline(issue_url: str, *, settings: Any, progress: Any) -> Asses
     return await reproduce(issue_url, settings=settings, progress=progress)
 
 
-async def run_backport(assessment: Assessment, *, settings: Any, progress: Any) -> BackportResult:
+async def run_backport(
+    assessment: Assessment, *, settings: Any, progress: Any, target_branch: str | None = None
+) -> BackportResult:
     from fixedyet.backport import backport
 
-    return await backport(assessment, settings=settings, progress=progress)
+    return await backport(
+        assessment, settings=settings, progress=progress, target_branch=target_branch
+    )
 
 
 def github_token(settings: Any) -> str:
@@ -749,6 +757,15 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
                 "Only a report that is fixed on main, with a known fixing commit and a "
                 "reproduction test, can be backported.",
             )
+        try:  # optional {"target_branch": "stable"}: a branch the name rules do not find
+            body = await request.json()
+        except ValueError:
+            body = None
+        target_branch = body.get("target_branch") if isinstance(body, dict) else None
+        if target_branch is not None:
+            target_branch = str(target_branch).strip() or None
+        if target_branch is not None and not _TARGET_BRANCH_RE.match(target_branch):
+            return _error(400, "invalid_branch", "That is not a branch name.")
         store = get_store()
         if store.active is not None and not store.active.finished:
             return _error(
@@ -760,7 +777,9 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             )
         run = store.create(assessment.issue_url, kind="backport", report_id=report_id)
         task = asyncio.create_task(
-            _execute_backport(store, reports, run, assessment, get_settings())
+            _execute_backport(
+                store, reports, run, assessment, get_settings(), target_branch=target_branch
+            )
         )
         store.tasks.add(task)
         task.add_done_callback(store.tasks.discard)
@@ -926,7 +945,8 @@ def _with_pr(record: dict[str, Any], target: str, pr: Any) -> dict[str, Any]:
 
 
 async def _execute_backport(
-    store: RunStore, reports: ReportStore, run: Run, assessment: Assessment, settings: Any
+    store: RunStore, reports: ReportStore, run: Run, assessment: Assessment, settings: Any,
+    *, target_branch: str | None = None,
 ) -> None:
     """Step 1: verify the backport of the fix of ``assessment`` in the sandbox. No pull request.
 
@@ -939,7 +959,10 @@ async def _execute_backport(
 
     try:
         async with asyncio.timeout(BACKPORT_TIMEOUT_S):
-            result = await run_backport(assessment, settings=settings, progress=progress)
+            kwargs = {"target_branch": target_branch} if target_branch else {}
+            result = await run_backport(
+                assessment, settings=settings, progress=progress, **kwargs
+            )
             activity: dict[str, Any] | None = None
             if result.repo and result.target_branch:
                 run.add_event(ProgressEvent(

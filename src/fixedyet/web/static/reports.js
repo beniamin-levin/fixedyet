@@ -334,13 +334,15 @@
             record.result && record.result.reason ? ` ${record.result.reason}` : ''));
         }
         const button = el('button', { class: 'btn primary', type: 'button', text: state.admin ? 'Verify backport' : 'Backport fix → draft PR' });
+        // The maintainer may name the branch when the name rules find none (pallets' "stable").
+        const branchInput = state.admin ? el('input', { type: 'text', class: 'confirm-input branch-input', placeholder: 'branch: found automatically', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Target branch (optional)' }) : null;
         card.append(
           el('p', { class: 'muted', text: state.admin
-            ? 'Cherry-picks the fix onto the maintenance branch of the reported version and checks it there: the reproduction test and the project\'s own tests. No pull request is opened yet. It takes several minutes.'
+            ? 'Cherry-picks the fix onto the maintenance branch of the reported version and checks it there: the reproduction test and the project\'s own tests. No pull request is opened yet. It takes several minutes. Leave the branch empty to find it from the version, or name one such as stable.'
             : 'The fix is known. This cherry-picks it onto the maintenance branch of the reported version, checks it there, and opens a draft pull request.' }),
-          button, area);
+          el('div', { class: 'pr-actions' }, button, branchInput), area);
         button.addEventListener('click', () => {
-          if (state.admin) startBackport(d, button, area);
+          if (state.admin) startBackport(d, button, area, branchInput ? branchInput.value.trim() : '');
           else if (area.firstChild) area.replaceChildren();
           else area.replaceChildren(visitorPanel(d));
         });
@@ -410,12 +412,14 @@
 
   // ---------- the maintainer's backport job ----------
 
-  async function startBackport(d, button, area) {
+  async function startBackport(d, button, area, targetBranch) {
     button.disabled = true;
     area.replaceChildren(el('p', { class: 'muted', text: 'Starting…' }));
     let res;
     try {
-      res = await api(`api/reports/${encodeURIComponent(d.id)}/backport`, { method: 'POST' });
+      res = await api(`api/reports/${encodeURIComponent(d.id)}/backport`, targetBranch
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_branch: targetBranch }) }
+        : { method: 'POST' });
     } catch {
       button.disabled = false;
       area.replaceChildren(notice('Could not reach the server. Check your connection and try again.', 'error'));
