@@ -238,8 +238,12 @@ async def test_full_loop_explores_runs_and_submits(fake_llm, fake_sandbox, sampl
         assert call.image == "baseline-img" and call.keep is False and call.workdir == "/work/repo"
     list_call, read_call, search_call, test_call = fake_sandbox.calls
     assert test_call.network is False  # the sandbox enforces "no network in the test"
-    assert test_call.files == {"/work/repo/tests/test_fixedyet_repro.py": GOOD_TEST}
+    assert test_call.files is not None
+    assert test_call.files["/work/repo/tests/test_fixedyet_repro.py"] == GOOD_TEST
+    assert set(test_call.files) == {"/work/repo/tests/test_fixedyet_repro.py",
+                                    "/tmp/ir_agent_plugins/fixedyet_repro_plugin.py"}
     assert "python -m pytest" in test_call.command and TEST_PATH in test_call.command
+    assert "-p fixedyet_repro_plugin" in test_call.command
 
     # The model saw real output from the real shell commands.
     shown = {m["name"]: m["content"] for m in tool_messages(fake_llm)}

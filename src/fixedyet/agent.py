@@ -16,10 +16,12 @@ import logging
 import re
 import shlex
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from fixedyet import repro_plugin
 from fixedyet.envbuild import PYTEST_SUMMARY_PATTERN, TESTER_FUNCTIONS
 from fixedyet.llm import LLM, ToolCall
 from fixedyet.models import (
@@ -31,7 +33,7 @@ from fixedyet.models import (
     Stage,
 )
 from fixedyet.untrusted import UNTRUSTED_RULE, strip_hidden, strip_hidden_comment
-from fixedyet.verdict import error_reason, is_setup_error
+from fixedyet.verdict import error_reason, failure_lines, is_setup_error
 
 if TYPE_CHECKING:
     from fixedyet.sandbox.base import Sandbox
@@ -45,6 +47,8 @@ AGENT_MAX_TOKENS = 8_192  # a reasoning model spends part of this on thinking be
 MAX_SANDBOX_FAILURES = 3
 MAX_SETUP_ERRORS = 2  # run_test results in a row that stop before the test, for the same reason
 _PYTEST_SUMMARY = re.compile(PYTEST_SUMMARY_PATTERN, re.MULTILINE)
+PLUGIN_DIR = "/tmp/ir_agent_plugins"  # noqa: S108 - inside the sandbox, not on the host
+PLUGIN_MODULE = "fixedyet_repro_plugin"
 
 
 class AgentError(RuntimeError):
@@ -394,6 +398,112 @@ def explain_run(exit_code: int, output: str) -> tuple[str, bool] | None:
     return None
 
 
+# -- reading a failed run for the model -----------------------------------------------------------
+
+_FRAME = re.compile(r"^(?P<path>[^\s:][^:\n]*\.py):(?P<line>\d+): in \S+", re.MULTILINE)
+_API_CRASH = re.compile(
+    r"has no attribute '(?P<attr>[^']+)'"
+    r"|unexpected keyword argument '(?P<kwarg>[^']+)'"
+    r"|(?P<option>no such option|unrecognized arguments?)\b:?\s*(?P<name>\S*)",
+    re.IGNORECASE,
+)
+_EXCEPTION_NAME = re.compile(
+    r"(?<![\w.])([A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning|Exit|Interrupt))\b"
+)
+_EXCEPTION_MESSAGE = re.compile(
+    r"(?<![\w.])[A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning):[ \t]*(?P<message>[^\n`]{8,})"
+)
+_QUOTES = str.maketrans("", "", "'\"`")
+_MESSAGE_PREFIX = 32  # at most this many characters (whole words) of a quoted message are sought
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.translate(_QUOTES).split())
+
+
+def type_mismatch_notes(output: str) -> list[str]:
+    """The notes `repro_plugin` added to a failed ``==`` between unrelated types."""
+    seen: list[str] = []
+    for line in output.splitlines():
+        at = line.find(repro_plugin.MARKER)
+        if at >= 0 and (note := line[at:].strip()) not in seen:
+            seen.append(note)
+    return seen
+
+
+def api_crash_note(output: str, thread: str) -> str | None:
+    """A note when the test crashed calling something that may not exist: an attribute or a
+    keyword argument, on the test's own line; an option the project does not know, anywhere.
+    None when the issue thread names the attribute, argument or option (then it is the bug)."""
+    for match in _API_CRASH.finditer(output):
+        line_start = output.rfind("\n", 0, match.start()) + 1
+        line = output[line_start : output.find("\n", match.end()) % (len(output) + 1)].strip()
+        if not line.startswith("E"):
+            continue
+        name = match.group("attr") or match.group("kwarg") or match.group("name") or ""
+        if name and re.search(rf"(?<![\w-]){re.escape(name.strip(':'))}(?![\w-])", thread):
+            continue
+        frames = list(_FRAME.finditer(output, 0, line_start))
+        where = frames[-1] if frames else None
+        own = bool(where and where.group("path").endswith(TEST_PATH.rsplit("/", 1)[-1]))
+        crash = " ".join(line[1:].split())
+        if match.group("option"):
+            return (
+                f"NOTE: the run stopped with `{crash}`. An option your test passes may not exist "
+                "at this version of the project: check the name with search_code or read_file. "
+                "This is not the failure the issue reports unless the issue quotes it."
+            )
+        if own and where is not None:
+            return (
+                f"NOTE: your test crashed on its own line ({where.group('path')}:"
+                f"{where.group('line')}) with `{crash}`. The API it calls may not exist at this "
+                "version of the project: check the name with search_code or read_file before "
+                "relying on it. This is not the failure the issue reports unless the issue "
+                "quotes it."
+            )
+    return None
+
+
+def failure_notes(exit_code: int, output: str, thread: str) -> str | None:
+    """What the model should know about a failed run before it reads the output, or None."""
+    if exit_code != 1 or not _PYTEST_SUMMARY.search(output):
+        return None
+    notes = []
+    if types := type_mismatch_notes(output):
+        notes.append(
+            "NOTE: your assertion compares values of unrelated types, so it can fail whatever "
+            "the values are:\n" + "\n".join(f"- {note}" for note in types)
+        )
+    if api := api_crash_note(output, thread):
+        notes.append(api)
+    return "\n\n".join(notes) or None
+
+
+def missing_symptoms(observed: str, output: str) -> list[str]:
+    """Exceptions and messages the observed behaviour quotes that a failed run's output lacks.
+
+    An exception is looked for by name; a message (the text after ``SomeError:``) by its first
+    characters, quotes and spacing ignored.
+    """
+    if not observed.strip():
+        return []
+    flat_output = _flat(output)
+    missing: list[str] = []
+    for name in dict.fromkeys(_EXCEPTION_NAME.findall(observed)):
+        if not re.search(rf"(?<![\w]){re.escape(name)}(?!\w)", output):
+            missing.append(name)
+    for match in _EXCEPTION_MESSAGE.finditer(observed):
+        words: list[str] = []
+        for word in _flat(match.group("message")).split():
+            if words and len(" ".join([*words, word])) > _MESSAGE_PREFIX:
+                break
+            words.append(word)
+        message = " ".join(words).rstrip(".,;:")
+        if len(message) >= 8 and message not in flat_output:
+            missing.append(f'"{message}"')
+    return missing
+
+
 class ReproAgent:
     """One run of the tool-calling loop. State: the last test tried and the submitted one."""
 
@@ -417,6 +527,9 @@ class ReproAgent:
         self.max_turns = llm.settings.max_turns
         self.last_code: str | None = None
         self.last_exit: int | None = None
+        self.last_output = ""
+        self.symptom_checked = False  # the observed-behaviour check sends a test back once only
+        self.thread = "\n\n".join([issue.title, issue.body, *issue.comments])
         self.submitted: tuple[str, str] | None = None  # (code, rationale)
         self.steps: list[str] = []
         self._sandbox_failures = 0
@@ -603,21 +716,27 @@ class ReproAgent:
             return f"not run: {problem}", f"run_test rejected: {problem}"
         # No network: the test must not need it, and the sandbox enforces that rule.
         # as the unprivileged test user, like the side runs that decide the verdict
+        # repro_plugin notes a failed == between unrelated types; only these runs load it
         result = await self._exec(
-            f"{TESTER_FUNCTIONS}\nir_own\nir_as_tester python -m pytest -x -q --tb=short "
-            f"-p no:cacheprovider {TEST_PATH} 2>&1",
-            files={f"{REPO_DIR}/{TEST_PATH}": code},
+            f"{TESTER_FUNCTIONS}\nir_own\nir_as_tester env "
+            f'PYTHONPATH="{PLUGIN_DIR}${{PYTHONPATH:+:$PYTHONPATH}}" python -m pytest -x -q '
+            f"--tb=short -p no:cacheprovider -p {PLUGIN_MODULE} {TEST_PATH} 2>&1",
+            files={f"{REPO_DIR}/{TEST_PATH}": code, **plugin_files()},
             timeout_s=300,
             network=False,
         )
         self.last_code, self.last_exit = code, result.exit_code
         status = describe_pytest_exit(result.exit_code, result.timed_out)
-        text = self._text(result)
+        text = self.last_output = self._text(result)
         output = f"pytest exit code {result.exit_code}: {status}\n\n{text}"
         label = f"run_test -> {status.split(' (')[0]}"
         note = None if result.timed_out else explain_run(result.exit_code, text)
         if note is None:
             self._setup_errors = 0
+            if hints := failure_notes(result.exit_code, text, self.thread):
+                # first, like the notes below: a long output is cut in the middle
+                output = f"pytest exit code {result.exit_code}: {status}\n\n{hints}\n\n{text}"
+                label += " (with a note)"
             return output, label
         message, setup = note
         # the note goes first: a long output is cut in the middle, and the model must see it
@@ -645,8 +764,35 @@ class ReproAgent:
                 "check the failure, then submit exactly that code.",
                 "submit rejected (code differs from the last run)",
             )
+        if not self.symptom_checked and self.last_exit == 1:
+            self.symptom_checked = True
+            missing = missing_symptoms(self.contract.observed_behaviour, self.last_output)
+            if missing:
+                return self._symptom_feedback(missing), (
+                    f"submit returned once: the failure lacks {', '.join(missing)}"
+                )
         self.submitted = (code, rationale)
         return "submitted", "submit"
+
+    def _symptom_feedback(self, missing: list[str]) -> str:
+        first = (failure_lines(self.last_output) or "").splitlines()
+        seen = " ".join(first[0][1:].split()) if first else "a failure without an E line"
+        return (
+            "submit returned (once): the issue reports "
+            f"{', '.join(missing)} (observed behaviour: {self.contract.observed_behaviour!r}), "
+            f"but the failure of your last run does not contain it; it failed with `{seen}`. "
+            "A test that fails for another reason does not reproduce the report. Check that the "
+            "test runs the code the issue describes, and run it again. If the reported symptom "
+            "cannot appear at this version, or your test shows the same problem in another form, "
+            "call submit again with the same code and say why in the rationale: the second "
+            "submit is accepted."
+        )
+
+
+def plugin_files() -> dict[str, str]:
+    """The pytest plugin the agent's runs load (`repro_plugin`), as sandbox files."""
+    source = Path(repro_plugin.__file__).read_text(encoding="utf-8")
+    return {f"{PLUGIN_DIR}/{PLUGIN_MODULE}.py": source}
 
 
 def _path(value: Any, default: str | None = None) -> str:
