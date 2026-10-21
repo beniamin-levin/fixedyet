@@ -933,6 +933,13 @@ def closest_lines(content: str, old: str, *, cutoff: float = 0.6) -> str | None:
     return best
 
 
+def numbered_lines(text: str, line: int, *, before: int = 3, after: int = 18) -> str:
+    """Lines ``line - before`` to ``line + after`` of ``text``, each with its number."""
+    lines = text.splitlines()
+    start, end = max(1, line - before), min(len(lines), line + after)
+    return "\n".join(f"{n:>5}  {lines[n - 1]}" for n in range(start, end + 1))
+
+
 def changed_lines(before: str, after: str) -> int:
     """Lines added plus lines removed."""
     count = 0
@@ -1044,6 +1051,10 @@ def apply_edits(
                 outcome.problems.append(
                     f"the change leaves {path} with a syntax error at line {exc.lineno}: "
                     f"{exc.msg}"
+                )
+                outcome.hints.append(
+                    f"{path} after your edits, around the syntax error (count the brackets):\n"
+                    + numbered_lines(text, exc.lineno or 1)
                 )
                 continue
         total += changed_lines(originals[path], text)
@@ -1577,7 +1588,7 @@ class _FixRun:
             attempt.outcome = "invalid_edits"
             attempt.reason = "; ".join(edited.problems)[:600]
             hints = "".join(
-                "\n\n" + _data("closest lines", truncate(h, 2_000)) for h in edited.hints[:3]
+                "\n\n" + _data("hint", truncate(h, 2_000)) for h in edited.hints[:3]
             )
             return ("Your edits were rejected and nothing was run:\n"
                     + "\n".join(f"- {p}" for p in edited.problems) + hints

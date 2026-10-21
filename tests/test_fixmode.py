@@ -273,6 +273,8 @@ def test_a_change_that_breaks_the_syntax_is_rejected() -> None:
     out = fm.apply_edits([edit("    return text.split(',')[:-1]\n", "    return text.split(',\n")],
                          FILES, TRACKED)
     assert not out.ok and "syntax error at line" in out.problems[0]
+    assert out.hints and "count the brackets" in out.hints[0]
+    assert "    2      return text.split('," in out.hints[0]  # numbered, as the file now is
 
 
 def test_empty_noop_and_missing_edits_are_rejected() -> None:
