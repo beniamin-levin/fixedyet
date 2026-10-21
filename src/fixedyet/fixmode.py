@@ -904,7 +904,7 @@ def parse_proposal(text: str) -> Proposal:
     proposal = Proposal()
     lines = text.replace("\r\n", "\n").split("\n")
     path: str | None = None
-    explaining = False
+    explaining = explained = False
     explanation: list[str] = []
     i = 0
     while i < len(lines):
@@ -945,12 +945,13 @@ def parse_proposal(text: str) -> Proposal:
             if parts:
                 symbols = [s.strip("`()") for s in parts[1:] if s.strip("`()")]
                 proposal.needs.append((normalize_path(parts[0]), symbols[:10]))
-        elif match := _SUMMARY.match(plain):
+        elif match := _SUMMARY.match(plain):  # an answer said twice: the first one counts
             explaining = False
-            proposal.summary = " ".join(match["text"].split())
+            proposal.summary = proposal.summary or " ".join(match["text"].split())
         elif match := _EXPLANATION.match(plain):
-            explaining = True
-            if match["text"].strip():
+            explaining = not explained
+            explained = True
+            if explaining and match["text"].strip():
                 explanation.append(match["text"].strip())
         elif match := _BARE_PATH.match(line):
             explaining = False

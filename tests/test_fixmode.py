@@ -147,6 +147,15 @@ def test_an_explanation_said_twice_is_kept_once() -> None:
     assert p.explanation == "A is wrong. B fixes it."
 
 
+def test_an_answer_given_twice_keeps_its_first_summary_and_explanation() -> None:
+    twice = GOOD + "\nNote: done.\n\n" + GOOD.replace("Keep the last item", "Keep it").replace(
+        "parse() slices off", "It drops")
+    p = fm.parse_proposal(twice)
+    assert p.summary == "Keep the last item in parse"
+    assert p.explanation.startswith("parse() slices off") and "It drops" not in p.explanation
+    assert len(p.edits) == 2 and fm.apply_edits(p.edits, FILES, TRACKED).ok  # same edit twice
+
+
 def test_need_and_cannot_fix_are_read() -> None:
     p = fm.parse_proposal("NEED: widgets/core.py parse, other\nNEED: widgets/__init__.py\n")
     assert p.needs == [("widgets/core.py", ["parse", "other"]), ("widgets/__init__.py", [])]
