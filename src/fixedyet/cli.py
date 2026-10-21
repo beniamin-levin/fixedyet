@@ -1,4 +1,4 @@
-"""Command line: `fixedyet run | backport | fix | doctor | eval | serve | mcp | gc`.
+"""Command line: `fixedyet run | backport | fix | doctor | eval | rescore | serve | mcp | gc`.
 
 Progress goes to stderr and the report to stdout, so `fixedyet run URL > report.md` works.
 The eval, web and MCP modules are imported only when their command is used.
@@ -148,6 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
 
+    commands.add_parser(
+        "rescore", add_help=False,
+        help="run the verdict rules again over saved assessments and eval results, no model "
+        "call (arguments are passed to fixedyet.rescore)",
+    )
+
     serve = commands.add_parser("serve", help="run the demo web app")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8090)
@@ -179,6 +185,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
     if args_list and args_list[0] == "eval":  # the eval module owns its own arguments
         return _eval(args_list[1:])
+    if args_list and args_list[0] == "rescore":  # so does the rescore module
+        from fixedyet.rescore import main as rescore_main
+
+        return int(rescore_main(args_list[1:]) or 0)
     args = build_parser().parse_args(args_list)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,

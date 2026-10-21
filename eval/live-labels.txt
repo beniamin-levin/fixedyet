@@ -1,0 +1,23 @@
+# Ground truth for the live issues of docs/evaluation.md ("Live check on real issues"), read by
+# `fixedyet rescore --labels eval/live-labels.txt`. Judged on 2026-10-21 and 2026-10-22 against
+# each issue thread, the project's history and the saved runs, by an AI (Claude), not by a person.
+#
+#   open      the reported behaviour is still there on the default branch
+#   fixed     it is not
+#   bad_test  open_bug is wrong as evidence: the saved test cannot show the bug
+#
+https://github.com/pallets/werkzeug/issues/3312 fixed
+https://github.com/pypa/packaging/issues/1315 fixed
+https://github.com/PyCQA/isort/issues/2723 fixed
+https://github.com/r1chardj0n3s/parse/issues/262 fixed
+https://github.com/marshmallow-code/marshmallow/issues/3072 open
+https://github.com/dateutil/dateutil/issues/1588 open
+https://github.com/pytest-dev/pytest-mock/issues/639 fixed     # fixed the day it was opened
+https://github.com/pyparsing/pyparsing/issues/693 bad_test     # compares a ParseResults with a list
+https://github.com/theskumar/python-dotenv/issues/697 fixed
+https://github.com/pallets/jinja/issues/2244 open
+# Closed as completed by an opt-in (a capture mode for CliRunner); the default behaviour the
+# issue reports is unchanged on main, so open_bug is right, and the closing is worth a warning.
+https://github.com/pallets/click/issues/2827 open
+https://github.com/pallets/click/issues/3384 fixed
+https://github.com/pydantic/pydantic/issues/13991 fixed

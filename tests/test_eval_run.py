@@ -132,6 +132,7 @@ def test_compute_metrics_counts_and_rates() -> None:
     assert m.rate("open_bug") == pytest.approx(1 / 6)
     assert m.rate("needs_info") == 0.0
     assert m.reproduced_high_confidence == 1
+    assert m.wrong_open_bug_high_confidence == 1
     assert m.search_credits == 4
 
 
@@ -199,6 +200,7 @@ def test_render_summary_has_the_metric_table() -> None:
     assert "| Reproduction rate | 2/6 | 33.3% |" in text
     assert "| of which high confidence | 1/6 | 16.7% |" in text
     assert "| Wrong open-bug rate | 1/6 | 16.7% |" in text
+    assert "| Wrong open bug at high confidence | " in text
     assert "| Not reproduced rate | 1/6 | 16.7% |" in text
     assert "| Inconsistent rate | 0/6 | 0.0% |" in text
     assert "| Setup failure rate | 1/6 | 16.7% |" in text
@@ -502,3 +504,21 @@ def test_main_keeps_partial_results_on_interrupt(
     assert [r.instance_id for r in report.results] == ["psf__requests-1"]
     assert report.skipped_ids == ["psf__requests-2"]
     assert report.finished_at is None
+
+
+def test_wrong_open_bug_at_high_confidence_counts_only_high_open_bugs() -> None:
+    results = [
+        result(1, Verdict.OPEN_BUG, Confidence.HIGH),
+        result(2, Verdict.OPEN_BUG, Confidence.LOW),
+        result(3, Verdict.FIXED_ON_MAIN, Confidence.HIGH),
+    ]
+    m = compute_metrics(results)
+    assert (m.counts["open_bug"], m.wrong_open_bug_high_confidence) == (2, 1)
+    assert "| Wrong open bug at high confidence | 1/3 | 33.3% |" in render_summary(
+        make_report(results))
+
+
+def test_a_results_file_from_before_the_field_still_loads() -> None:
+    data = make_report(sample_results()).model_dump(mode="json")
+    del data["metrics"]["wrong_open_bug_high_confidence"]
+    assert RunReport.model_validate(data).metrics.wrong_open_bug_high_confidence == 0

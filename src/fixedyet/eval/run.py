@@ -90,6 +90,9 @@ class Metrics(BaseModel):
     n: int
     counts: dict[str, int]
     reproduced_high_confidence: int
+    # Every open_bug is wrong here (the gold patch fixes the bug); these are the ones a reader
+    # would have trusted. Default 0 so results files written before the field still load.
+    wrong_open_bug_high_confidence: int = 0
     total_cost_usd: float
     mean_cost_usd: float
     median_cost_usd: float
@@ -190,10 +193,14 @@ def compute_metrics(results: list[InstanceResult]) -> Metrics:
     high = sum(
         1 for r in results if r.verdict is Verdict.FIXED_ON_MAIN and r.confidence is Confidence.HIGH
     )
+    wrong_high = sum(
+        1 for r in results if r.verdict is Verdict.OPEN_BUG and r.confidence is Confidence.HIGH
+    )
     return Metrics(
         n=n,
         counts=counts,
         reproduced_high_confidence=high,
+        wrong_open_bug_high_confidence=wrong_high,
         total_cost_usd=sum(costs),
         mean_cost_usd=statistics.fmean(costs) if costs else 0.0,
         median_cost_usd=statistics.median(costs) if costs else 0.0,
@@ -303,6 +310,13 @@ def render_summary(report: RunReport) -> str:
             lines.append(
                 f"| of which high confidence | {high}/{m.n} | {_pct(share)} "
                 f"| both runs agree on both sides |"
+            )
+        if key == "open_bug":
+            wrong = m.wrong_open_bug_high_confidence
+            share = wrong / m.n if m.n else 0.0
+            lines.append(
+                f"| Wrong open bug at high confidence | {wrong}/{m.n} | {_pct(share)} "
+                "| the open_bug verdicts no rule flagged: the ones a maintainer would trust |"
             )
     lines += [
         "",
