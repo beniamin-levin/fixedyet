@@ -546,6 +546,7 @@ class World:
         default_factory=lambda: ExecResult(exit_code=0, stdout="__STEP__=done\n", image="img-base")
     )
     before: ExecResult = field(default_factory=lambda: repro_output([1, 1]))
+    before_at: dict[str, ExecResult] = field(default_factory=dict)  # test path -> answer
     suite_before: ExecResult = field(default_factory=lambda: suite_output(passed=120))
     # what the reproduction test and the suite do with a given edited core.py
     good_core: str = CORE.replace("[:-1]", "")
@@ -603,9 +604,11 @@ class ScriptedSandbox:
             self.patched[new_image] = edited
             return ExecResult(exit_code=0, stdout=f"__DIFF_B64__={b64(diff)}\n", image=new_image)
         if "__RUN_START__" in command:
+            path = re.search(r"cp /tmp/ir_test_file (\S+) ", command)
+            meta["path"] = path.group(1) if path else None
             if image == "img-base":
                 self._record("repro-before", image, **meta)
-                return w.before
+                return w.before_at.get(meta["path"], w.before)
             self._record("repro-after", image, **meta)
             good = self.patched[image].get("widgets/core.py") == w.good_core
             return repro_output([0, 0], "1 passed") if good else repro_output([1, 1])
@@ -720,8 +723,12 @@ async def test_a_good_first_answer_is_verified() -> None:
     assert result.usage.sandbox_runs == len(sandbox.calls) and result.usage.wall_seconds >= 0
     assert "attempt 1 of 3" in result.reason and "no newly failing" in result.reason
     assert sandbox.kinds() == [
-        "build", "survey", "repro-before", "read", "apply", "repro-after", "suite-before",
-        "suite-after",
+        "build", "survey", "repro-before", "repro-before", "read", "apply", "repro-after",
+        "suite-before", "suite-after",
+    ]
+    # first where the assessment ran it, then where the pull request adds it
+    assert [c["path"] for c in sandbox.calls if c["kind"] == "repro-before"] == [
+        "tests/test_fixedyet_repro.py", "tests/test_issue_42.py",
     ]
     assert {e.stage for e in events} == {"fix", "environment"}
 
@@ -868,7 +875,59 @@ async def test_a_model_api_failure_is_an_error_not_a_crash() -> None:
 async def test_a_test_that_already_passes_on_main_needs_no_fix() -> None:
     result, sandbox, llm = await run_fix([GOOD], World(before=repro_output([0, 0], "1 passed")))
     assert result.status is FixStatus.ALREADY_FIXED and "passes on main" in result.reason
+    assert "(its commit was not recorded)" in result.reason
     assert llm.prompts == [] and "apply" not in sandbox.kinds()
+    assert [c["path"] for c in sandbox.calls if c["kind"] == "repro-before"] == [
+        "tests/test_fixedyet_repro.py",  # the way the assessment ran it
+    ]
+
+
+def assessed_at(commit: str, outcomes: list[Outcome] | None = None) -> Assessment:
+    a = assessment()
+    a.reproduction.fix_side.commit = commit
+    if outcomes is not None:
+        a.reproduction.fix_side.outcomes = outcomes
+    return a
+
+
+async def test_a_pass_at_the_commit_the_assessment_saw_fail_is_an_error_not_already_fixed() -> None:
+    # RDFLib/pySHACL#332: the assessment failed on master; fix mode, at the same commit, saw it
+    # pass. Two runs that contradict each other are never "already fixed".
+    world = World(before_at={"tests/test_fixedyet_repro.py": repro_output([0, 0], "1 passed")})
+    a = assessed_at(HEAD, [Outcome.FAIL])  # one run only: not reused, so fix mode runs it
+    result, _, llm = await run_fix([GOOD], world, a=a)
+    assert result.status is FixStatus.ERROR
+    assert "contradict each other" in result.reason and HEAD[:12] in result.reason
+    assert llm.prompts == []
+
+
+async def test_a_pass_after_the_branch_moved_is_already_fixed() -> None:
+    world = World(before=repro_output([0, 0], "1 passed"))
+    result, _, _ = await run_fix([GOOD], world, a=assessed_at("c" * 40))
+    assert result.status is FixStatus.ALREADY_FIXED
+    assert f"saw it fail on main at {'c' * 12}" in result.reason
+
+
+async def test_the_assessments_runs_at_the_same_commit_are_reused() -> None:
+    result, sandbox, _ = await run_fix([GOOD], a=assessed_at(HEAD))
+    assert result.status is FixStatus.VERIFIED
+    befores = [c["path"] for c in sandbox.calls if c["kind"] == "repro-before"]
+    assert befores == ["tests/test_issue_42.py"]  # only where the pull request adds it
+
+
+async def test_a_test_that_only_fails_where_the_assessment_ran_it_is_not_shipped() -> None:
+    # In test/, the package's __init__.py imports the project before the test can set what the
+    # project reads at import time, so the test passes there trivially. It must not be the
+    # regression test, and the fix is verified where the test does fail.
+    world = World(before_at={"tests/test_issue_42.py": repro_output([0, 0], "1 passed")})
+    result, sandbox, _ = await run_fix([GOOD], world)
+    assert result.status is FixStatus.VERIFIED, result.reason
+    assert result.regression_test_path is None
+    assert result.repro_test_path == "tests/test_fixedyet_repro.py"
+    assert "does not fail at tests/test_issue_42.py" in result.regression_test_note
+    after = [c for c in sandbox.calls if c["kind"] == "repro-after"]
+    assert after and all(c["path"] == "tests/test_fixedyet_repro.py" for c in after)
+    assert [o.value for o in result.repro_before.outcomes] == ["fail", "fail"]
 
 
 async def test_a_flaky_or_erroring_test_before_the_change_cannot_judge_a_fix() -> None:

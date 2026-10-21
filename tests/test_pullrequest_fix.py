@@ -86,6 +86,15 @@ def test_without_a_test_directory_the_body_says_the_test_is_left_out() -> None:
     assert body.rstrip().endswith(DISCLOSURE)
 
 
+def test_a_test_that_passes_where_it_would_ship_is_left_out_with_the_reason() -> None:
+    note = ("the test does not fail at test/test_issue_42.py before the change (runs: pass, "
+            "pass) although it fails at tests/test_fixedyet_repro.py")
+    result = verified(regression_test_path=None, regression_test_note=note)
+    body = pr.fix_pr_body(result, login="alice")
+    assert f"**not** part of this pull request ({note})" in body
+    assert "new file mode" not in pr.fix_pr_preview(result, login="alice")
+
+
 def test_model_text_cannot_mention_anyone_or_break_the_layout() -> None:
     result = verified(summary="Fix it @everyone", explanation="Ping @maintainer | now\n## Boom")
     body = pr.fix_pr_body(result, login="alice")

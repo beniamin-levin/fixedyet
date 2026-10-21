@@ -1623,28 +1623,57 @@ class _FixRun:
             return
         tracked = set(survey.files)
         testpaths = pytest_testpaths(survey.configs)
-        result.regression_test_path = regression_test_path(survey.files, number, testpaths)
-        self.test_path = result.regression_test_path or rep.repro_test_path
+        ship_path = regression_test_path(survey.files, number, testpaths)
+        assessed_path = rep.repro_test_path
+        self.test_path = result.repro_test_path = assessed_path
         self.test_code = rep.repro_test_code
-        result.repro_test_path = self.test_path
+        result.regression_test_path = ship_path
 
+        # a. The test where the assessment ran it: the same file in the same place, so the same
+        # conftest.py and package __init__.py around it. That is what the verdict rests on.
         before = self._reusable_before(sha)
         if before is None:
-            await self.say(f"Running the reproduction test on {branch} before any change")
+            await self.say(f"Running the reproduction test on {branch} before any change, at "
+                           f"{assessed_path} as the assessment did")
             before = await envbuild.run_test_on_side(
-                sb, self.base_image, test_path=self.test_path, test_code=self.test_code,
+                sb, self.base_image, test_path=assessed_path, test_code=self.test_code,
                 ref=f"{branch} (before)", network=False,
             )
         result.repro_before = before
         if before.stable_outcome is Outcome.PASS:
-            _conclude(result, FixStatus.ALREADY_FIXED, f"the reproduction test passes on {branch} "
-                      f"at {sha[:12]}, so there is nothing to fix there")
+            self._passes_before(before, sha)
             return
         if before.stable_outcome is not Outcome.FAIL:
             _conclude(result, FixStatus.ERROR, "the reproduction test did not give a clean failure "
                       f"on {branch} (runs: {_outcomes(before)}), so a fix cannot be judged")
             result.log_excerpt = before.log_excerpt
             return
+        # b. Where the pull request would add it. A package __init__.py or a conftest.py there
+        # can change what the test checks (one that imports the package before the test sets an
+        # environment variable the package reads at import time); a test that does not fail
+        # there before the change proves nothing there, so it is not shipped there.
+        if ship_path is None:
+            result.regression_test_note = "the repository has no tests"
+        elif ship_path != assessed_path:
+            await self.say(f"Running the reproduction test at {ship_path}, where the pull "
+                           "request would add it")
+            shipped = await envbuild.run_test_on_side(
+                sb, self.base_image, test_path=ship_path, test_code=self.test_code,
+                ref=f"{branch} (before)", network=False,
+            )
+            if shipped.stable_outcome is Outcome.FAIL:
+                self.test_path = result.repro_test_path = ship_path
+                before = result.repro_before = shipped
+            else:
+                result.regression_test_path = None
+                result.regression_test_note = (
+                    f"the test does not fail at {ship_path} before the change (runs: "
+                    f"{_outcomes(shipped)}) although it fails at {assessed_path}: the code "
+                    "around it there (a package __init__.py or a conftest.py) changes what it "
+                    f"checks. The fix was verified at {assessed_path}"
+                )
+                await self.say(f"The test does not fail at {ship_path}; verifying at "
+                               f"{assessed_path}, and the pull request will carry no test")
 
         # -- localize ---------------------------------------------------------------------------
         sources = source_files(survey.files)
@@ -1725,20 +1754,53 @@ class _FixRun:
                   "default branch to fix")
         return issue.default_branch, None
 
+    def _assessed_commit(self) -> str | None:
+        """The commit the assessment's fix side ran on, when it is known."""
+        side = self.assessment.reproduction.fix_side
+        if side is None:
+            return None
+        if side.commit and _SHA_RE.match(side.commit):
+            return side.commit
+        return side.ref if _SHA_RE.match(side.ref or "") else None
+
     def _reusable_before(self, sha: str) -> SideRun | None:
-        """The assessment's own runs on main, when they ran this very test at this very commit
-        and failed twice. Otherwise None, and the test runs again."""
+        """The assessment's own runs on main, when they ran this very test (at its own path) at
+        this very commit and failed twice. Otherwise None, and the test runs again."""
         side = self.assessment.reproduction.fix_side
         if (
             side is not None
-            and _SHA_RE.match(side.ref or "")
-            and side.ref == sha
+            and self._assessed_commit() == sha
             and side.stable_outcome is Outcome.FAIL
             and len(side.outcomes) >= 2
             and self.test_path == self.assessment.reproduction.repro_test_path
         ):
             return side.model_copy(update={"ref": f"{self.branch} (before)"})
         return None
+
+    def _passes_before(self, before: SideRun, sha: str) -> None:
+        """Conclude a run whose test passes before any change. It is ``already_fixed`` only when
+        the default branch has moved since the assessment saw it fail; at the very commit where
+        the assessment saw it fail it is a contradiction, and that is an error."""
+        result, rep = self.result, self.assessment.reproduction
+        side, path = rep.fix_side, rep.repro_test_path
+        seen = self._assessed_commit()
+        failed_there = side is not None and side.stable_outcome is Outcome.FAIL
+        if seen == sha and failed_there:
+            result.log_excerpt = before.log_excerpt
+            _conclude(result, FixStatus.ERROR,
+                      f"the reproduction test passes on {self.branch} at {sha[:12]} (runs: "
+                      f"{_outcomes(before)}), but the assessment saw it fail ({_outcomes(side)}) "
+                      f"at this same commit and in the same place ({path}). The two runs "
+                      "contradict each other (a flaky test, or one that depends on something "
+                      "outside the code, such as the order of imports or the environment), so "
+                      "no fix is attempted")
+            return
+        where = f"at {seen[:12]}" if seen else "(its commit was not recorded)"
+        what = f" on {side.ref} {where}" if side is not None else ""
+        _conclude(result, FixStatus.ALREADY_FIXED,
+                  f"the reproduction test passes on {self.branch} at {sha[:12]}, run at {path} as "
+                  f"the assessment ran it, which saw it fail{what}; the branch has moved past "
+                  "the bug, so there is nothing to fix there")
 
     async def _read(self, paths: Sequence[str]) -> dict[str, str]:
         if not paths:

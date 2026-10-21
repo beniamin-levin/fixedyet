@@ -260,7 +260,8 @@ class FixResult(BaseModel):
     context_files: list[str] = Field(default_factory=list)  # the files the model was shown
     repro_test_path: str | None = None  # where the test ran in every check
     repro_test_code: str | None = None
-    regression_test_path: str | None = None  # where the pull request adds it; None: no test dir
+    regression_test_path: str | None = None  # where the pull request adds it; None: no test
+    regression_test_note: str = ""  # why the pull request carries no test, when it carries none
     repro_before: SideRun | None = None  # on main before the patch
     repro_after: SideRun | None = None  # on main with the verified patch
     suite_before: SuiteRun | None = None
