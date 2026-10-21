@@ -235,11 +235,29 @@
     return frag;
   }
 
+  // A unified diff with a light tint per line: green for added, red for removed. Light theme only.
+  function highlightDiff(code) {
+    const frag = document.createDocumentFragment();
+    const lines = String(code).replace(/\n$/, '').split('\n');
+    let inHunk = false;
+    for (const line of lines) {
+      let cls = 'd-ctx';
+      if (/^(diff --git |index |new file mode|deleted file mode|similarity |rename |From |Subject: |Date: )/.test(line)) { cls = 'd-meta'; inHunk = false; }
+      else if (/^(---|\+\+\+) /.test(line) && !inHunk) cls = 'd-meta';
+      else if (line.startsWith('@@')) { cls = 'd-hunk'; inHunk = true; }
+      else if (inHunk && line.startsWith('+')) cls = 'd-add';
+      else if (inHunk && line.startsWith('-')) cls = 'd-del';
+      frag.append(el('span', { class: `d-line ${cls}`, text: line || ' ' }));
+    }
+    return frag;
+  }
+
   function codeBlock(code, language) {
     const inner = el('code');
     if (language === 'python' || language === 'py') inner.append(highlightPython(code));
+    else if (language === 'diff' || language === 'patch') inner.append(highlightDiff(code));
     else inner.textContent = code;
-    return el('pre', { class: 'code', tabindex: '0' }, inner);
+    return el('pre', { class: `code${language === 'diff' || language === 'patch' ? ' diff' : ''}`, tabindex: '0' }, inner);
   }
 
   // ---------- tiny, safe markdown renderer ----------
@@ -388,6 +406,35 @@
       label: 'Backport not verified', tone: 'muted',
       blurb: 'A step could not be completed, so the backport is not verified.',
     },
+  };
+
+  const FIX_STATUS = {
+    fix_verified: {
+      label: 'Verified fix', tone: 'good',
+      blurb: 'The model wrote a change; in the sandbox the reproduction test fails on the default branch without it and passes with it, twice each, and the project\'s own tests show no new failures.',
+    },
+    fix_not_fixed: {
+      label: 'No verified fix', tone: 'warn',
+      blurb: 'None of the model\'s attempts passed the checks. Each attempt and the reason it failed are listed.',
+    },
+    fix_already_fixed: {
+      label: 'Nothing to fix', tone: 'neutral',
+      blurb: 'The reproduction test already passes on the default branch.',
+    },
+    fix_not_applicable: {
+      label: 'No fix possible', tone: 'muted',
+      blurb: 'Only an open bug with a reproduction test can get a fix attempt.',
+    },
+    fix_error: {
+      label: 'Fix not verified', tone: 'muted',
+      blurb: 'A step could not be completed, so there is no verified fix.',
+    },
+  };
+
+  const ATTEMPT_OUTCOMES = {
+    verified: 'verified', invalid_edits: 'edits rejected', repro_still_fails: 'test still fails',
+    regression: 'breaks other tests', suite_not_run: 'suite did not finish',
+    apply_failed: 'could not apply', no_edits: 'no edits', gave_up: 'model declined',
   };
 
   const OUTCOME_NOTE = {
@@ -616,9 +663,100 @@
     return root;
   }
 
+  // The report of a fix result (fix mode on an open bug) as a DOM node.
+  function renderFix(f, markdown, options = {}) {
+    const repo = gh.repoOf(f.repo) || gh.repoOf(f.issue_url);
+    const branch = f.base_branch || 'main';
+    const root = el('div');
+    const meta = FIX_STATUS[`fix_${f.status}`] || { label: f.status, tone: 'muted', blurb: '' };
+    const head = el('section', { class: `card verdict-card ${meta.tone}` });
+    head.append(el('div', { class: 'verdict-row' },
+      el('span', { class: `badge big ${meta.tone}`, text: meta.label }),
+      el('span', { class: 'badge outline', text: `on ${branch}` })));
+    head.append(el('h3', { class: 'issue-title', text: f.title || 'Untitled issue' }));
+    head.append(link(f.issue_url, f.issue_url, 'issue-link'));
+    if (meta.blurb) head.append(el('p', { class: 'blurb', text: meta.blurb }));
+    if (f.reason) head.append(el('p', { class: 'muted' }, linkify(f.reason, repo)));
+    if (options.banner) head.append(banner(options.banner, repo));
+    root.append(head);
+
+    const facts = [];
+    if (f.base_sha) facts.push(fact('Verified on', el('span', null, `${branch} at `, commitLink(repo, f.base_sha))));
+    if ((f.files_changed || []).length) facts.push(fact('Change', `${f.files_changed.length} file${f.files_changed.length === 1 ? '' : 's'}, +${f.lines_added} −${f.lines_removed}`));
+    if ((f.context_files || []).length) facts.push(fact('Code shown to the model', f.context_files.join(', ')));
+    if (f.regression_test_path) facts.push(fact('Regression test in the PR', f.regression_test_path));
+    if (facts.length) root.append(section('The fix', el('dl', { class: 'facts' }, facts)));
+
+    if (f.summary || f.explanation) {
+      root.append(section('What the change does',
+        f.summary ? el('p', null, el('strong', { text: f.summary })) : null,
+        f.explanation ? el('p', null, linkify(f.explanation, repo)) : null,
+        el('p', { class: 'muted small', text: 'Written by the model. The sandbox checked the behaviour, not this text.' })));
+    }
+    if (f.diff) {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy diff' });
+      copy.addEventListener('click', () => copyText(f.diff, copy));
+      root.append(section(f.status === 'verified' ? 'Verified diff' : 'Diff (not verified)',
+        el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: `git diff on ${branch}` }), copy),
+        codeBlock(f.diff, 'diff')));
+    }
+    if (f.repro_before || f.repro_after) {
+      root.append(section(`Reproduction test on ${branch}`, el('div', { class: 'sides' },
+        sideCard('Without the change', f.repro_before, false, repo),
+        sideCard('With the change', f.repro_after, true, repo))));
+    }
+    if (f.suite_before || f.suite_after) {
+      const rows = [['Passed', 'passed'], ['Failed', 'failed'], ['Errors', 'errors'], ['Skipped', 'skipped']]
+        .map(([label, key]) => el('tr', null,
+          el('td', { text: label }), el('td', { text: suiteCell(f.suite_before, key) }), el('td', { text: suiteCell(f.suite_after, key) })));
+      const newly = (f.newly_failing || []).length ? f.newly_failing.join(', ') : (f.suite_after && f.suite_after.ran ? 'none' : '-');
+      rows.push(el('tr', null, el('td', { text: 'Newly failing tests' }), el('td', { text: '-' }), el('td', { text: newly })));
+      root.append(section('The project\'s own test suite', el('div', { class: 'table-scroll md' },
+        el('table', null,
+          el('thead', null, el('tr', null, el('th', { text: '' }), el('th', { text: 'Without the change' }), el('th', { text: 'With the change' }))),
+          el('tbody', null, rows)))));
+    }
+    if ((f.attempts || []).length) {
+      const rows = f.attempts.map((a) => el('tr', null,
+        el('td', { text: String(a.number) }),
+        el('td', { text: ATTEMPT_OUTCOMES[a.outcome] || a.outcome }),
+        el('td', { text: String(a.lines_changed || 0) }),
+        el('td', { text: formatCost(a.cost_usd) }),
+        el('td', { class: 'attempt-detail', text: a.reason || '-' })));
+      root.append(section('Attempts', el('div', { class: 'table-scroll md' },
+        el('table', null,
+          el('thead', null, el('tr', null, ['#', 'Outcome', 'Changed lines', 'Model cost', 'Detail'].map((h) => el('th', { text: h })))),
+          el('tbody', null, rows)))));
+    }
+    if (f.repro_test_code) {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy' });
+      copy.addEventListener('click', () => copyText(f.repro_test_code, copy));
+      root.append(section('Regression test',
+        el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: f.repro_test_path || 'test.py' }), copy),
+        codeBlock(f.repro_test_code, 'python')));
+    }
+    if (f.log_excerpt && f.status !== 'verified') {
+      root.append(section('Output of the step that stopped it', codeBlock(f.log_excerpt, 'text')));
+    }
+    const u = f.usage || {};
+    root.append(section('Cost and time', el('dl', { class: 'facts' }, [
+      ['Model cost', `${formatCost(u.cost_usd)} of ${formatCost(f.budget_usd)}`], ['Time', formatDuration(u.wall_seconds || 0)],
+      ['Model calls', String(u.llm_calls ?? 0)], ['Sandbox runs', String(u.sandbox_runs ?? 0)],
+    ].map(([k, v]) => fact(k, v)))));
+
+    if (markdown) {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy markdown' });
+      copy.addEventListener('click', () => copyText(markdown, copy));
+      root.append(el('section', { class: 'card' },
+        el('div', { class: 'card-head' }, el('h3', { text: 'Markdown summary' }), copy),
+        el('details', null, el('summary', { text: 'Show the summary as rendered markdown' }), renderMarkdown(markdown, repo))));
+    }
+    return root;
+  }
+
   globalThis.FY = {
     $, el, safeUrl, link, gh, refLink, commitLink, linkify, formatDuration, formatCost, formatDate,
-    copyText, codeBlock, renderInline, renderMarkdown, renderReport, renderBackport, banner,
-    VERDICTS, BACKPORT_STATUS,
+    copyText, codeBlock, renderInline, renderMarkdown, renderReport, renderBackport, renderFix, banner,
+    VERDICTS, BACKPORT_STATUS, FIX_STATUS,
   };
 })();

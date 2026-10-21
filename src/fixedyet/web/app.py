@@ -20,6 +20,12 @@ answers 404, and a wrong token answers 401 with nothing else)
     POST   /api/reports/{id}/backport/pr  step 2: for a verified backport, open a DRAFT pull
                                         request in the token owner's fork, or on the upstream
                                         project once the maintainer typed its name
+    POST   /api/reports/{id}/fix        step 1 for an open bug: the model writes a fix and the
+                                        sandbox verifies it, no pull request (a job, like a
+                                        backport)
+    POST   /api/reports/{id}/fix/pr     step 2: for a verified fix, open a DRAFT pull request
+                                        against the default branch, in the fork or (typed
+                                        confirmation) on the upstream project
     POST   /api/reports/{id}/hide       keep a report off the public page
     DELETE /api/reports/{id}/hide       show it again
 
@@ -30,7 +36,8 @@ run is refused with 429 when less than ``settings.run_budget_usd`` is left under
 Finished runs are written to ``<runs_dir>/web/<id>.json`` and survive restarts. A backport job
 is a run of kind "backport": it takes the same single slot, streams the same events, and does
 not count against the daily limit. It only verifies; opening the pull request is a second,
-separate request that the maintainer makes after reading the result.
+separate request that the maintainer makes after reading the result. A fix job (kind "fix") works
+the same way; its model spend is capped by ``settings.fix_budget_usd`` and counted in the ledger.
 
 The page and the API work at the root of a host and under a prefix. The page asks for
 ``static/...`` and ``api/...`` without a leading slash. Behind a reverse proxy that strips a
@@ -62,9 +69,15 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from fixedyet.models import Assessment, BackportResult, ProgressEvent
+from fixedyet.models import Assessment, BackportResult, FixResult, ProgressEvent
 from fixedyet.web import parse_issue_url
-from fixedyet.web.reports import ReportStore, backport_ready, public_record, valid_report_id
+from fixedyet.web.reports import (
+    ReportStore,
+    backport_ready,
+    fix_ready,
+    public_record,
+    valid_report_id,
+)
 
 logger = logging.getLogger("fixedyet.web")
 
@@ -72,6 +85,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 RUN_ID = re.compile(r"^[0-9a-f]{12}$")
 RUN_TIMEOUT_S = 25 * 60
 BACKPORT_TIMEOUT_S = 75 * 60  # two project test suites (900 s each) plus the build
+FIX_TIMEOUT_S = 90 * 60  # the build, up to four suites (900 s each) and the model calls
 PULL_REQUEST_TIMEOUT_S = 60  # fork, push and open: seconds of GitHub and git, no sandbox
 KEEPALIVE_S = 15.0
 MAX_RUNS_IN_MEMORY = 100
@@ -124,6 +138,12 @@ async def run_backport(
     )
 
 
+async def run_fix(assessment: Assessment, *, settings: Any, progress: Any) -> FixResult:
+    from fixedyet.fixmode import attempt_fix
+
+    return await attempt_fix(assessment, settings=settings, progress=progress)
+
+
 def github_token(settings: Any) -> str:
     """The token pull requests are opened with: GITHUB_TOKEN, else ``gh auth token``."""
     from fixedyet.pullrequest import resolve_token
@@ -160,6 +180,19 @@ async def open_draft_pr(
     )
 
 
+async def open_fix_draft_pr(
+    result: FixResult, *, token: str, say: Callable[[str], None], target: str = "fork"
+) -> Any:
+    """Open the draft pull request of a verified fix, against the default branch: in the token
+    owner's fork, or on the upstream project once the maintainer typed its name."""
+    from fixedyet.pullrequest import open_fix_pr
+
+    return await open_fix_pr(
+        result, token=token, target="upstream" if target == "upstream" else "fork",
+        confirmed_upstream=target == "upstream", say=say,
+    )
+
+
 def render_report(assessment: Assessment) -> str:
     from fixedyet.report import render_markdown
 
@@ -170,6 +203,12 @@ def render_backport(result: BackportResult) -> str:
     from fixedyet.report import render_backport_markdown
 
     return render_backport_markdown(result)
+
+
+def render_fix(result: FixResult) -> str:
+    from fixedyet.report import render_fix_markdown
+
+    return render_fix_markdown(result)
 
 
 def budget_remaining(settings: Any) -> float:
@@ -238,9 +277,9 @@ class Run:
     assessment: dict[str, Any] | None = None
     markdown: str | None = None
     error: str | None = None
-    kind: str = "run"  # run | backport
-    report_id: str | None = None  # a backport job: the report whose fix it backports
-    result: dict[str, Any] | None = None  # a backport job: {"status", "pr_url"} once finished
+    kind: str = "run"  # run | backport | fix
+    report_id: str | None = None  # a backport or fix job: the report it works on
+    result: dict[str, Any] | None = None  # a backport or fix job: {"status", "pr_url"} at the end
     _changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
@@ -790,6 +829,17 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         """Step 2: a DRAFT pull request for a verified backport. Body ``{"target": "fork"}``, or
         ``{"target": "upstream", "confirm": "<owner/repo>"}``: the upstream project only when
         ``confirm`` names it, so the maintainer types the repository before anything is posted."""
+        reports = get_reports()
+        return await _pull_request_step(
+            report_id, request, what="backport", key="backport",
+            load=reports.load_backport, save=reports.save_backport, verified=_verified_result,
+            open_pr=lambda result, **kw: open_draft_pr(result, **kw),
+        )
+
+    @app.post("/api/reports/{report_id}/fix")
+    async def start_fix(report_id: str, request: Request) -> Response:
+        """Step 1 for an open bug: the model writes a fix and the sandbox verifies it. A job with
+        the same progress stream as a backport; no pull request."""
         denied = admin_gate(request)
         if denied is not None:
             return denied
@@ -797,12 +847,69 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         found = await asyncio.to_thread(reports.find, report_id, include_hidden=True)
         if found is None:
             return _error(404, "not_found", "No such report.")
-        record = reports.load_backport(report_id)
-        result = _verified_result(record)
+        saved = reports.load_fix(report_id)
+        if saved and saved.get("status") == "verified":  # already verified: nothing to redo
+            return JSONResponse({"report_id": report_id, "fix": saved})
+        assessment = Assessment.model_validate(found.assessment) if found.assessment else None
+        if assessment is None or not fix_ready(assessment):
+            return _error(
+                422, "not_fixable",
+                "Only an open bug with a reproduction test can get a fix attempt.",
+            )
+        if budget_remaining(get_settings()) + 1e-9 < float(
+            getattr(get_settings(), "fix_budget_usd", 0.25)
+        ):
+            return _error(
+                429, "budget_exhausted",
+                "The total spending budget has less left than one fix may cost.",
+            )
+        store = get_store()
+        if store.active is not None and not store.active.finished:
+            return _error(
+                409, "busy",
+                "A run, a backport or a fix is in progress and the server does one thing at a "
+                "time. Try again when it has finished.",
+                headers={"Retry-After": "120"},
+            )
+        run = store.create(assessment.issue_url, kind="fix", report_id=report_id)
+        task = asyncio.create_task(_execute_fix(store, reports, run, assessment, get_settings()))
+        store.tasks.add(task)
+        task.add_done_callback(store.tasks.discard)
+        return JSONResponse({"id": run.id}, status_code=202)
+
+    @app.post("/api/reports/{report_id}/fix/pr")
+    async def open_fix_pull_request(report_id: str, request: Request) -> Response:
+        """Step 2: a DRAFT pull request for a verified fix, against the default branch. The same
+        body and the same typed confirmation as a backport's step 2."""
+        reports = get_reports()
+        return await _pull_request_step(
+            report_id, request, what="fix", key="fix",
+            load=reports.load_fix, save=reports.save_fix, verified=_verified_fix,
+            open_pr=lambda result, **kw: open_fix_draft_pr(result, **kw),
+        )
+
+    async def _pull_request_step(
+        report_id: str, request: Request, *, what: str, key: str,
+        load: Callable[[str], dict[str, Any] | None],
+        save: Callable[[str, dict[str, Any]], None],
+        verified: Callable[[dict[str, Any] | None], Any],
+        open_pr: Callable[..., Any],
+    ) -> Response:
+        """Step 2 of a backport or a fix: checks, the typed confirmation for the upstream project,
+        one pull request per target, and the record saved with it."""
+        denied = admin_gate(request)
+        if denied is not None:
+            return denied
+        reports = get_reports()
+        found = await asyncio.to_thread(reports.find, report_id, include_hidden=True)
+        if found is None:
+            return _error(404, "not_found", "No such report.")
+        record = load(report_id)
+        result = verified(record)
         if record is None or result is None:
             return _error(
                 409, "not_verified",
-                "Verify the backport first: only a verified backport gets a pull request.",
+                f"Verify the {what} first: only a verified {what} gets a pull request.",
             )
         try:
             body = await request.json()
@@ -822,17 +929,18 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
                     400, "confirmation_mismatch",
                     f"Type {result.repo} to confirm a pull request on the upstream project.",
                 )
+        shown = public_record if key == "backport" else (lambda r: r)
         existing = (record.get("prs") or {}).get(target)
         if isinstance(existing, dict) and existing.get("url"):  # this target has its PR already
             return JSONResponse({
                 "report_id": report_id, "target": target, "pr_url": existing["url"],
-                "created": False, "backport": public_record(record),
+                "created": False, key: shown(record),
             })
         settings = get_settings()
         try:
             token = await asyncio.to_thread(github_token, settings)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("backport pr %s: no GitHub token (%s)", report_id, type(exc).__name__)
+            logger.warning("%s pr %s: no GitHub token (%s)", what, report_id, type(exc).__name__)
             return _error(
                 503, "no_github_token",
                 "The server has no GitHub token: GITHUB_TOKEN is unset and gh is not installed "
@@ -840,11 +948,11 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             )
 
         def say(message: str) -> None:
-            logger.info("backport pr %s: %s", report_id, message)
+            logger.info("%s pr %s: %s", what, report_id, message)
 
         try:
             async with asyncio.timeout(PULL_REQUEST_TIMEOUT_S):
-                pr = await open_draft_pr(result, token=token, say=say, target=target)
+                pr = await open_pr(result, token=token, say=say, target=target)
             if not str(getattr(pr, "url", "") or ""):
                 raise ValueError("GitHub returned no pull request URL")
         except TimeoutError:
@@ -854,13 +962,13 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
                 "and the branch are reused, and nothing is opened twice.",
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("backport pr %s failed", report_id)
+            logger.exception("%s pr %s failed", what, report_id)
             return _error(502, "pull_request_failed", _public_job_error(exc, token))
         record = _with_pr(record, target, pr)
-        await asyncio.to_thread(reports.save_backport, report_id, record)
+        await asyncio.to_thread(save, report_id, record)
         return JSONResponse({
             "report_id": report_id, "target": target, "pr_url": record["prs"][target]["url"],
-            "created": bool(getattr(pr, "created", True)), "backport": public_record(record),
+            "created": bool(getattr(pr, "created", True)), key: shown(record),
         })
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -920,6 +1028,19 @@ def _verified_result(record: dict[str, Any] | None) -> BackportResult | None:
         return None
     try:
         result = BackportResult.model_validate(record["result"])
+    except ValueError:
+        return None
+    return result if result.status.value == "verified" else None
+
+
+def _verified_fix(record: dict[str, Any] | None) -> FixResult | None:
+    """The FixResult of a saved record whose status is verified, else None."""
+    if not record or record.get("status") != "verified":
+        return None
+    if not isinstance(record.get("result"), dict):
+        return None
+    try:
+        result = FixResult.model_validate(record["result"])
     except ValueError:
         return None
     return result if result.status.value == "verified" else None
@@ -1006,6 +1127,56 @@ async def _execute_backport(
         logger.exception("backport job %s failed", run.id)
         run.status = "error"
         run.error = _public_job_error(exc)
+        run.add_event(ProgressEvent(stage="error", message=run.error).model_dump(mode="json"))
+    finally:
+        store.finish(run)
+
+
+async def _execute_fix(
+    store: RunStore, reports: ReportStore, run: Run, assessment: Assessment, settings: Any,
+) -> None:
+    """Step 1 for an open bug: the model writes a fix and the sandbox verifies it. No pull request.
+    The result is saved with ``pr_url`` null so the maintainer can read the diff before step 2."""
+
+    async def progress(event: ProgressEvent) -> None:
+        run.add_event(event.model_dump(mode="json"))
+
+    try:
+        async with asyncio.timeout(FIX_TIMEOUT_S):
+            result = await run_fix(assessment, settings=settings, progress=progress)
+            record = {
+                "report_id": run.report_id,
+                "issue_url": assessment.issue_url,
+                "status": result.status.value,
+                "pr_url": None,
+                "pr_target": None,
+                "pr_number": None,
+                "prs": {},
+                "result": result.model_dump(mode="json"),
+                "saved_at": _iso(_now()),
+            }
+            await asyncio.to_thread(reports.save_fix, run.report_id or "", record)
+        run.result = {"status": record["status"], "pr_url": None}
+        with contextlib.suppress(Exception):
+            run.markdown = render_fix(result)
+        run.status = "done"
+        message = (
+            "Verified. Read the diff, then open the draft pull request."
+            if result.status.value == "verified"
+            else f"Fix {result.status.value}: {result.reason}"
+        )
+        run.add_event(ProgressEvent(stage="done", message=message).model_dump(mode="json"))
+    except asyncio.CancelledError:
+        run.status = "error"
+        run.error = "The server was shut down while this fix was in progress."
+        raise
+    except Exception as exc:
+        logger.exception("fix job %s failed", run.id)
+        run.status = "error"
+        run.error = (
+            f"The fix took longer than {FIX_TIMEOUT_S // 60} minutes and was stopped."
+            if isinstance(exc, TimeoutError) else _public_job_error(exc)
+        )
         run.add_event(ProgressEvent(stage="error", message=run.error).model_dump(mode="json"))
     finally:
         store.finish(run)

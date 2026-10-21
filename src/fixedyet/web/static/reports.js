@@ -1,5 +1,6 @@
 /* FixedYet reports page: every saved report in a list, one report in detail, and the maintainer's
- * controls (backport a fix to a draft pull request, hide a report). No build step.
+ * controls (backport a fix to a draft pull request, attempt a fix of an open bug, hide a report).
+ * No build step.
  *
  * The helpers and the report renderers are in common.js (FY), shared with the demo page.
  * Everything that comes from the server is untrusted and goes into the page as text, never as HTML.
@@ -17,7 +18,8 @@
 
   const {
     $, el, link, gh, refLink, commitLink, linkify, formatCost, formatDuration, formatDate,
-    copyText, codeBlock, renderReport, renderBackport, VERDICTS, BACKPORT_STATUS,
+    copyText, codeBlock, renderReport, renderBackport, renderFix, VERDICTS, BACKPORT_STATUS,
+    FIX_STATUS,
   } = globalThis.FY;
 
   const TOKEN_KEY = 'fixedyet-maintainer-token';
@@ -82,10 +84,20 @@
     if (r.backport && r.backport.status === 'not_applicable') {
       return el('span', { class: 'rr-nobp', text: 'No maintenance branch to backport to' });
     }
-    if (!r.can_backport) return null;
+    if (!r.can_backport) return fixAction(r);
     const verified = r.backport && r.backport.status === 'verified';
     const label = !state.admin ? 'Backport fix → draft PR' : (verified ? 'Review and open PR' : 'Verify backport');
     return el('a', { class: 'btn small primary', href: `#${encodeURIComponent(r.id)}`, text: label });
+  }
+
+  // An open bug's way into fix mode: the PR once there is one; for the maintainer, the button that
+  // opens the report with its fix card on top; for a visitor, only a verified fix is mentioned.
+  function fixAction(r) {
+    if (r.fix && r.fix.pr_url) return link(r.fix.pr_url, 'Draft PR', 'rr-pr');
+    if (!r.can_fix) return null;
+    const verified = r.fix && r.fix.status === 'verified';
+    if (!state.admin) return verified ? el('span', { class: 'rr-nobp', text: 'Verified fix' }) : null;
+    return el('a', { class: 'btn small primary', href: `#${encodeURIComponent(r.id)}`, text: verified ? 'Review fix and open PR' : 'Attempt a fix' });
   }
 
   function reportRow(r) {
@@ -278,8 +290,16 @@
     if (result.patch) {
       parts.push(el('details', null, el('summary', { text: 'Review the patch' }), codeBlock(result.patch, 'diff')));
     }
+    parts.push(...prButtons(d, record, area, 'backport', result.repo || repo || ''));
+    return parts;
+  }
+
+  // The two ways to open the draft pull request of a verified backport or fix: on the upstream
+  // project after typing its name, or in the maintainer's fork only. A target that has its pull
+  // request already has no button.
+  function prButtons(d, record, area, kind, upstreamRepo) {
     const prs = record.prs || {};
-    const upstreamRepo = result.repo || repo || '';
+    const parts = [];
     const actions = el('div', { class: 'pr-actions' });
     if (!(prs.upstream && prs.upstream.url) && upstreamRepo) {
       // Posting on someone else's project: the maintainer types its name first, as the CLI asks.
@@ -293,7 +313,7 @@
       input.addEventListener('input', () => { submit.disabled = !matches(); });
       input.addEventListener('keydown', (event) => { if (event.key === 'Enter' && matches()) submit.click(); });
       open.addEventListener('click', () => { confirmRow.hidden = false; open.hidden = true; input.focus(); });
-      submit.addEventListener('click', () => openPullRequest(d, 'upstream', submit, area, input.value.trim()));
+      submit.addEventListener('click', () => openPullRequest(d, 'upstream', submit, area, input.value.trim(), kind));
       actions.append(open);
       parts.push(actions, confirmRow);
     } else {
@@ -301,7 +321,7 @@
     }
     if (!(prs.fork && prs.fork.url)) {
       const forkButton = el('button', { class: 'btn small', type: 'button', text: 'Open in my fork only' });
-      forkButton.addEventListener('click', () => openPullRequest(d, 'fork', forkButton, area));
+      forkButton.addEventListener('click', () => openPullRequest(d, 'fork', forkButton, area, undefined, kind));
       actions.append(forkButton);
     }
     return parts;
@@ -312,7 +332,7 @@
     const verifiedRecord = record && record.status === 'verified';
     const card = el('section', { class: 'card backport-card' });
     card.append(el('div', { class: 'card-head' }, el('h3', { text: d.kind === 'backport' ? 'Pull request' : 'Backport' })));
-    const flashed = state.flash && state.flash.id === d.id;
+    const flashed = state.flash && state.flash.id === d.id && state.flash.card !== 'fix';
     if (flashed) {
       card.append(notice(state.flash.text, state.flash.kind));
       state.flash = null;
@@ -358,14 +378,87 @@
     return card.childElementCount > 1 ? card : null;
   }
 
+  // The maintainer's view of a verified fix: the facts, the model's summary, the diff to review
+  // (light, line by line) and the two pull request buttons.
+  function verifiedFixPanel(d, record, area) {
+    const result = record.result || {};
+    const repo = gh.repoOf(result.repo) || gh.repoOf(d.summary.issue_url);
+    const branch = result.base_branch || 'main';
+    const fact = (label, value) => el('div', null, el('dt', { text: label }), el('dd', null, value));
+    const facts = [];
+    if (result.base_sha) facts.push(fact('Verified on', el('span', null, `${branch} at `, commitLink(repo, result.base_sha))));
+    facts.push(fact('Change', `${(result.files_changed || []).length} file(s), +${result.lines_added || 0} −${result.lines_removed || 0}`));
+    facts.push(fact('Suite without', suiteText(result.suite_before)), fact('Suite with', suiteText(result.suite_after)));
+    facts.push(fact('Regression test', result.regression_test_path || 'none (no test directory)'));
+    const parts = [el('dl', { class: 'facts' }, facts)];
+    if (result.summary) parts.push(el('p', { class: 'fix-summary' }, el('strong', { text: result.summary })));
+    if (result.explanation) {
+      parts.push(el('p', { class: 'fix-explain' }, linkify(result.explanation, repo)),
+        el('p', { class: 'muted small', text: 'Written by the model. The sandbox checked the behaviour, not this text. Read the diff before you open a pull request.' }));
+    }
+    if (result.diff) parts.push(codeBlock(result.diff, 'diff'));
+    parts.push(...prButtons(d, record, area, 'fix', result.repo || repo || ''));
+    return parts;
+  }
+
+  function fixCard(d) {
+    if (d.kind === 'backport') return null;
+    const record = d.fix;
+    if (!d.can_fix && !record) return null;
+    const verified = record && record.status === 'verified';
+    const card = el('section', { class: 'card backport-card fix-card' });
+    card.append(el('div', { class: 'card-head' }, el('h3', { text: 'Fix' })));
+    if (state.flash && state.flash.id === d.id && state.flash.card === 'fix') {
+      card.append(notice(state.flash.text, state.flash.kind));
+      state.flash = null;
+    }
+    if (record) {
+      const lines = prLines(record);
+      lines.forEach((line) => card.append(line));
+      if (lines.length) card.append(el('p', { class: 'muted small', text: 'Opened as a draft. Its description says the change was written by AI and verified by machine.' }));
+    }
+    const area = el('div', { class: 'fix-area' });
+    if (state.admin && verified) {
+      card.append(...verifiedFixPanel(d, record, area), area);
+    } else if (d.can_fix && !verified) {
+      if (record) {
+        const meta = FIX_STATUS[`fix_${record.status}`] || { label: record.status, tone: 'muted' };
+        card.append(el('p', null, 'Last try: ', el('span', { class: `badge ${meta.tone}`, text: meta.label }),
+          record.result && record.result.reason ? ` ${record.result.reason}` : ''));
+      }
+      if (state.admin) {
+        const button = el('button', { class: 'btn primary', type: 'button', text: record ? 'Attempt a fix again' : 'Attempt a fix' });
+        button.addEventListener('click', () => startFix(d, button, area));
+        card.append(
+          el('p', { class: 'muted', text: 'Asks Nemotron for the smallest change that makes the reproduction test pass on the default branch, then checks it in the sandbox: the test must fail without it and pass with it, and the project\'s own tests must show no new failures. Up to 3 attempts. No pull request is opened yet.' }),
+          el('div', { class: 'pr-actions' }, button), area);
+      } else {
+        const url = d.summary.issue_url || '<issue-url>';
+        card.append(el('p', { class: 'muted' }, 'The bug is still there on the default branch. Only the demo\'s maintainer can run a fix attempt here. To try it yourself: ',
+          el('code', { text: `fixedyet fix ${url}` }), '.'));
+      }
+    } else if (verified && !state.admin) {
+      card.append(el('p', { class: 'muted', text: 'A verified fix exists. Only the demo\'s maintainer can open a pull request from it.' }));
+    }
+    if (record && record.result) {
+      card.append(el('details', null,
+        el('summary', { text: 'Show the fix report' }),
+        renderFix(record.result, null, {})));
+    }
+    return card.childElementCount > 1 ? card : null;
+  }
+
   function drawDetail(d) {
     state.detail = d;
     const parts = [detailBar(d)];
     const card = backportCard(d);
     if (card) parts.push(card);
+    const fix = fixCard(d);
+    if (fix) parts.push(fix);
     parts.push(reportNode(d));
     $('#detail').replaceChildren(...parts);
-    if (state.admin && d.can_backport) resumeJob(d);
+    if (state.admin && d.can_backport) resumeJob(d, 'backport');
+    if (state.admin && d.can_fix) resumeJob(d, 'fix');
   }
 
   async function showDetail(id, { keepScroll = false } = {}) {
@@ -410,7 +503,28 @@
     showDetail(id);
   }
 
-  // ---------- the maintainer's backport job ----------
+  // ---------- the maintainer's jobs: a backport, or a fix ----------
+
+  const jobKey = (kind, d) => (kind === 'fix' ? `${JOB_KEY}fix:${d.id}` : JOB_KEY + d.id);
+
+  async function startFix(d, button, area) {
+    button.disabled = true;
+    area.replaceChildren(el('p', { class: 'muted', text: 'Starting…' }));
+    let res;
+    try {
+      res = await api(`api/reports/${encodeURIComponent(d.id)}/fix`, { method: 'POST' });
+    } catch {
+      button.disabled = false;
+      area.replaceChildren(notice('Could not reach the server. Check your connection and try again.', 'error'));
+      return;
+    }
+    if (res.status === 401) { signOut('Your maintainer token was not accepted. Sign in again.'); return; }
+    if (res.status === 404) { signOut('Maintainer mode is not available on this server.'); return; }
+    if (res.status === 200) { await showDetail(d.id, { keepScroll: true }); return; }  // verified already
+    if (res.status === 202 && res.body && res.body.id) { watchJob(res.body.id, d, area, 'fix'); return; }
+    button.disabled = false;
+    area.replaceChildren(notice((res.body && res.body.message) || 'The fix could not be started.', 'error'));
+  }
 
   async function startBackport(d, button, area, targetBranch) {
     button.disabled = true;
@@ -433,13 +547,13 @@
     area.replaceChildren(notice((res.body && res.body.message) || 'The backport could not be started.', 'error'));
   }
 
-  // Step 2: open the draft pull request for a verified backport. A short request, no log.
-  async function openPullRequest(d, target, button, area, confirm) {
+  // Step 2: open the draft pull request for a verified backport or fix. A short request, no log.
+  async function openPullRequest(d, target, button, area, confirm, kind = 'backport') {
     button.disabled = true;
     area.replaceChildren(el('p', { class: 'muted', text: 'Opening the draft pull request…' }));
     let res;
     try {
-      res = await api(`api/reports/${encodeURIComponent(d.id)}/backport/pr`, {
+      res = await api(`api/reports/${encodeURIComponent(d.id)}/${kind === 'fix' ? 'fix' : 'backport'}/pr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(target === 'upstream' ? { target, confirm } : { target }),
@@ -456,26 +570,29 @@
     area.replaceChildren(notice((res.body && res.body.message) || 'The pull request could not be opened.', 'error'));
   }
 
-  async function resumeJob(d) {
-    const jobId = store.get('sessionStorage', JOB_KEY + d.id);
+  async function resumeJob(d, kind = 'backport') {
+    const jobId = store.get('sessionStorage', jobKey(kind, d));
     if (!jobId) return;
     let res = null;
     try { res = await api(`api/runs/${encodeURIComponent(jobId)}`); } catch { /* try again on reload */ }
-    const area = $('.backport-area');
+    const area = $(kind === 'fix' ? '.fix-area' : '.backport-area');
     if (res && res.ok && res.body && res.body.status === 'running' && area && state.detail === d) {
-      watchJob(jobId, d, area);
+      watchJob(jobId, d, area, kind);
     } else {
-      store.set('sessionStorage', JOB_KEY + d.id, '');
+      store.set('sessionStorage', jobKey(kind, d), '');
     }
   }
 
-  function watchJob(jobId, d, area) {
+  function watchJob(jobId, d, area, kind = 'backport') {
     stopWatching();
-    store.set('sessionStorage', JOB_KEY + d.id, jobId);
+    store.set('sessionStorage', jobKey(kind, d), jobId);
     const button = area.parentElement && area.parentElement.querySelector('button.primary');
     if (button) button.disabled = true;
     const log = el('ol', { class: 'job-log', 'aria-live': 'polite' });
-    area.replaceChildren(el('p', { class: 'job-title', text: 'Verifying the backport. This can take 30 minutes or more.' }), log);
+    const title = kind === 'fix'
+      ? 'Attempting a fix: the model proposes a change and the sandbox checks it. This can take 30 minutes or more.'
+      : 'Verifying the backport. This can take 30 minutes or more.';
+    area.replaceChildren(el('p', { class: 'job-title', text: title }), log);
     let seen = 0;
     let finished = false;
     const add = (event) => {
@@ -485,8 +602,8 @@
       if (finished) return;
       finished = true;
       stopWatching();
-      store.set('sessionStorage', JOB_KEY + d.id, '');
-      state.flash = error ? { id: d.id, kind: 'error', text: error } : null;
+      store.set('sessionStorage', jobKey(kind, d), '');
+      state.flash = error ? { id: d.id, kind: 'error', text: error, card: kind } : null;
       await showDetail(d.id, { keepScroll: true });
     };
     const poll = async () => {

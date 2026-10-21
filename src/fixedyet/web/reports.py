@@ -3,6 +3,7 @@
     <runs_dir>/<stamp>-<owner>-<repo>-<number>/assessment.json + report.md   finished runs
     examples/*.json + *.md                                                   curated examples
     <runs_dir>/backports/<report id>.json                                    backport + draft PR
+    <runs_dir>/fixes/<report id>.json                                        fix + draft PR
     <runs_dir>/hidden.json                                                   ids kept off the page
 
 Report ids come from the URL, so every one is checked against a strict pattern and every path
@@ -32,6 +33,7 @@ logger = logging.getLogger("fixedyet.web")
 
 REPORT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 BACKPORTS_DIR = "backports"
+FIXES_DIR = "fixes"
 HIDDEN_FILE = "hidden.json"
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")  # the rule backport.py applies to a fixing commit
 STALE_DAYS = 180  # a target branch with no commit for longer than this looks abandoned
@@ -72,6 +74,20 @@ def backport_ready(assessment: Assessment) -> bool:
         and bool(_SHA.match((rep.fixing_commit or "").strip()))
         and bool(rep.repro_test_code and rep.repro_test_path)
     )
+
+
+def fix_ready(assessment: Assessment) -> bool:
+    """True when fix mode has something to work with: an open bug with a reproduction test, on a
+    GitHub issue (the rule `fixmode.fix_ready` applies)."""
+    rep = assessment.reproduction
+    if assessment.verdict is not Verdict.OPEN_BUG or not (rep.repro_test_code
+                                                         and rep.repro_test_path):
+        return False
+    try:
+        parse_issue_url(assessment.issue_url)
+    except ValueError:
+        return False
+    return True
 
 
 def _iso(value: datetime) -> str:
@@ -174,7 +190,8 @@ def normalise_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarise(
-    report_id: str, assessment: Assessment, *, example: bool, record: dict[str, Any] | None
+    report_id: str, assessment: Assessment, *, example: bool, record: dict[str, Any] | None,
+    fix_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rep = assessment.reproduction
     try:
@@ -201,6 +218,8 @@ def summarise(
         "example": example,
         "backport": backport_summary(record),
         "can_backport": backport_ready(assessment),
+        "fix": backport_summary(fix_record),
+        "can_fix": fix_ready(assessment),
     }
 
 
@@ -234,6 +253,8 @@ def summarise_backport(
             "pr_target": pr_target_of(pr_url, result.repo),
         },
         "can_backport": False,
+        "fix": None,
+        "can_fix": False,
     }
 
 
@@ -248,6 +269,7 @@ class Found:
     markdown: str
     record: dict[str, Any] | None  # the saved backport (an example backport's own result too)
     extra: dict[str, Any]  # label, note, illustrative, pr_url of an example
+    fix_record: dict[str, Any] | None = None  # the saved fix of an open bug
 
 
 class ReportStore:
@@ -292,17 +314,17 @@ class ReportStore:
             ids.discard(report_id)
         write_json_atomic(self._hidden_path, {"hidden": sorted(ids)})
 
-    # -- saved backports ----------------------------------------------------------------
+    # -- saved backports and fixes ------------------------------------------------------
 
-    def backport_path(self, report_id: str) -> Path | None:
+    def _record_path(self, folder_name: str, report_id: str) -> Path | None:
         if not valid_report_id(report_id):
             return None
-        folder = self.runs_dir / BACKPORTS_DIR
+        folder = self.runs_dir / folder_name
         path = folder / f"{report_id}.json"
         return path if inside(path, folder) else None
 
-    def load_backport(self, report_id: str) -> dict[str, Any] | None:
-        path = self.backport_path(report_id)
+    def _load_record(self, folder_name: str, report_id: str) -> dict[str, Any] | None:
+        path = self._record_path(folder_name, report_id)
         if path is None:
             return None
         try:
@@ -310,17 +332,35 @@ class ReportStore:
         except FileNotFoundError:
             return None
         except (OSError, ValueError):
-            logger.debug("skipping unreadable saved backport %s", path.name)
+            logger.debug("skipping unreadable saved %s record %s", folder_name, path.name)
             return None
         if not (isinstance(data, dict) and isinstance(data.get("status"), str)):
             return None
         return normalise_record(data)
 
-    def save_backport(self, report_id: str, record: dict[str, Any]) -> None:
-        path = self.backport_path(report_id)
+    def _save_record(self, folder_name: str, report_id: str, record: dict[str, Any]) -> None:
+        path = self._record_path(folder_name, report_id)
         if path is None:
             raise ValueError("not a report id")
         write_json_atomic(path, record)
+
+    def backport_path(self, report_id: str) -> Path | None:
+        return self._record_path(BACKPORTS_DIR, report_id)
+
+    def load_backport(self, report_id: str) -> dict[str, Any] | None:
+        return self._load_record(BACKPORTS_DIR, report_id)
+
+    def save_backport(self, report_id: str, record: dict[str, Any]) -> None:
+        self._save_record(BACKPORTS_DIR, report_id, record)
+
+    def fix_path(self, report_id: str) -> Path | None:
+        return self._record_path(FIXES_DIR, report_id)
+
+    def load_fix(self, report_id: str) -> dict[str, Any] | None:
+        return self._load_record(FIXES_DIR, report_id)
+
+    def save_fix(self, report_id: str, record: dict[str, Any]) -> None:
+        self._save_record(FIXES_DIR, report_id, record)
 
     # -- reading reports ----------------------------------------------------------------
 
@@ -351,9 +391,10 @@ class ReportStore:
         if not include_hidden and report_id in self.hidden_ids():
             return None
         record = self.load_backport(report_id)
+        fix_record = self.load_fix(report_id)
         example = self._example(report_id)
         if example is not None:
-            return self._found_example(example, record)
+            return self._found_example(example, record, fix_record)
         folder = self._run_folder(report_id)
         assessment = self._read_run(folder) if folder else None
         if folder is None or assessment is None:
@@ -366,12 +407,16 @@ class ReportStore:
                 markdown = self._render(assessment)
         return Found(
             id=report_id, example=False,
-            summary=summarise(report_id, assessment, example=False, record=record),
+            summary=summarise(report_id, assessment, example=False, record=record,
+                              fix_record=fix_record),
             assessment=assessment.model_dump(mode="json"), markdown=markdown, record=record,
-            extra={},
+            extra={}, fix_record=fix_record,
         )
 
-    def _found_example(self, item: dict[str, Any], record: dict[str, Any] | None) -> Found:
+    def _found_example(
+        self, item: dict[str, Any], record: dict[str, Any] | None,
+        fix_record: dict[str, Any] | None = None,
+    ) -> Found:
         report_id = str(item["id"])
         extra = {
             "label": item.get("label", ""), "note": item.get("note", ""),
@@ -394,9 +439,10 @@ class ReportStore:
         assessment = Assessment.model_validate(item["assessment"])
         return Found(
             id=report_id, example=True,
-            summary=summarise(report_id, assessment, example=True, record=record),
+            summary=summarise(report_id, assessment, example=True, record=record,
+                              fix_record=fix_record),
             assessment=item["assessment"], markdown=item.get("markdown", ""), record=record,
-            extra=extra,
+            extra=extra, fix_record=fix_record,
         )
 
     def detail(self, found: Found, *, admin: bool) -> dict[str, Any]:
@@ -410,6 +456,8 @@ class ReportStore:
             "markdown": found.markdown,
             "backport": public_record(found.record),
             "can_backport": found.summary["can_backport"],
+            "fix": found.fix_record,
+            "can_fix": found.summary["can_fix"],
             "hidden": found.id in self.hidden_ids() if admin else False,
         }
 
@@ -445,11 +493,16 @@ class ReportStore:
         """Summaries of every example and every readable run, newest first."""
         summaries: dict[str, dict[str, Any]] = {}
         for summary in self._run_summaries():
-            summary = {**summary, "backport": backport_summary(self.load_backport(summary["id"]))}
+            summary = {
+                **summary, "backport": backport_summary(self.load_backport(summary["id"])),
+                "fix": backport_summary(self.load_fix(summary["id"])),
+            }
             summaries[summary["id"]] = summary
         for item in self._examples():  # examples win over a run folder with the same name
             try:
-                found = self._found_example(item, self.load_backport(str(item["id"])))
+                found = self._found_example(
+                    item, self.load_backport(str(item["id"])), self.load_fix(str(item["id"]))
+                )
             except ValueError:
                 logger.debug("skipping invalid example %s", item.get("id"))
                 continue
