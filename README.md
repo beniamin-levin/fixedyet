@@ -33,12 +33,12 @@ Most bug reports get answered from memory, from the docs, or from a model that n
 | [Fix mode](docs/fix-mode.md): search/replace edits for an open bug | Nemotron 3 Super, with reasoning | up to 16,000 tokens and 420 s per call |
 | The verdict | **no model** | `verdict.py`, a decision matrix over exit codes |
 
-Other parts: **Tavily** search and extract find duplicates, upstream reports and the changelog entry of a fix. **Nebius Sandboxes** is the intended sandbox (one checkpoint per repository and version, every attempt and both verdict runs as forks of it); the backend is written (`sandbox/nebius.py`, on `contree-sdk`) but has not run against the live service, because beta access is still pending. The **Docker backend** implements the same checkpoint-and-fork interface and ran every result here.
+Other parts: **Tavily** search and extract find similar issues, upstream reports and the changelog entry of a fix; when no pull request names the fix, a `git bisect` in the sandbox finds the fixing commit. **Nebius Sandboxes** is the intended sandbox (one checkpoint per repository and version, every attempt and both verdict runs as forks of it); the backend is written (`sandbox/nebius.py`, on `contree-sdk`) but has not run against the live service, because beta access is still pending. The **Docker backend** implements the same checkpoint-and-fork interface and ran every result here.
 
 How Token Factory sped the work up:
 
 - **An OpenAI-compatible endpoint.** The agent loop is the stock `openai` client with a different base URL: no SDK and no agent framework to learn, and Nano and Super sit behind the same client.
-- **The price made measuring cheap.** A run averages about 90,000 input and 5,000 output tokens, about $0.03 at $0.30 / $0.90 per million for Super. A full 15-issue SWE-bench run cost $0.47, so the evaluation was run twice, and live issues were run again after each environment fix they exposed.
+- **The price made measuring cheap.** A run averages about 90,000 input and 5,000 output tokens, about $0.03 at $0.30 / $0.90 per million for Super. A full 15-issue SWE-bench run cost $0.41 to $0.47, so the evaluation was run three times, and live issues were run again after each environment fix they exposed.
 - **Fast enough for a live demo.** About 15 model calls a run fit in a mean wall time of 1.5 minutes per SWE-bench issue, sandbox time included.
 
 ## How it works
