@@ -15,7 +15,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
-from fixedyet.config import Settings, get_settings
+from fixedyet.config import Settings, get_settings, normalize_root_path
 from fixedyet.models import Assessment, ProgressEvent
 
 OK, FAIL, SKIP = "ok", "FAIL", "skip"
@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="run the demo web app")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8090)
+    serve.add_argument(
+        "--root-path",
+        metavar="PREFIX",
+        help="URL prefix the app is served under behind a reverse proxy that strips it, "
+        "for example /fixedyet (default: FIXEDYET_ROOT_PATH, else none)",
+    )
 
     commands.add_parser("mcp", help="run the MCP server on stdio")
 
@@ -78,7 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "doctor":
         return asyncio.run(_doctor(get_settings(), tavily=args.tavily))
     if args.command == "serve":
-        return _serve(args.host, args.port)
+        return _serve(args.host, args.port, args.root_path)
     if args.command == "mcp":
         return _mcp()
     if args.command == "gc":
@@ -253,13 +259,22 @@ def _eval(argv: list[str]) -> int:
     return int(eval_main(argv) or 0)
 
 
-def _serve(host: str, port: int) -> int:
+def _serve(host: str, port: int, root_path: str | None = None) -> int:
     if not _module_exists("fixedyet.web.app"):
         print("error: fixedyet.web.app is not installed", file=sys.stderr)
         return 2
     import uvicorn
 
-    uvicorn.run("fixedyet.web.app:app", host=host, port=port)
+    try:
+        prefix = (
+            normalize_root_path(root_path)
+            if root_path is not None
+            else get_settings().root_path
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    uvicorn.run("fixedyet.web.app:app", host=host, port=port, root_path=prefix)
     return 0
 
 

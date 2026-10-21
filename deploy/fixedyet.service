@@ -1,0 +1,37 @@
+[Unit]
+Description=FixedYet demo (FastAPI)
+Documentation=https://github.com/beniamin-levin/fixedyet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fixedyet
+Group=fixedyet
+WorkingDirectory=/opt/fixedyet
+# Secrets live here, not in the repository. See deploy/README.md. Mode 600, owned by root.
+EnvironmentFile=/etc/fixedyet.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/fixedyet/.venv/bin/fixedyet serve --host 127.0.0.1 --port 8090 --root-path /fixedyet
+Restart=on-failure
+RestartSec=5
+
+# The VM has 1 GB of RAM and serves other sites: keep this service small.
+MemoryMax=300M
+TasksMax=128
+
+# Hardening. The service needs the network and write access to /opt/fixedyet/runs only.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/opt/fixedyet/runs
+
+[Install]
+WantedBy=multi-user.target

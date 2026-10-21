@@ -3,6 +3,9 @@
  * Everything that comes from the server (issue titles, logs, markdown, test code) is untrusted.
  * Nothing is ever put into the page as HTML: text goes through textContent, and the tiny
  * markdown and Python renderers below build DOM nodes directly.
+ *
+ * Every URL this file requests is relative and has no leading slash (api/status), so the page
+ * works at the root of a host and under a prefix such as https://benlevin.fyi/fixedyet/.
  */
 (() => {
   'use strict';
@@ -484,7 +487,7 @@
 
   async function refreshStatus() {
     try {
-      const res = await fetch('/api/status');
+      const res = await fetch('api/status');
       if (!res.ok) return;
       const s = await res.json();
       const hint = $('#form-hint');
@@ -535,7 +538,7 @@
 
   async function loadExamples() {
     try {
-      const res = await fetch('/api/examples');
+      const res = await fetch('api/examples');
       if (res.ok) examples = await res.json();
     } catch {
       examples = [];
@@ -563,7 +566,7 @@
   }
 
   async function fetchRun(id) {
-    const res = await fetch(`/api/runs/${encodeURIComponent(id)}`);
+    const res = await fetch(`api/runs/${encodeURIComponent(id)}`);
     if (!res.ok) return null;
     return res.json();
   }
@@ -596,7 +599,7 @@
     };
 
     if (!('EventSource' in window)) { poll(); return; }
-    source = new EventSource(`/api/runs/${encodeURIComponent(id)}/events`);
+    source = new EventSource(`api/runs/${encodeURIComponent(id)}/events`);
     source.addEventListener('progress', (msg) => {
       seen += 1;
       try { timeline.apply(JSON.parse(msg.data)); } catch { /* ignore a malformed frame */ }
@@ -614,7 +617,7 @@
     $('#run-button').disabled = true;
     let res;
     try {
-      res = await fetch('/api/runs', {
+      res = await fetch('api/runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ issue_url: url }),

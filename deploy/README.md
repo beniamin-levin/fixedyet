@@ -1,0 +1,120 @@
+# Deploying the demo
+
+The demo at https://benlevin.fyi/fixedyet/ is the FastAPI app (`fixedyet serve --root-path /fixedyet`) on a small Oracle Cloud Ubuntu 24.04 x86 VM with 1 GB of RAM that already serves benlevin.fyi and other sites with nginx. It lives under a path of the existing benlevin.fyi server, so it needs no new DNS record and no new certificate. Everything here is written to leave the other sites alone.
+
+| File | What it is |
+|---|---|
+| `deploy.sh` | run from your Mac: copies the repo, creates the user and venv, installs the unit and the nginx files, restarts the service |
+| `fixedyet.service` | systemd unit, user `fixedyet`, `MemoryMax=300M`, hardened, started with `--root-path /fixedyet` |
+| `fixedyet.nginx.conf` | the `location /fixedyet/` block: proxies to `127.0.0.1:8090` with the prefix stripped, unbuffered for server-sent events, `proxy_read_timeout 900s`. Installed as `/etc/nginx/snippets/fixedyet.conf` |
+| `fixedyet-limits.nginx.conf` | the http-level rate-limit zone for POST requests. Installed as `/etc/nginx/conf.d/fixedyet-limits.conf` |
+
+## How the path prefix works
+
+The browser asks for `https://benlevin.fyi/fixedyet/api/status`. nginx removes `/fixedyet/` (the trailing slash on `proxy_pass http://127.0.0.1:8090/;` does that) and the app sees `/api/status`. The page itself uses only relative URLs (`static/app.js`, `api/runs`, never `/api/runs`), so it works at the root of a host and under any prefix. The service starts with `--root-path /fixedyet` (or `FIXEDYET_ROOT_PATH=/fixedyet`), which makes redirects and the URLs inside JSON answers carry the prefix again.
+
+`/fixedyet` without the final slash is redirected to `/fixedyet/`, because relative URLs need it.
+
+## Before the first deploy
+
+- benlevin.fyi already served by nginx over HTTPS on the server.
+- SSH access as `ubuntu` with passwordless `sudo`. The script checks this and stops if it is missing.
+- nginx installed on the server, with the stock `include /etc/nginx/conf.d/*.conf;` inside `http { }` (Ubuntu's package has it), and `python3.12` (Ubuntu 24.04 ships it). If `python3.12-venv` is missing the script installs that one package.
+
+## Deploy
+
+```bash
+deploy/deploy.sh SERVER_ADDRESS            # first run, and every update after it
+deploy/deploy.sh SERVER_ADDRESS --dry-run  # only list the files that would be copied
+```
+
+Optional environment variables: `DEPLOY_USER` (default `ubuntu`), `DEPLOY_SSH_KEY` (path to a key, no spaces), `DEPLOY_HOST` (instead of the argument).
+
+What the script does, in order, and what it will not do:
+
+1. Checks SSH and `sudo`, then `rsync`s the repository to `/opt/fixedyet`. It never copies `.venv`, `.env`, `runs/` or `.git`, and it never deletes them on the server.
+2. Creates the system user `fixedyet` and `/opt/fixedyet/runs` (owned by that user, mode 750) on the first run.
+3. Creates `/opt/fixedyet/.venv` with the server's `python3.12` on the first run, then `pip install -e .`.
+4. Installs `/etc/systemd/system/fixedyet.service` and enables it.
+5. Installs the two nginx files (`/etc/nginx/snippets/fixedyet.conf` and `/etc/nginx/conf.d/fixedyet-limits.conf`), then runs `nginx -t`. nginx is reloaded only if the test passes. If it fails, the old copies of the two files are put back and the script stops.
+6. Looks for the `include` line below in the enabled nginx configuration and prints **ACTION NEEDED** when it is missing.
+7. Restarts the service if `/etc/fixedyet.env` exists, then waits for `GET /healthz`. If the file is missing it prints what to do and does not start the service.
+
+It never edits an existing nginx server block and never writes `/etc/fixedyet.env`.
+
+## The one nginx edit you make yourself
+
+The script cannot know which file holds your benlevin.fyi server, and a wrong edit would break the other sites, so you add one line, once, inside that `server { }` block (the HTTPS one if there are two):
+
+```nginx
+server {
+    server_name benlevin.fyi;
+    # ... the existing configuration ...
+
+    include snippets/fixedyet.conf;
+}
+```
+
+Then check and reload:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+curl -s https://benlevin.fyi/fixedyet/healthz        # {"status":"ok"}
+```
+
+The snippet uses `location ^~ /fixedyet/`, so a regex location in the same server (for example a static-files rule) cannot take requests away from it. For server-sent events it sets `proxy_buffering off` and `proxy_read_timeout 900s`; the app sends a keepalive comment every 15 seconds, so an idle stream stays open.
+
+## Secrets
+
+The service reads its secrets from `/etc/fixedyet.env`, owned by root with mode 600. They never go in the repository. Create it once on the server:
+
+```bash
+sudo install -m 600 -o root -g root /dev/null /etc/fixedyet.env
+sudo nano /etc/fixedyet.env
+```
+
+Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does not understand inline comments, so **do not copy the `# ...` text after a value**: a line like `SOME_KEY=abc   # note` would give the key the value `abc   # note`. Put comments on their own lines, and use no quotes and no `export`.
+
+| Variable | Required | Notes |
+|---|---|---|
+| `NEBIUS_API_KEY` | yes | Token Factory API key. Also used for Sandboxes unless `CONTREE_TOKEN` is set |
+| `NEBIUS_BASE_URL` | no | default `https://api.tokenfactory.nebius.com/v1/` |
+| `NEBIUS_PROJECT_ID` | if your project needs it | the Sandboxes client sends it as the `Project` header, see the note at the top of `src/fixedyet/sandbox/nebius.py` |
+| `CONTREE_TOKEN` | no | only if the Sandboxes token differs from `NEBIUS_API_KEY` |
+| `TAVILY_API_KEY` | recommended | without it the evidence step is skipped |
+| `GITHUB_TOKEN` | recommended | fine-grained, read-only, public repositories. It lifts the GitHub rate limit, which an anonymous server reaches quickly |
+| `FIXEDYET_MODEL`, `FIXEDYET_SMALL_MODEL` | no | default to Nemotron 3 Super and Nano |
+| `FIXEDYET_SANDBOX` | no | `nebius` (default) |
+| `FIXEDYET_ROOT_PATH` | no | URL prefix the app is served under, normally `/fixedyet`. The unit already passes `--root-path /fixedyet`; the flag wins over this variable |
+| `FIXEDYET_KEEP_CHECKPOINTS` | no | only for the `docker` sandbox: how many of the newest `fixedyet-ckpt` images to keep after each run, default `6` |
+| `FIXEDYET_RUN_BUDGET_USD` | no | hard cost cap per run, default `0.60` |
+| `FIXEDYET_TOTAL_BUDGET_USD` | no | hard cap on model spend over the life of the install, default `20`, kept in `runs/spend-ledger.json`. Token Factory charges the card when the balance goes negative, so this is the real spending limit |
+| `FIXEDYET_MAX_TURNS` | no | agent turns per run, default `20` |
+| `FIXEDYET_DEMO_DAILY_LIMIT` | no | live runs per UTC day for the whole site, default `5`. This is the spending limit of the demo |
+| `FIXEDYET_RUNS_DIR` | no | default `runs`, which is `/opt/fixedyet/runs` |
+
+After editing the file, run `deploy/deploy.sh SERVER_ADDRESS` again (or `sudo systemctl restart fixedyet` on the server).
+
+Worst-case spend is `FIXEDYET_DEMO_DAILY_LIMIT` times `FIXEDYET_RUN_BUDGET_USD` per day for model tokens, plus Tavily credits and sandbox time. Set the limit to what the credits can carry. Independently of both, `FIXEDYET_TOTAL_BUDGET_USD` stops all model calls once the ledger total reaches it; `GET /api/status` shows `budget_remaining_usd`.
+
+## Operating it
+
+```bash
+ssh ubuntu@SERVER_ADDRESS
+sudo systemctl status fixedyet
+sudo journalctl -u fixedyet -f                    # live log
+curl -s http://127.0.0.1:8090/healthz             # {"status":"ok"}, the app directly, prefix already stripped
+curl -s http://127.0.0.1:8090/api/status          # runs left today
+curl -s https://benlevin.fyi/fixedyet/api/status  # the same through nginx
+sudo tail -f /var/log/nginx/error.log             # or the error_log of the benlevin.fyi server
+```
+
+- Finished runs and the daily counter are JSON files in `/opt/fixedyet/runs/web/`, so a restart loses nothing. Delete the files to clear history.
+- If a run is in progress when the service restarts, that run is recorded as failed and the daily counter keeps its count.
+- The unit allows 300 MB. On a 1 GB machine shared with other sites, check `systemctl status fixedyet` for the memory figure after a few runs.
+- nginx limits POSTs to 6 a minute per address (zone `fixedyet_post`) on top of the application's own one-run-at-a-time and daily limits.
+- To take the demo offline without touching the rest of benlevin.fyi, remove the `include snippets/fixedyet.conf;` line, reload nginx and `sudo systemctl stop fixedyet`.
+
+## Rolling back
+
+The server holds only the last deployed copy. To go back, check out the older commit on your Mac and run `deploy/deploy.sh SERVER_ADDRESS` again.

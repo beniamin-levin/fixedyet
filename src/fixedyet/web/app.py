@@ -14,6 +14,11 @@ Live runs cost real money, so the app allows one run at a time and a global dail
 the spend ledger caps the total model spend of all runs ever (``settings.total_budget_usd``): a
 run is refused with 429 when less than ``settings.run_budget_usd`` is left under that cap.
 Finished runs are written to ``<runs_dir>/web/<id>.json`` and survive restarts.
+
+The page and the API work at the root of a host and under a prefix. The page asks for
+``static/...`` and ``api/...`` without a leading slash. Behind a reverse proxy that strips a
+prefix (nginx ``location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }``), start the server
+with ``fixedyet serve --root-path /fixedyet`` so redirects and absolute URLs in JSON carry it.
 Responses never carry secrets or stack traces: failures are logged on the server and the
 client gets a short, friendly message.
 """
@@ -335,6 +340,18 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
 # --- security headers (pure ASGI so server-sent events are never buffered) ------------
 
 
+def route_path(scope: MutableMapping[str, Any]) -> str:
+    """The request path without the ``root_path`` prefix.
+
+    uvicorn puts the prefix in front of ``scope["path"]`` when it is started with a root path.
+    """
+    path: str = scope["path"]
+    root = scope.get("root_path", "")
+    if root and (path == root or path.startswith(root + "/")):
+        return path[len(root) :] or "/"
+    return path
+
+
 class SecurityHeaders:
     def __init__(self, app: Any) -> None:
         self.app = app
@@ -344,7 +361,7 @@ class SecurityHeaders:
             await self.app(scope, receive, send)
             return
 
-        revalidate = scope["path"].startswith("/static/")
+        revalidate = route_path(scope).startswith("/static/")
 
         async def send_with_headers(message: MutableMapping[str, Any]) -> None:
             if message["type"] == "http.response.start":
@@ -446,19 +463,20 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         }
 
     @app.post("/api/runs", status_code=202)
-    async def start_run(body: RunRequest) -> Response:
+    async def start_run(body: RunRequest, request: Request) -> Response:
         try:
             ref = parse_issue_url(body.issue_url)
         except ValueError as exc:
             return _error(400, "invalid_issue_url", str(exc))
         store = get_store()
+        examples_url = f"{request.scope.get('root_path', '')}/api/examples"
         if store.runs_today() >= daily_limit():
             return _error(
                 429,
                 "daily_limit",
                 "Today's live runs are used up. Each run costs real compute, so the demo has a "
                 "daily limit. Read the example reports instead, or run FixedYet yourself.",
-                examples="/api/examples",
+                examples=examples_url,
             )
         if budget_remaining(get_settings()) + 1e-9 < run_budget():  # tolerance: float sums
             return _error(
@@ -466,7 +484,7 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
                 "budget_exhausted",
                 "The demo's total spending budget is used up, so it cannot start another live "
                 "run. Read the example reports instead, or run FixedYet yourself.",
-                examples="/api/examples",
+                examples=examples_url,
             )
         if store.active is not None and not store.active.finished:
             return _error(
@@ -475,7 +493,7 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
                 "Another run is in progress and the demo runs one issue at a time. Try again in "
                 "a few minutes, or read the example reports meanwhile.",
                 headers={"Retry-After": "120"},
-                examples="/api/examples",
+                examples=examples_url,
             )
         run = store.create(ref.url)
         store.count_run()

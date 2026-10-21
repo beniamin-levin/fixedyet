@@ -20,6 +20,7 @@ def test_defaults_match_the_spec() -> None:
     assert s.demo_daily_limit == 5
     assert s.runs_dir == Path("runs")
     assert s.keep_checkpoints == 6
+    assert s.root_path == ""
 
 
 def test_load_reads_the_env_names_of_dot_env_example() -> None:
@@ -48,9 +49,13 @@ def test_load_reads_the_env_names_of_dot_env_example() -> None:
     assert s.nebius_base_url == "https://example.test/v1/"
 
 
-def test_keep_checkpoints_comes_from_the_env() -> None:
-    assert Settings.load(env={"FIXEDYET_KEEP_CHECKPOINTS": "3"}).keep_checkpoints == 3
+def test_keep_checkpoints_and_root_path_come_from_the_env() -> None:
+    s = Settings.load(
+        env={"FIXEDYET_KEEP_CHECKPOINTS": "3", "FIXEDYET_ROOT_PATH": "fixedyet/"}
+    )
+    assert (s.keep_checkpoints, s.root_path) == (3, "/fixedyet")
     assert Settings.load(env={"FIXEDYET_KEEP_CHECKPOINTS": "0"}).keep_checkpoints == 0
+    assert Settings.load(env={"FIXEDYET_ROOT_PATH": "  "}).root_path == ""
 
 
 def test_a_negative_keep_checkpoints_is_refused() -> None:
@@ -58,9 +63,31 @@ def test_a_negative_keep_checkpoints_is_refused() -> None:
         Settings.load(env={"FIXEDYET_KEEP_CHECKPOINTS": "-1"})
 
 
-def test_dot_env_example_lists_the_keep_checkpoints_variable() -> None:
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        (None, ""), ("", ""), ("/", ""), ("fixedyet", "/fixedyet"), ("/fixedyet/", "/fixedyet"),
+        ("/tools/fixedyet", "/tools/fixedyet"), ("//fixedyet//", "/fixedyet"),
+    ],
+)
+def test_normalize_root_path(raw: str | None, clean: str) -> None:
+    assert config.normalize_root_path(raw) == clean
+
+
+@pytest.mark.parametrize(
+    "raw", ["/a b", "/a//b", "/a?x=1", "/a#b", "https://evil.example", "/a\\b"]
+)
+def test_a_root_path_that_is_not_plain_path_segments_is_refused(raw: str) -> None:
+    with pytest.raises(ValueError):
+        config.normalize_root_path(raw)
+    with pytest.raises(ValueError):
+        Settings.load(env={"FIXEDYET_ROOT_PATH": raw})
+
+
+def test_dot_env_example_lists_the_new_variables() -> None:
     example = (config.PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
     assert "FIXEDYET_KEEP_CHECKPOINTS=6" in example
+    assert "FIXEDYET_ROOT_PATH=" in example
 
 
 def test_empty_values_mean_unset() -> None:

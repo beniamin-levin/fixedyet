@@ -148,6 +148,25 @@ async def test_security_headers(client: httpx.AsyncClient) -> None:
     assert "default-src 'self'" in res.headers["content-security-policy"]
 
 
+ABSOLUTE_LOCAL_URL = re.compile(r"""(?:["'`(]|=)/(?:api|static|healthz)\b""")
+ROOT_RELATIVE_ATTRIBUTE = re.compile(r"""\b(?:href|src|action)\s*=\s*["']/(?!/)""")
+
+
+def test_the_page_has_no_absolute_api_or_static_references() -> None:
+    """The demo is served at /fixedyet/ behind a proxy, so every URL must be relative."""
+    for name in ("index.html", "app.js", "style.css"):
+        text = (web.STATIC_DIR / name).read_text(encoding="utf-8")
+        assert not ABSOLUTE_LOCAL_URL.search(text), f"{name} has a root-relative /api or /static"
+        assert not ROOT_RELATIVE_ATTRIBUTE.search(text), f"{name} has a root-relative URL"
+        assert "url(/" not in text
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    js = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'href="static/style.css"' in html and 'src="static/app.js"' in html
+    for call in ("api/status", "api/examples", "api/runs"):
+        assert call in js
+    assert re.findall(r"""(?:fetch|EventSource)\(\s*['`]/""", js) == []
+
+
 def test_the_page_shows_the_new_name_and_never_the_old_one() -> None:
     for name in ("index.html", "app.js", "style.css"):
         text = (web.STATIC_DIR / name).read_text(encoding="utf-8")
@@ -161,6 +180,72 @@ def test_page_has_no_dark_background() -> None:
     css = (web.STATIC_DIR / "style.css").read_text(encoding="utf-8")
     assert "color-scheme: light" in css
     assert "prefers-color-scheme: dark" not in css
+
+
+# --- served under a prefix --------------------------------------------------------------
+
+
+def like_uvicorn(app: Any, prefix: str) -> Any:
+    """What `uvicorn --root-path /fixedyet` hands the app behind a proxy that strips the prefix:
+    the request path as the app would see it, with the root path put in front (uvicorn 0.26+)."""
+
+    async def wrapper(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            scope = {**scope, "root_path": prefix, "path": prefix + scope["path"]}
+        await app(scope, receive, send)
+
+    return wrapper
+
+
+@pytest.fixture
+async def prefixed(tmp_path: Path):
+    app = web.create_app(make_settings(tmp_path), examples_dir=tmp_path / "no-examples")
+    transport = httpx.ASGITransport(app=like_uvicorn(app, "/fixedyet"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+async def test_the_app_works_under_a_root_path(prefixed: httpx.AsyncClient) -> None:
+    index = await prefixed.get("/")
+    assert index.status_code == 200 and "FixedYet" in index.text
+    assert (await prefixed.get("/healthz")).json() == {"status": "ok"}
+    assert (await prefixed.get("/api/status")).json()["remaining"] == 5
+    assert (await prefixed.get("/api/examples")).json() == []
+    assert (await prefixed.get("/static/app.js")).status_code == 200
+    assert (await prefixed.get("/nothing-here")).status_code == 404
+
+
+async def test_static_files_are_revalidated_under_a_root_path_too(
+    prefixed: httpx.AsyncClient,
+) -> None:
+    res = await prefixed.get("/static/style.css")
+    assert res.headers["cache-control"] == "no-cache"
+    assert res.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_redirects_carry_the_root_path(prefixed: httpx.AsyncClient) -> None:
+    res = await prefixed.get("/api/examples/")  # the route has no trailing slash
+    assert res.status_code in (307, 308)
+    assert res.headers["location"] == "http://test/fixedyet/api/examples"
+
+
+async def test_error_bodies_point_at_the_prefixed_examples_url(
+    tmp_path: Path,
+) -> None:
+    app = web.create_app(make_settings(tmp_path, limit=0), examples_dir=tmp_path / "x")
+    transport = httpx.ASGITransport(app=like_uvicorn(app, "/fixedyet"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        res = await start(c)
+    assert res.status_code == 429
+    assert res.json()["examples"] == "/fixedyet/api/examples"
+
+
+def test_route_path_strips_only_a_whole_leading_segment() -> None:
+    assert web.route_path({"path": "/fixedyet/api/x", "root_path": "/fixedyet"}) == "/api/x"
+    assert web.route_path({"path": "/fixedyet", "root_path": "/fixedyet"}) == "/"
+    assert web.route_path({"path": "/fixedyetx/api", "root_path": "/fixedyet"}) == "/fixedyetx/api"
+    assert web.route_path({"path": "/api/x", "root_path": ""}) == "/api/x"
+    assert web.route_path({"path": "/api/x"}) == "/api/x"
 
 
 # --- validation -------------------------------------------------------------------------

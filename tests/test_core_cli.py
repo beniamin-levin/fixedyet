@@ -43,6 +43,8 @@ def test_parser_accepts_every_documented_command() -> None:
     assert (serve.host, serve.port) == ("127.0.0.1", 8090)
     assert parser.parse_args(["serve", "--host", "0.0.0.0", "--port", "9000"]).port == 9000
     assert parser.parse_args(["mcp"]).command == "mcp"
+    assert serve.root_path is None
+    assert parser.parse_args(["serve", "--root-path", "/fixedyet"]).root_path == "/fixedyet"
     gc = parser.parse_args(["gc"])
     assert (gc.command, gc.keep, gc.dry_run) == ("gc", None, False)
     gc = parser.parse_args(["gc", "--keep", "2", "--dry-run"])
@@ -126,7 +128,44 @@ def test_serve_starts_uvicorn_on_the_web_app(monkeypatch: pytest.MonkeyPatch) ->
         sys.modules, "uvicorn", SimpleNamespace(run=lambda *a, **k: calls.append((a, k)))
     )
     assert cli.main(["serve", "--host", "0.0.0.0", "--port", "9001"]) == 0
-    assert calls == [(("fixedyet.web.app:app",), {"host": "0.0.0.0", "port": 9001})]
+    assert calls == [
+        (("fixedyet.web.app:app",), {"host": "0.0.0.0", "port": 9001, "root_path": ""})
+    ]
+
+
+def serve_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(cli, "_module_exists", lambda name: True)
+    monkeypatch.setitem(
+        sys.modules, "uvicorn", SimpleNamespace(run=lambda *a, **k: calls.append((a, k)))
+    )
+    return calls
+
+
+def test_serve_passes_the_root_path_flag_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = serve_calls(monkeypatch)
+    assert cli.main(["serve", "--root-path", "fixedyet/"]) == 0
+    assert calls[0][1]["root_path"] == "/fixedyet"
+
+
+def test_serve_takes_the_root_path_from_the_settings_when_there_is_no_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = serve_calls(monkeypatch)
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(root_path="/fixedyet"))
+    assert cli.main(["serve"]) == 0
+    assert calls[0][1]["root_path"] == "/fixedyet"
+    assert cli.main(["serve", "--root-path", "/"]) == 0  # the flag wins, and "/" means no prefix
+    assert calls[1][1]["root_path"] == ""
+
+
+def test_serve_refuses_a_root_path_that_is_not_a_plain_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = serve_calls(monkeypatch)
+    assert cli.main(["serve", "--root-path", "/a b"]) == 2
+    assert "invalid root path" in capsys.readouterr().err
+    assert calls == []
 
 
 # -- gc -----------------------------------------------------------------------------------------

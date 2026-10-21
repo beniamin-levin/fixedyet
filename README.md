@@ -112,6 +112,7 @@ Useful options:
 fixedyet run URL --fix-ref v2.4.0     # fix side is a tag, branch or commit instead of main
 fixedyet run URL --md report.md --json assessment.json
 fixedyet serve --port 8090            # the demo web app, on http://127.0.0.1:8090
+fixedyet serve --root-path /fixedyet  # the same, behind a proxy that serves it under /fixedyet/
 fixedyet mcp                          # the MCP server on stdio
 fixedyet gc                           # prune old Docker checkpoint images now
 ```
@@ -153,7 +154,7 @@ A run takes a few minutes and spends credits, so the assistant should call it on
 
 https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at saved example reports.
 
-Run it locally with `fixedyet serve`. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](deploy/README.md).
+Run it locally with `fixedyet serve`. The page uses only relative URLs, so it works at the root of a host and under a prefix: behind nginx's `location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }` (which strips the prefix), start it with `--root-path /fixedyet` or `FIXEDYET_ROOT_PATH=/fixedyet` so redirects carry the prefix. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](deploy/README.md).
 
 The reports in [`examples/`](examples) are saved output of real runs on real GitHub issues (Docker sandbox backend, Nemotron 3 Super through Token Factory). Each file names the issue it ran on, and the page marks them as real runs.
 
