@@ -217,13 +217,16 @@ Input: an `Assessment` with verdict `open_bug` and a reproduction test. Output: 
 assessment --> not open_bug / no test / not a GitHub issue --> not_applicable
            --> issue thread (GitHub API) and head of the default branch (git ls-remote, host)
 sandbox:   baseline checkout of that commit (envbuild.build_baseline, pinned)
-  survey   git ls-files + git grep for definitions of the names the test and the issue use
+  survey   git ls-files + git grep for definitions of the names the test and the issue use,
+           and per-file counts of the issue's distinctive terms (whole words, and as "quoted")
   a. repro test x2 at <test dir>/test_issue_<n>.py      PASS -> already_fixed; not FAIL -> error
 host:      localize (pure): project frames in the failing traceback, files the issue names,
-           files defining what the test imports or the issue's code mentions; <= 4 files,
-           ~60 KB; a big file as windows (the enclosing functions of the anchors) + an outline
+           symbol scores (distinctive_terms -> symbol_scores: rare terms, breadth, registry
+           entries), files defining what the test imports; <= 4 files, ~60 KB, far-behind
+           files dropped; a big file as windows around the anchors and the term mentions
 loop, <= 3 attempts, model cost <= FIXEDYET_FIX_BUDGET_USD:
-  model    SUMMARY / EXPLANATION / FILE + SEARCH/REPLACE blocks; or NEED (once, <= 3 files);
+  model    SUMMARY / EXPLANATION / FILE + SEARCH/REPLACE blocks; or NEED (once, at any point,
+           <= 3 files);
            or CANNOT_FIX: <why> (ends the loop, not_fixed)
   host     apply_edits (text only): old block exactly once (also after a uniform re-indent),
            source .py files only (no tests, CI, packaging, docs, vendored code, new files),
@@ -239,7 +242,7 @@ Design decisions:
 
 - **Search/replace, not diffs.** The model never writes a unified diff. It names a file and an exact block, and the host finds that block exactly once. The diff is made by `git diff` in the sandbox, so it is always well formed.
 - **Validation is text, execution is sandbox.** `apply_edits` is a pure function over strings; `ast.parse` checks syntax without running anything. Model-written code runs only in sandbox forks without network.
-- **Feedback that teaches.** A rejected edit comes back with the reason and, when a block matches nowhere, the closest lines in the file; a test that still fails comes back with the diff and the output; a regression with the newly failing ids and the end of the suite log. Every attempt starts again from the original code.
+- **Feedback that teaches.** A rejected edit comes back with the reason, the format and the caps restated, and, when a block matches nowhere or targets a file the model was not shown, that file itself (windowed around where it aimed) and the closest lines; a test that still fails comes back with the diff and the output; a regression with the newly failing ids and the end of the suite log. Every attempt starts again from the original code.
 - **Room to think, then brevity.** Each call may use 16,000 tokens (reasoning included) with a 420 s request timeout; an answer cut off by the token limit before any edit is named as such, and the next call asks without the reasoning.
 - **The test is the spec, and it can be wrong.** The model may answer `CANNOT_FIX` when it judges the test wrong; nothing is changed then.
 - **Verified where it ships.** The checks run the test at the path the pull request adds it (`tests/`, `test/` or `testing/`), so what was verified is what is proposed.
