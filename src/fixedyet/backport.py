@@ -28,14 +28,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from fixedyet import envbuild
+from fixedyet import envbuild, suite_plugin
 from fixedyet.agent import emit_progress
 from fixedyet.config import Settings, get_settings
 from fixedyet.envbuild import REPO_DIR, EnvBuildError
@@ -299,24 +301,49 @@ def parse_pick(result: ExecResult) -> PickOutcome:
     )
 
 
+SUITE_PLUGIN_DIR = "/tmp/ir_plugins"  # noqa: S108 - inside the sandbox, not on the host
+SUITE_PLUGIN = "fixedyet_suite_plugin"
+SUITE_REPORT_PATH = "/tmp/ir_suite_report.json"  # noqa: S108
+SUITE_REPORT_BYTES = 700_000
+
+
+def suite_files() -> dict[str, str]:
+    """The files a `suite_script` run needs: the pytest plugin that writes the JSON report."""
+    source = Path(suite_plugin.__file__).read_text(encoding="utf-8")
+    return {f"{SUITE_PLUGIN_DIR}/{SUITE_PLUGIN}.py": source}
+
+
 def suite_script(timeout_s: int = SUITE_TIMEOUT_S) -> str:
     """Run the project's own tests once, every test (no ``-x``), and echo the end of the log.
 
+    The counts and the failing test ids come from `suite_plugin` (shipped by `suite_files`,
+    loaded with ``-p``), which writes them to a JSON file whatever the verbosity: pytest drops its
+    "N passed in Xs" line at ``-qq``, and a project's ``addopts = "-q"`` plus our ``-q`` is that.
+    The summary line stays the fallback when the report is missing.
     ``--continue-on-collection-errors`` keeps one module that cannot be imported from hiding the
     rest; ``--maxfail=0`` undoes a ``-x`` the project's own addopts might set. ``-p no:pretty``
-    and ``-p no:sugar`` switch off plugins that replace pytest's summary line, which
-    `parse_suite` reads (pydantic's test dependencies bring pytest-pretty).
+    and ``-p no:sugar`` switch off plugins that replace pytest's summary line (pydantic's test
+    dependencies bring pytest-pretty), which the fallback reads.
     """
     return "\n".join(
         [
             "set -u",
             "export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1",
             f"cd {REPO_DIR} || {{ echo __SETUP_FAILED__=cd; exit 20; }}",
-            f"timeout -k 10 {int(timeout_s)} python -m pytest -q -p no:cacheprovider -p no:pretty "
-            "-p no:sugar --maxfail=0 "
-            "--continue-on-collection-errors --tb=line -rfE > /tmp/ir_suite.log 2>&1",
+            f"rm -f {SUITE_REPORT_PATH}",
+            # without the plugin file (a caller that did not ship it) pytest still runs
+            f"ir_report=; [ -f {SUITE_PLUGIN_DIR}/{SUITE_PLUGIN}.py ] "
+            f"&& ir_report='-p {SUITE_PLUGIN}'",
+            f"timeout -k 10 {int(timeout_s)} env FIXEDYET_SUITE_REPORT={SUITE_REPORT_PATH} "
+            f'PYTHONPATH="{SUITE_PLUGIN_DIR}${{PYTHONPATH:+:$PYTHONPATH}}" '
+            "python -m pytest -q -p no:cacheprovider -p no:pretty -p no:sugar $ir_report "
+            "--maxfail=0 --continue-on-collection-errors --tb=line -rfE "
+            "> /tmp/ir_suite.log 2>&1",
             "rc=$?",
             f"tail -c {SUITE_LOG_BYTES} /tmp/ir_suite.log | {_PREFIX_LINES}",
+            # after the log: the sandbox keeps the end of the output when it has to cut
+            f"if [ -s {SUITE_REPORT_PATH} ]; then echo \"__SUITE_JSON_B64__=$(head -c "
+            f"{SUITE_REPORT_BYTES} {SUITE_REPORT_PATH} | base64 | tr -d '\\n')\"; fi",
             'echo "__RC__=$rc"',
             "exit 0",
             "",
@@ -329,14 +356,48 @@ _COUNT = re.compile(r"(\d+) (passed|failed|errors?|skipped)\b")
 _SUMMARY_HEADER = re.compile(r"^=+ short test summary info =+$", re.MULTILINE)
 _FAILING_ENTRY = re.compile(r"^(?:FAILED|ERROR) (?P<id>.+?)(?: - .*)?$")
 _DURATION = re.compile(r"\bin (\d+(?:\.\d+)?)s\b")
+_SUITE_JSON = re.compile(r"^__SUITE_JSON_B64__=(.*)$", re.MULTILINE)
+
+
+@dataclass
+class SuiteReport:
+    """What `suite_plugin` wrote, checked: counts, failing ids, pytest's exit status, seconds."""
+
+    exitstatus: int
+    counts: dict[str, int]
+    failing: list[str]
+    duration: float
+
+
+def read_suite_report(stdout: str) -> SuiteReport | None:
+    """The plugin's JSON report from `suite_script`'s output, or None when it is missing or not
+    what the plugin writes (the project's own code ran in the same sandbox, so it is checked)."""
+    found = _SUITE_JSON.findall(stdout)
+    if not found:
+        return None
+    try:
+        data = json.loads(base64.b64decode(found[-1].strip(), validate=False).decode("utf-8"))
+        counts = {key: int(data["counts"].get(key, 0))
+                  for key in ("passed", "failed", "error", "skipped")}
+        failing = [str(item) for item in data.get("failing", [])
+                   if isinstance(item, str) and item.strip()]
+        exitstatus = int(data["exitstatus"])
+        duration = float(data.get("duration", 0.0))
+    except (binascii.Error, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if any(count < 0 for count in counts.values()):
+        return None
+    return SuiteReport(exitstatus, counts, list(dict.fromkeys(failing)), max(duration, 0.0))
 
 
 def parse_suite(result: ExecResult) -> SuiteRun:
     """Counts and failing test ids from `suite_script`'s output.
 
-    ``ran`` is True only when pytest printed its summary line and exited 0 or 1. A timeout, a
-    crash, "no tests ran" (exit 5) or a missing summary leave it False, and the caller cannot
-    compare such a run with another.
+    The plugin's JSON report is read first; pytest's summary line and its "short test summary
+    info" section are the fallback when there is no report. ``ran`` is True only when the counts
+    could be read, some test was counted, and pytest exited 0 or 1. A timeout, a crash, "no
+    tests ran" (exit 5) or no readable counts leave it False, and the caller cannot compare such
+    a run with another.
     """
     codes = _RC_LINE.findall(result.stdout)
     exit_code = int(codes[-1]) if codes else None
@@ -344,29 +405,31 @@ def parse_suite(result: ExecResult) -> SuiteRun:
     lines = _PREFIXED_LINE.findall(result.stdout)
     text = "\n".join(lines)
 
-    summary = next((ln for ln in reversed(lines) if _SUMMARY_LINE.search(ln)), None)
+    report = read_suite_report(result.stdout)
     counts = {"passed": 0, "failed": 0, "error": 0, "skipped": 0}
     duration = 0.0
-    if summary is not None:
-        for number, word in _COUNT.findall(summary):
-            counts["error" if word.startswith("error") else word] += int(number)
-        found = _DURATION.search(summary)
-        duration = float(found.group(1)) if found else 0.0
-
     failing: list[str] = []
-    headers = list(_SUMMARY_HEADER.finditer(text))
-    if headers:
-        for line in text[headers[-1].end():].splitlines():
-            entry = _FAILING_ENTRY.match(line.strip())
-            if entry and entry["id"] not in failing:
-                failing.append(entry["id"])
+    readable = report is not None
+    if report is not None:
+        counts.update(report.counts)
+        failing = report.failing
+        duration = report.duration
+    else:
+        summary = next((ln for ln in reversed(lines) if _SUMMARY_LINE.search(ln)), None)
+        readable = summary is not None
+        if summary is not None:
+            for number, word in _COUNT.findall(summary):
+                counts["error" if word.startswith("error") else word] += int(number)
+            found = _DURATION.search(summary)
+            duration = float(found.group(1)) if found else 0.0
+        headers = list(_SUMMARY_HEADER.finditer(text))
+        if headers:
+            for line in text[headers[-1].end():].splitlines():
+                entry = _FAILING_ENTRY.match(line.strip())
+                if entry and entry["id"] not in failing:
+                    failing.append(entry["id"])
 
-    ran = (
-        summary is not None
-        and any(counts.values())
-        and exit_code in (0, 1)
-        and not timed_out
-    )
+    ran = readable and any(counts.values()) and exit_code in (0, 1) and not timed_out
     return SuiteRun(
         ran=ran,
         exit_code=exit_code,
@@ -676,8 +739,8 @@ async def _backport(
 async def _run_suite(sb: Sandbox, image: str, timeout_s: int) -> SuiteRun:
     """The suite in a fork of ``image``, without network: project tests are untrusted code."""
     outcome = await sb.run(
-        image, suite_script(timeout_s), workdir=REPO_DIR, timeout_s=timeout_s + 120,
-        network=False,
+        image, suite_script(timeout_s), files=suite_files(), workdir=REPO_DIR,
+        timeout_s=timeout_s + 120, network=False,
     )
     return parse_suite(outcome)
 

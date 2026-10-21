@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from dataclasses import dataclass, field
 
 import pytest
@@ -188,7 +189,8 @@ def test_suite_script_switches_off_plugins_that_replace_the_summary_line() -> No
 
 def test_suite_script_runs_everything_with_the_nine_hundred_second_limit() -> None:
     script = bp.suite_script()
-    assert "timeout -k 10 900 python -m pytest" in script
+    assert "timeout -k 10 900 env FIXEDYET_SUITE_REPORT=" in script
+    assert "python -m pytest -q" in script
     assert "--maxfail=0" in script  # undoes a -x in the project's own addopts
     assert " -x" not in script
     assert "--continue-on-collection-errors" in script
@@ -350,6 +352,124 @@ def test_a_sandbox_timeout_is_flagged() -> None:
     assert "[sandbox run timed out]" in suite.log_excerpt
 
 
+def report_output(
+    report: dict | str, *, rc: int = 1, log: str = "tests/test_a.py ..F"
+) -> ExecResult:
+    """`suite_script` output with the plugin's JSON report and no summary line (``-qq``)."""
+    raw = report if isinstance(report, str) else json.dumps(report)
+    return ExecResult(exit_code=0, stdout=f"| {log}\n__SUITE_JSON_B64__={b64(raw)}\n__RC__={rc}\n")
+
+
+def test_the_plugin_report_is_read_when_the_summary_line_is_missing() -> None:
+    # cog's addopts "-q" plus our "-q" is -qq: pytest prints no "N passed in Xs" line at all
+    suite = bp.parse_suite(report_output({
+        "exitstatus": 1, "duration": 3.5,
+        "counts": {"passed": 40, "failed": 1, "error": 1, "skipped": 2, "xfailed": 1},
+        "failing": ["tests/test_a.py::test_x[1 - 2]", "tests/test_c.py"],
+    }))
+    assert suite.ran and suite.exit_code == 1
+    assert (suite.passed, suite.failed, suite.errors, suite.skipped) == (40, 1, 1, 2)
+    assert suite.failing_tests == ["tests/test_a.py::test_x[1 - 2]", "tests/test_c.py"]
+    assert suite.duration_s == pytest.approx(3.5)
+
+
+def test_the_plugin_report_wins_over_the_text() -> None:
+    text = suite_output(passed=5, failed=("tests/t.py::from_text",)).stdout
+    report = {"exitstatus": 1, "counts": {"passed": 9, "failed": 1}, "failing": ["t.py::real"]}
+    stdout = text.replace("__RC__=1", f"__SUITE_JSON_B64__={b64(json.dumps(report))}\n__RC__=1")
+    suite = bp.parse_suite(ExecResult(exit_code=0, stdout=stdout))
+    assert (suite.passed, suite.failed) == (9, 1) and suite.failing_tests == ["t.py::real"]
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        "{not json",
+        '{"counts": {"passed": 3}}',  # no exit status
+        '{"exitstatus": 0, "counts": {"passed": "many"}}',
+        '{"exitstatus": 0, "counts": {"passed": -4}}',
+        '[1, 2]',
+    ],
+)
+def test_a_broken_report_falls_back_to_the_summary_line(report: str) -> None:
+    text = suite_output(passed=7, failed=("tests/t.py::test_b",)).stdout
+    stdout = text.replace("__RC__=1", f"__SUITE_JSON_B64__={b64(report)}\n__RC__=1")
+    suite = bp.parse_suite(ExecResult(exit_code=0, stdout=stdout))
+    assert suite.ran and (suite.passed, suite.failed) == (7, 1)
+    assert suite.failing_tests == ["tests/t.py::test_b"]
+
+
+def test_no_report_and_no_summary_line_is_not_a_result() -> None:
+    suite = bp.parse_suite(ExecResult(exit_code=0, stdout="| ....F\n__RC__=1\n"))
+    assert suite.ran is False
+
+
+def test_the_report_of_a_run_that_did_not_finish_is_not_a_result() -> None:
+    report = {"exitstatus": 2, "counts": {"passed": 3}, "failing": []}
+    assert bp.parse_suite(report_output(report, rc=2)).ran is False
+    assert bp.parse_suite(report_output({**report, "exitstatus": 0}, rc=124)).ran is False
+
+
+def test_the_report_line_cannot_be_forged_by_test_output() -> None:
+    # every line of pytest's log carries "| ", so a test printing the marker is only log text
+    forged = f"__SUITE_JSON_B64__={b64(json.dumps({'exitstatus': 0, 'counts': {'passed': 1}}))}"
+    result = ExecResult(exit_code=0, stdout=f"| {forged}\n__RC__=1\n")
+    assert bp.parse_suite(result).ran is False
+
+
+def test_suite_script_loads_the_plugin_only_when_it_was_shipped() -> None:
+    script = bp.suite_script()
+    (path, source), = bp.suite_files().items()
+    assert path == f"{bp.SUITE_PLUGIN_DIR}/{bp.SUITE_PLUGIN}.py"
+    assert "def pytest_runtest_logreport" in source
+    assert f"[ -f {path} ] && ir_report='-p {bp.SUITE_PLUGIN}'" in script
+    assert "$ir_report" in script and f"PYTHONPATH=\"{bp.SUITE_PLUGIN_DIR}" in script
+    # the report is printed after the log, so a cut of the output keeps it
+    assert script.index("tail -c") < script.index("__SUITE_JSON_B64__") < script.index("__RC__")
+
+
+def test_the_plugin_counts_a_real_pytest_run_at_any_verbosity(tmp_path) -> None:
+    """The shipped plugin, loaded by the local pytest at -qq: the run prints no summary line,
+    and the report still has every count and the failing ids."""
+    import os
+    import subprocess
+    import sys
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pytest.ini").write_text("[pytest]\naddopts = -q\n")
+    (project / "test_a.py").write_text(
+        "import pytest\n"
+        "def test_ok(): pass\n"
+        "@pytest.mark.parametrize('x', ['1 - 2'])\n"
+        "def test_bad(x): assert 0\n"
+        "@pytest.fixture\ndef boom():\n    raise RuntimeError('x')\n"
+        "def test_err(boom): pass\n"
+        "@pytest.mark.skip\ndef test_skip(): pass\n"
+        "@pytest.mark.xfail\ndef test_xf(): assert 0\n"
+    )
+    (project / "test_broken.py").write_text("import not_a_module_anywhere\n")
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    for path, source in bp.suite_files().items():
+        (plugins / path.rsplit("/", 1)[1]).write_text(source)
+    report = tmp_path / "report.json"
+    env = {**os.environ, "FIXEDYET_SUITE_REPORT": str(report), "PYTHONPATH": str(plugins)}
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", bp.SUITE_PLUGIN,
+         "--continue-on-collection-errors", "-rfE"],
+        cwd=project, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert run.returncode == 1
+    assert " passed" not in run.stdout.splitlines()[-1]  # -qq: no summary line
+    suite = bp.parse_suite(report_output(report.read_text(), rc=run.returncode))
+    assert suite.ran
+    assert (suite.passed, suite.failed, suite.errors, suite.skipped) == (1, 1, 2, 1)
+    assert set(suite.failing_tests) == {
+        "test_a.py::test_bad[1 - 2]", "test_a.py::test_err", "test_broken.py",
+    }
+
+
 def test_newly_failing_ignores_what_failed_before() -> None:
     before = SuiteRun(ran=True, failed=1, failing_tests=["t::old"])
     after = SuiteRun(ran=True, failed=2, failing_tests=["t::old", "t::new"])
@@ -387,6 +507,7 @@ class Call:
     timeout_s: int
     network: bool
     keep: bool
+    files: dict[str, str] | None = None
 
 
 class ScriptedSandbox:
@@ -416,7 +537,7 @@ class ScriptedSandbox:
             answer = world.suite_before if image == "img-base" else world.suite_after
         else:  # pragma: no cover - a new kind of script needs a new branch here
             raise AssertionError(f"unexpected script: {command[:200]}")
-        self.calls.append(Call(kind, image, command, timeout_s, network, keep))
+        self.calls.append(Call(kind, image, command, timeout_s, network, keep, files))
         if isinstance(answer, BaseException):
             raise answer
         return answer
@@ -498,7 +619,8 @@ async def test_the_sandbox_steps_use_the_branch_head_images_and_limits() -> None
     assert by_kind["repro-after"].image == "img-picked"  # a fork of the cherry-picked tree
     for kind in ("suite-before", "suite-after"):
         assert by_kind[kind].timeout_s >= 900
-        assert "timeout -k 10 900 python -m pytest" in by_kind[kind].command
+        assert "timeout -k 10 900 env FIXEDYET_SUITE_REPORT=" in by_kind[kind].command
+        assert by_kind[kind].files == bp.suite_files()  # the plugin that writes the report
         assert " -x" not in by_kind[kind].command
         assert by_kind[kind].network is False  # the project's tests are untrusted code
     assert by_kind["suite-before"].image == "img-base"

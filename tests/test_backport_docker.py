@@ -18,7 +18,14 @@ import pytest
 import pytest_asyncio
 
 from fixedyet import envbuild
-from fixedyet.backport import backport, parse_pick, parse_suite, pick_script, suite_script
+from fixedyet.backport import (
+    backport,
+    parse_pick,
+    parse_suite,
+    pick_script,
+    suite_files,
+    suite_script,
+)
 from fixedyet.config import Settings
 from fixedyet.models import (
     Assessment,
@@ -204,6 +211,22 @@ async def test_suite_script_counts_and_names_the_failing_tests(world) -> None:
     assert suite.failing_tests == ["tests/test_known_bad.py::test_known_failure"]
     assert "short test summary info" in suite.log_excerpt
     assert "\n| " not in suite.log_excerpt  # the marker prefix is gone from what readers see
+
+
+async def test_suite_script_reads_the_plugin_report_at_any_verbosity(world) -> None:
+    # The project's addopts "-q" plus the script's own "-q" make -qq, where pytest prints no
+    # "N passed in Xs" line (nedbat/cog). The plugin's report still gives counts and ids.
+    sandbox, image, _ = world
+    quiet = "printf '[pytest]\\naddopts = -q\\n' > /work/repo/pytest.ini\n"
+    result = await sandbox.run(
+        image, quiet + suite_script(), files=suite_files(), workdir="/work/repo", network=False
+    )
+    assert "__SUITE_JSON_B64__=" in result.stdout
+    assert not re.search(r"^\| .* passed in ", result.stdout, re.MULTILINE)  # no summary line
+    suite = parse_suite(result)
+    assert suite.ran and suite.exit_code == 1
+    assert (suite.passed, suite.failed, suite.errors) == (1, 1, 0)
+    assert suite.failing_tests == ["tests/test_known_bad.py::test_known_failure"]
 
 
 async def test_pick_script_applies_a_clean_fix_and_exports_it(world) -> None:

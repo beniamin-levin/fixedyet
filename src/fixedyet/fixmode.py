@@ -54,6 +54,7 @@ from fixedyet.backport import (
     list_remote_branches,
     newly_failing,
     parse_suite,
+    suite_files,
     suite_script,
 )
 from fixedyet.config import Settings, get_settings
@@ -1923,7 +1924,7 @@ class _FixRun:
     async def _suite(self, image: str) -> SuiteRun:
         """The project's suite in a fork of ``image``, without network."""
         outcome = await self.sb.run(
-            image, suite_script(self.suite_timeout_s), workdir=REPO_DIR,
+            image, suite_script(self.suite_timeout_s), files=suite_files(), workdir=REPO_DIR,
             timeout_s=self.suite_timeout_s + 120, network=False,
         )
         return parse_suite(outcome)
