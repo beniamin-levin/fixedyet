@@ -306,7 +306,7 @@ ul.plain li { margin: 0.25em 0; }
 
 .report-list { list-style: none; margin: 8px 0 24px; padding: 0; display: grid; gap: 10px; }
 .report-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 24px;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px 24px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 14px 16px; cursor: pointer;
 }
@@ -317,10 +317,12 @@ ul.plain li { margin: 0.25em 0; }
 .rr-title:hover { color: var(--accent); text-decoration: underline; }
 .rr-sub { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; font: 0.82rem var(--mono); color: var(--muted); }
 .rr-issue { color: var(--muted); word-break: break-all; }
-.rr-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 14px; font-size: 0.875rem; color: var(--muted); }
+.rr-side { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; align-self: stretch; gap: 8px; min-width: 0; }
+.rr-action { display: flex; justify-content: flex-end; align-items: flex-start; min-height: 30px; max-width: 280px; text-align: right; }
+.rr-meta { display: flex; justify-content: flex-end; align-items: baseline; gap: 4px 14px; font-size: 0.875rem; color: var(--muted); white-space: nowrap; }
 .rr-pr { font-weight: 650; }
 .rr-nobp { font-size: 0.82rem; }
-.rr-meta .btn { text-decoration: none; }
+.rr-action .btn { text-decoration: none; }
 
 .back-link { display: inline-block; margin: 20px 0 0; font-weight: 600; text-decoration: none; }
 .back-link:hover { text-decoration: underline; }
@@ -372,8 +374,12 @@ ul.plain li { margin: 0.25em 0; }
 }
 
 @media (max-width: 640px) {
-  .report-row { grid-template-columns: minmax(0, 1fr); }
-  .rr-meta { justify-content: flex-start; }
+  /* narrow: tags, title, repo line, then the meta, then the action, all from the left */
+  .report-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .rr-side { flex-direction: column-reverse; justify-content: flex-start; align-items: flex-start; gap: 8px; }
+  .rr-meta { justify-content: flex-start; flex-wrap: wrap; white-space: normal; }
+  .rr-action { justify-content: flex-start; min-height: 0; max-width: none; text-align: left; }
+  .rr-action:empty { display: none; }
   .job-log li { flex-direction: column; gap: 0; }
 }
 

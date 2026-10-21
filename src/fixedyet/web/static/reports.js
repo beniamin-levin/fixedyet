@@ -98,11 +98,15 @@
       link(r.issue_url, ref, 'rr-issue'),
       r.reported_version ? el('span', null, 'reported ', refLink(r.repo, r.reported_version)) : null,
       r.fixing_commit ? el('span', null, 'fix ', commitLink(r.repo, r.fixing_commit)) : null);
-    const side = el('div', { class: 'rr-meta' },
-      el('span', { class: 'rr-date', text: formatDate(r.created_at) }),
-      el('span', { class: 'rr-cost', text: formatCost(r.cost_usd) }),
-      r.duration_s ? el('span', { class: 'rr-time', text: formatDuration(r.duration_s) }) : null,
-      backportAction(r));
+    // The right side is two rows that never move: the action on the top row (level with the
+    // tags), the date, cost and time on the bottom one (level with the repo line). The action
+    // row keeps its height when it is empty.
+    const side = el('div', { class: 'rr-side' },
+      el('div', { class: 'rr-action' }, backportAction(r)),
+      el('div', { class: 'rr-meta' },
+        el('span', { class: 'rr-date', text: formatDate(r.created_at) }),
+        el('span', { class: 'rr-cost', text: formatCost(r.cost_usd) }),
+        r.duration_s ? el('span', { class: 'rr-time', text: formatDuration(r.duration_s) }) : null));
     const item = el('li', { class: 'report-row', 'data-id': r.id },
       el('div', { class: 'rr-main' },
         tags,
