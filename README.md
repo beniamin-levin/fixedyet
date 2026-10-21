@@ -239,6 +239,8 @@ https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app
 
 Run it locally with `fixedyet serve`. The page uses only relative URLs, so it works at the root of a host and under a prefix: behind nginx's `location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }` (which strips the prefix), start it with `--root-path /fixedyet` or `FIXEDYET_ROOT_PATH=/fixedyet` so redirects carry the prefix. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](deploy/README.md).
 
+The **All reports** page (`/reports`, linked from the header) lists every example and every finished run in the runs directory, newest first, with chips for All / Fixed on main / Open bug / Not reproduced / Other and a search by repository or title. A report opens at `reports#<id>`, which can be shared. On a report that is fixed on main with a known fixing commit, the **Backport fix → draft PR** button tells a visitor that opening pull requests on the demo is limited to its maintainer, and shows the command to run it themselves (`fixedyet backport <issue URL> --open-pr`) with a link to the verified example. Setting `FIXEDYET_ADMIN_TOKEN` turns on maintainer mode: after signing in (the small "Maintainer sign-in" link at the bottom of the page) the owner can start the backport on the server, which opens a draft pull request in the owner's own fork and never in the upstream project, and can hide a report. Without the token every maintainer endpoint answers 404. See [`deploy/README.md`](deploy/README.md#maintainer-mode).
+
 The reports in [`examples/`](examples) are saved output of real runs on real GitHub issues (Docker sandbox backend, Nemotron 3 Super through Token Factory). Each file names the issue it ran on, and the page marks them as real runs. A saved `fixedyet backport --json` result in that folder (`real-backport-<owner>-<repo>-<number>.json` and `.md`) is listed and drawn as a backport report.
 
 ## Evaluation
@@ -300,7 +302,7 @@ As of a market check on 21 October 2026, to our knowledge no tool combines a pin
 
 - **Issue text and web content are untrusted data.** The model is told so, snippets are only ever run inside a sandbox, and nothing from an issue is run on the host.
 - **Code runs only in sandboxes.** The host process never executes code from an issue.
-- **It never posts to other people's repositories by default.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels or comments are created. The one write path is `fixedyet backport --open-pr`: it pushes to your own fork and opens a *draft* pull request, by default against the fork itself, and it never comments on an issue ([details](#verified-backports-draft-prs)).
+- **It never posts to other people's repositories by default.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels or comments are created. The write paths are `fixedyet backport --open-pr` and the demo's maintainer-only backport button: both push to the token owner's own fork and open a *draft* pull request, and neither comments on an issue. The command line can be told to target the upstream project after a typed confirmation; the web app has no such option and always targets the fork ([details](#verified-backports-draft-prs)).
 - **Secrets stay in the environment.** They are read from `.env` or the process environment, masked when settings are printed, and never returned by the web API or the MCP server. Web errors are short messages, never stack traces.
 - **The demo is rate limited,** to one run at a time and a daily total, so it cannot be used to spend the owner's credits without limit.
 
@@ -318,7 +320,7 @@ src/fixedyet/
   report.py        markdown rendering
   backport.py      verified backports: branch detection, cherry-pick and suite gates in the sandbox
   pullrequest.py   fork, push from the sandbox result, draft pull request (only with --open-pr)
-  web/             the FastAPI demo and its static page
+  web/             the FastAPI demo, the reports page and its static files
   mcp_server.py    the MCP server
   eval/            the SWE-bench loader and runner
 deploy/            nginx, systemd and deploy script for the demo

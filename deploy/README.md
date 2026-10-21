@@ -82,7 +82,8 @@ Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does no
 | `NEBIUS_PROJECT_ID` | if your project needs it | the Sandboxes client sends it as the `Project` header, see the note at the top of `src/fixedyet/sandbox/nebius.py` |
 | `CONTREE_TOKEN` | no | only if the Sandboxes token differs from `NEBIUS_API_KEY` |
 | `TAVILY_API_KEY` | recommended | without it the evidence step is skipped |
-| `GITHUB_TOKEN` | recommended | fine-grained, read-only, public repositories. It lifts the GitHub rate limit, which an anonymous server reaches quickly |
+| `GITHUB_TOKEN` | recommended | lifts the GitHub rate limit, which an anonymous server reaches quickly. For maintainer mode it is also the token the draft pull requests are opened with: a classic personal access token with only the `public_repo` scope and a 30-day expiry (see [Maintainer mode](#maintainer-mode)). Without maintainer mode a fine-grained read-only token for public repositories is enough |
+| `FIXEDYET_ADMIN_TOKEN` | no | turns on maintainer mode (reports page: backport to a draft PR, hide a report). A random secret of 32 bytes or more: `openssl rand -hex 32`. Empty or unset means off, and every maintainer endpoint answers 404 |
 | `FIXEDYET_MODEL`, `FIXEDYET_SMALL_MODEL` | no | default to Nemotron 3 Super and Nano |
 | `FIXEDYET_SANDBOX` | no | `nebius` (default) |
 | `FIXEDYET_ROOT_PATH` | no | URL prefix the app is served under, normally `/fixedyet`. The unit already passes `--root-path /fixedyet`; the flag wins over this variable |
@@ -96,6 +97,17 @@ Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does no
 After editing the file, run `deploy/deploy.sh SERVER_ADDRESS` again (or `sudo systemctl restart fixedyet` on the server).
 
 Worst-case spend is `FIXEDYET_DEMO_DAILY_LIMIT` times `FIXEDYET_RUN_BUDGET_USD` per day for model tokens, plus Tavily credits and sandbox time. Set the limit to what the credits can carry. Independently of both, `FIXEDYET_TOTAL_BUDGET_USD` stops all model calls once the ledger total reaches it; `GET /api/status` shows `budget_remaining_usd`.
+
+## Maintainer mode
+
+The public reports page (`/fixedyet/reports`) needs nothing. Maintainer mode adds two controls for you only: **Backport fix → draft PR** and **Hide / Unhide**. It is off until `FIXEDYET_ADMIN_TOKEN` is set in `/etc/fixedyet.env`.
+
+1. Generate the admin token and put it in the file: `FIXEDYET_ADMIN_TOKEN=$(openssl rand -hex 32)` (32 bytes or more). Keep a copy in your password manager: you paste it once into the "Maintainer sign-in" link at the bottom of the reports page, and the browser keeps it in localStorage. It is sent as `Authorization: Bearer <token>`, compared in constant time, and never logged or returned. A wrong or missing token is a 401 with no detail.
+2. Create a **classic** personal access token for `GITHUB_TOKEN` with **only** the `public_repo` scope and a **30-day expiry**. It is used only to fork the upstream project into the token owner's account, push a branch to that fork and open a **draft** pull request there (the base is the fork's own copy of the maintenance branch). The web app has no parameter or setting that targets the upstream project. Renew the token every 30 days; a job that finds no usable token fails at once, with a message, before any sandbox work. The token owner must not own the upstream repository (there would be no fork).
+3. The server needs `git` (`sudo apt-get install -y git`): the draft pull request is pushed from the host with `git fetch`, `am` and `push` (hooks off, no project code run). The backport itself runs in the sandbox backend of the same server, so on the two-VM setup below the Docker VM needs `git` and these variables, not the proxy VM.
+4. Restart: `deploy/deploy.sh SERVER_ADDRESS` or `sudo systemctl restart fixedyet`. Check: `curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8090/api/admin/check` answers `{"ok":true}`; without the variable it answers 404.
+
+A backport job takes the same single slot as a live run (a second one is refused with 409) and does not count against `FIXEDYET_DEMO_DAILY_LIMIT`. It needs no model call, so it adds sandbox time and no token spend; `FIXEDYET_TOTAL_BUDGET_USD` is unchanged. Its progress streams like a run's, and its result, with the pull request link, is saved in `/opt/fixedyet/runs/backports/<report id>.json`. A second request for a report that already has a pull request returns it instead of starting another job. Every pull request body ends with the fixed AI-assistance disclosure line, naming the token owner.
 
 ## Live runs on a second VM (Docker sandbox)
 
@@ -128,7 +140,7 @@ curl -s https://benlevin.fyi/fixedyet/api/status  # the same through nginx
 sudo tail -f /var/log/nginx/error.log             # or the error_log of the benlevin.fyi server
 ```
 
-- Finished runs and the daily counter are JSON files in `/opt/fixedyet/runs/web/`, so a restart loses nothing. Delete the files to clear history.
+- Finished runs and the daily counter are JSON files in `/opt/fixedyet/runs/web/`, so a restart loses nothing. Delete the files to clear history. Each finished run's report is also a folder `/opt/fixedyet/runs/<timestamp>-<owner>-<repo>-<number>/`, which is what the reports page lists. Hidden report ids are in `/opt/fixedyet/runs/hidden.json`; delete a report's folder to remove it for good.
 - If a run is in progress when the service restarts, that run is recorded as failed and the daily counter keeps its count.
 - The unit allows 300 MB. On a 1 GB machine shared with other sites, check `systemctl status fixedyet` for the memory figure after a few runs.
 - nginx limits POSTs to 6 a minute per address (zone `fixedyet_post`) on top of the application's own one-run-at-a-time and daily limits.

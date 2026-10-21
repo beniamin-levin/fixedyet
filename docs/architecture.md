@@ -22,7 +22,7 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 | `src/fixedyet/sandbox/*` | sandbox | `Sandbox` protocol, Nebius and Docker backends |
 | `src/fixedyet/envbuild.py` | sandbox | baseline checkpoint builder |
 | `src/fixedyet/testdeps.py` | sandbox | test dependency installer; shipped into the baseline sandbox and run there (standard library only) |
-| `src/fixedyet/web/*` | web | FastAPI demo app and static page |
+| `src/fixedyet/web/*` | web | FastAPI demo app, the reports store (`reports.py`: listing, hidden ids, saved backports) and the static pages (`index.html`, `reports.html`, shared `common.js`) |
 | `src/fixedyet/mcp_server.py` | web | MCP server |
 | `deploy/*`, `README.md` | web | nginx, systemd, deploy script, README |
 | `src/fixedyet/eval/*`, `eval/*` | eval | SWE-bench loader, runner, metrics |
@@ -180,7 +180,11 @@ token (GITHUB_TOKEN | gh auth token) -> GET /user (login = the token's owner)
 - The module has no ready-for-review call, no comment call, no force-push and no push to upstream; `tests/test_pullrequest.py` asserts the set of requests a run makes, and that every `POST /pulls` carries `draft: true`.
 - The body ends with `DISCLOSURE` ("Prepared with FixedYet (AI-assisted: NVIDIA Nemotron via Nebius Token Factory); reviewed and submitted by @<login>."). It is a constant, not an option.
 - The host runs only `git` (`init`, `fetch`, `checkout`, `am`, `push`, `rev-parse`) with hooks off and without the user's git config. Nothing from the project is executed on the host.
-- The MCP tool `propose_backport` and the web page never import `pullrequest`.
+- The MCP tool `propose_backport` never imports `pullrequest`. The web app imports it in one place, the maintainer-only backport job (`web/app.py: open_draft_pr`), which passes `target="fork"` and has no parameter, setting or code path for the upstream target.
+
+### Web: reports page and maintainer mode
+
+`GET /api/reports` merges `examples/*.json` with every readable `<runs_dir>/<stamp>-<owner>-<repo>-<number>/assessment.json`, newest first; `GET /api/reports/{id}` returns the assessment, the markdown and the saved backport. Ids are checked against `[A-Za-z0-9][A-Za-z0-9._-]*` without `..`, and every path built from one is resolved and checked to stay under its directory. Maintainer mode exists only when `FIXEDYET_ADMIN_TOKEN` is set (otherwise every admin endpoint is a 404; a wrong token is a bare 401, compared with `hmac.compare_digest`). `POST /api/reports/{id}/backport` starts a job in the same `Run`/`RunStore` as live runs (kind `backport`, one slot, same server-sent events, not counted against the daily limit): `backport()` in the sandbox, then `open_backport_pr(target="fork")` for a verified result. The result and the pull request are saved to `<runs_dir>/backports/<id>.json`; hidden ids to `<runs_dir>/hidden.json` (temp file plus `os.replace`). The fixing commit comes from the report's `reproduction.fixing_commit`; a report without one cannot be backported.
 
 ## Rules for everyone
 

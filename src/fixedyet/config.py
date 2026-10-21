@@ -32,7 +32,9 @@ DEFAULT_KEEP_CHECKPOINTS = 6
 
 _ROOT_PATH_RE = re.compile(r"^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
 
-_SECRET_FIELDS = frozenset({"nebius_api_key", "contree_token", "tavily_api_key", "github_token"})
+_SECRET_FIELDS = frozenset(
+    {"nebius_api_key", "contree_token", "tavily_api_key", "github_token", "admin_token"}
+)
 
 
 def normalize_root_path(value: str | None) -> str:
@@ -66,6 +68,7 @@ class Settings(BaseModel):
     runs_dir: Path = Path("runs")
     keep_checkpoints: int = Field(default=DEFAULT_KEEP_CHECKPOINTS, ge=0)
     root_path: str = ""  # URL prefix the demo is served under, e.g. "/fixedyet"
+    admin_token: str = ""  # turns on maintainer mode in the web demo; empty means off
 
     @field_validator("root_path")
     @classmethod
@@ -108,6 +111,7 @@ class Settings(BaseModel):
             "runs_dir": get("FIXEDYET_RUNS_DIR"),
             "keep_checkpoints": get("FIXEDYET_KEEP_CHECKPOINTS"),
             "root_path": get("FIXEDYET_ROOT_PATH"),
+            "admin_token": get("FIXEDYET_ADMIN_TOKEN"),
         }
         # Unset values fall back to the field defaults rather than being passed as None.
         return cls(**{key: value for key, value in raw.items() if value is not None})

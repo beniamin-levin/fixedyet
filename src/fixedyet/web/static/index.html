@@ -8,6 +8,7 @@
   <meta name="description" content="Paste a public GitHub issue. An agent writes a pytest reproduction, runs it in a microVM sandbox at the reported version and again on main, and rules decide the verdict.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f5fbf'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="static/style.css">
+  <script src="static/common.js" defer></script>
   <script src="static/app.js" defer></script>
 </head>
 <body>
@@ -16,7 +17,10 @@
       <a class="brand" href="./" aria-label="FixedYet home">
         <span class="brand-mark" aria-hidden="true"></span>FixedYet
       </a>
-      <a class="bar-link" href="https://github.com/beniamin-levin/fixedyet">GitHub</a>
+      <nav class="bar-nav" aria-label="Site">
+        <a class="bar-link" href="reports">All reports</a>
+        <a class="bar-link" href="https://github.com/beniamin-levin/fixedyet">GitHub</a>
+      </nav>
     </div>
   </header>
 
@@ -55,7 +59,8 @@
     <section id="examples" class="examples" aria-labelledby="examples-title" hidden>
       <h2 id="examples-title">Example reports</h2>
       <p class="muted" id="examples-intro">
-        See what a report looks like without spending a live run.
+        See what a report looks like without spending a live run, or browse
+        <a href="reports">every saved report</a>.
       </p>
       <div id="example-list" class="example-list"></div>
     </section>

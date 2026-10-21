@@ -153,13 +153,14 @@ async def test_security_headers(client: httpx.AsyncClient) -> None:
     assert "default-src 'self'" in res.headers["content-security-policy"]
 
 
+PAGE_FILES = ("index.html", "reports.html", "common.js", "app.js", "reports.js", "style.css")
 ABSOLUTE_LOCAL_URL = re.compile(r"""(?:["'`(]|=)/(?:api|static|healthz)\b""")
 ROOT_RELATIVE_ATTRIBUTE = re.compile(r"""\b(?:href|src|action)\s*=\s*["']/(?!/)""")
 
 
 def test_the_page_has_no_absolute_api_or_static_references() -> None:
     """The demo is served at /fixedyet/ behind a proxy, so every URL must be relative."""
-    for name in ("index.html", "app.js", "style.css"):
+    for name in PAGE_FILES:
         text = (web.STATIC_DIR / name).read_text(encoding="utf-8")
         assert not ABSOLUTE_LOCAL_URL.search(text), f"{name} has a root-relative /api or /static"
         assert not ROOT_RELATIVE_ATTRIBUTE.search(text), f"{name} has a root-relative URL"
@@ -167,13 +168,14 @@ def test_the_page_has_no_absolute_api_or_static_references() -> None:
     html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     js = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert 'href="static/style.css"' in html and 'src="static/app.js"' in html
+    assert 'src="static/common.js"' in html
     for call in ("api/status", "api/examples", "api/runs"):
         assert call in js
     assert re.findall(r"""(?:fetch|EventSource)\(\s*['`]/""", js) == []
 
 
 def test_the_page_shows_the_new_name_and_never_the_old_one() -> None:
-    for name in ("index.html", "app.js", "style.css"):
+    for name in PAGE_FILES:
         text = (web.STATIC_DIR / name).read_text(encoding="utf-8")
         assert not re.search(r"issue[-_ ]?repro", text, re.IGNORECASE)
     html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -784,7 +786,9 @@ async def test_a_backport_result_in_the_examples_folder_is_listed(
 
 
 def test_the_page_script_can_draw_a_backport_example() -> None:
+    shared = (web.STATIC_DIR / "common.js").read_text(encoding="utf-8")
     script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    assert "function renderBackport" in script and "ex.backport" in script
+    assert "function renderBackport" in shared and "ex.backport" in script
+    script = shared + script
     for status in BackportStatus:
         assert f"backport_{status.value}:" in script

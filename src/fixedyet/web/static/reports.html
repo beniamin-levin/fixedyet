@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>FixedYet: all reports</title>
+  <meta name="description" content="Every report FixedYet has produced: the issue, the verdict, the two-sided result and the reproduction test. Filter by verdict or search by repository.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f5fbf'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="static/style.css">
+  <script src="static/common.js" defer></script>
+  <script src="static/reports.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap bar">
+      <a class="brand" href="./" aria-label="FixedYet home">
+        <span class="brand-mark" aria-hidden="true"></span>FixedYet
+      </a>
+      <nav class="bar-nav" aria-label="Site">
+        <a class="bar-link" href="./">Run an issue</a>
+        <a class="bar-link" href="https://github.com/beniamin-levin/fixedyet">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="list-view" aria-labelledby="reports-title">
+      <div class="page-head">
+        <h1 id="reports-title" class="page-title">All reports</h1>
+        <p class="muted">
+          Every report FixedYet has saved: the curated examples and each finished run. Open one to
+          read the two-sided result and the reproduction test.
+        </p>
+      </div>
+
+      <div class="toolbar">
+        <div id="chips" class="chips" role="group" aria-label="Filter by verdict">
+          <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" class="chip-btn" data-filter="fixed_on_main" aria-pressed="false">Fixed on main</button>
+          <button type="button" class="chip-btn" data-filter="open_bug" aria-pressed="false">Open bug</button>
+          <button type="button" class="chip-btn" data-filter="not_reproduced" aria-pressed="false">Not reproduced</button>
+          <button type="button" class="chip-btn" data-filter="other" aria-pressed="false">Other</button>
+        </div>
+        <label class="sr-only" for="report-search">Filter by repository or title</label>
+        <input id="report-search" class="search" type="search" autocomplete="off" spellcheck="false"
+               placeholder="Filter by repository or title">
+      </div>
+      <p id="list-status" class="hint" aria-live="polite"></p>
+      <ul id="report-list" class="report-list"></ul>
+    </section>
+
+    <section id="detail-view" aria-labelledby="detail-title" hidden>
+      <h1 id="detail-title" class="sr-only">Report</h1>
+      <a class="back-link" href="#">&larr; All reports</a>
+      <div id="detail"></div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>Built on NVIDIA Nemotron via Nebius Token Factory, Nebius Sandboxes and Tavily.</p>
+      <p><a href="https://github.com/beniamin-levin/fixedyet">github.com/beniamin-levin/fixedyet</a>
+        <span aria-hidden="true">·</span> MIT licence
+        <span aria-hidden="true">·</span> Nebius x NVIDIA Global AI Hackathon 2026</p>
+      <p class="admin-line">
+        <button type="button" id="admin-link" class="linklike">Maintainer sign-in</button>
+        <span id="admin-state" class="muted" aria-live="polite"></span>
+      </p>
+      <form id="admin-form" class="admin-form" hidden>
+        <label class="sr-only" for="admin-token">Maintainer token</label>
+        <input id="admin-token" type="password" autocomplete="off" spellcheck="false" placeholder="Maintainer token">
+        <button type="submit" class="btn small primary">Sign in</button>
+        <button type="button" id="admin-cancel" class="btn small">Cancel</button>
+      </form>
+    </div>
+  </footer>
+
+  <noscript><p class="wrap">This page needs JavaScript to list and show reports.</p></noscript>
+</body>
+</html>
