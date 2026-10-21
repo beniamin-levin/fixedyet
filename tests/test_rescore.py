@@ -266,3 +266,42 @@ def test_labels_count_real_open_bugs_kept(tmp_path: Path) -> None:
 
 def test_no_readable_input_is_an_error(tmp_path: Path) -> None:
     assert rescore.main([str(tmp_path / "nothing"), "--offline"]) == 1
+
+
+def test_a_directory_of_saved_reports_is_read_when_it_has_no_runs(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "one.json").write_text(
+        json.dumps({"assessment": json.loads(open_bug().model_dump_json())}), encoding="utf-8")
+    loaded = load_inputs([reports])
+    assert [(i.kind, i.label, i.group) for i in loaded.items] == [("web", "one", str(reports))]
+    runs = tmp_path / "runs"
+    write_run(runs, "a-1", open_bug())
+    (runs / "spend-ledger.json").write_text("{}", encoding="utf-8")  # never read in a runs dir
+    loaded = load_inputs([runs])
+    assert [i.kind for i in loaded.items] == ["assessment"] and not loaded.errors
+
+
+def test_an_eval_run_in_a_runs_directory_gets_its_problem_statement(tmp_path: Path) -> None:
+    from fixedyet.eval import swebench
+    from fixedyet.models import SweBenchInstance
+
+    cache = tmp_path / "cache"
+    instance = SweBenchInstance(instance_id="acme__w-1", repo="acme/w", base_commit="c", patch="",
+                                test_patch="", problem_statement="Run(...) raises TypeError")
+    swebench._write_cache(swebench.cache_path("verified", cache), [instance])
+    detail = "E   TypeError: 'NoneType' object is not callable"
+    basis = [*OLD_BASIS[:2], "the same kind of failure on both sides (TypeError)", OLD_BASIS[3]]
+    a = open_bug(fix_detail=detail, url="swe-bench:acme__w-1", basis=basis)
+    a.reproduction.reported_side.failure_detail = detail
+    runs = tmp_path / "runs"
+    write_run(runs, "x-acme-w-1", a)
+    loaded = load_inputs([runs])
+    item = loaded.items[0]
+    assert (item.instance_id, item.truth) == ("acme__w-1", "fixed")
+    rescore.score(loaded.items, offline=True, cache_dir=cache)
+    assert item.after is item.assessment  # the statement names TypeError: nothing to lower
+    instance.problem_statement = "the output is wrong"
+    swebench._write_cache(swebench.cache_path("verified", cache), [instance])
+    rescore.score(loaded.items, offline=True, cache_dir=cache)
+    assert item.after is not None and item.after.confidence is Confidence.LOW

@@ -214,15 +214,19 @@ def load_inputs(paths: Iterable[Path]) -> Loaded:
     loaded = Loaded()
     for path in paths:
         if path.is_dir():
+            # a runs directory (<stamp>-<owner>-<repo>-<n>/assessment.json), else a directory
+            # of saved reports (*.json)
             root = path.resolve()
-            files = sorted(path.glob("*/assessment.json"))
+            runs = sorted(path.glob("*/assessment.json"))
+            files = runs or sorted(path.glob("*.json"))
             if not files:
-                loaded.errors.append(f"{path}: no */assessment.json in this directory")
+                loaded.errors.append(f"{path}: no */assessment.json or *.json in this directory")
             for file in files:
                 if not file.resolve().is_relative_to(root) or file.is_symlink():
                     loaded.errors.append(f"{file}: outside {path}, skipped")
                     continue
-                _load_file(file, loaded, group=str(path), label=file.parent.name)
+                label = file.parent.name if runs else file.stem
+                _load_file(file, loaded, group=str(path), label=label)
         elif path.is_file():
             # an eval results file is one run; single reports are grouped by their directory
             _load_file(path, loaded, group=str(path), label=path.stem)
@@ -248,21 +252,29 @@ def _load_file(path: Path, loaded: Loaded, *, group: str, label: str) -> None:
                     assessment=Assessment.model_validate(row["assessment"]),
                     instance_id=row.get("instance_id"), dataset=dataset, truth="fixed",
                 ))
-        elif isinstance(data, dict) and isinstance(data.get("assessment"), dict):
-            loaded.items.append(Item(
-                label=label, source=path, kind="web", group=_folder_group(path, group),
-                assessment=Assessment.model_validate(data["assessment"]),
-            ))
-        elif isinstance(data, dict) and "verdict" in data:
-            kind: Kind = "assessment" if path.name == "assessment.json" else "web"
+        elif isinstance(data, dict) and (
+            isinstance(data.get("assessment"), dict) or "verdict" in data
+        ):
+            web = isinstance(data.get("assessment"), dict)
+            a = Assessment.model_validate(data["assessment"] if web else data)
+            kind: Kind = "assessment" if path.name == "assessment.json" and not web else "web"
+            instance_id = _swebench_id(a)
             loaded.items.append(Item(
                 label=label, source=path, kind=kind, group=_folder_group(path, group),
-                assessment=Assessment.model_validate(data),
+                assessment=a, instance_id=instance_id,
+                dataset="verified" if instance_id else None,
+                truth="fixed" if instance_id else None,
             ))
         else:
             loaded.errors.append(f"{path}: not an assessment, eval results or web report")
     except ValidationError as exc:
         loaded.errors.append(f"{path}: not a valid assessment ({exc.error_count()} errors)")
+
+
+def _swebench_id(a: Assessment) -> str | None:
+    """The instance id of an eval run saved as an assessment (``swe-bench:<id>``)."""
+    prefix = "swe-bench:"
+    return a.issue_url[len(prefix):] if a.issue_url.startswith(prefix) else None
 
 
 def _folder_group(path: Path, group: str) -> str:
@@ -294,12 +306,12 @@ def _eval_threads(items: list[Item], *, offline: bool, cache_dir: Path) -> dict[
     from fixedyet.eval import swebench
 
     threads: dict[str, str] = {}
-    for dataset in sorted({i.dataset for i in items if i.kind == "eval" and i.dataset}):
+    for dataset in sorted({i.dataset for i in items if i.instance_id and i.dataset}):
         ids = sorted({i.instance_id for i in items if i.dataset == dataset and i.instance_id})
         try:
             cached = swebench._read_cache(swebench.cache_path(dataset, cache_dir))
             if cached is None and not offline:
-                cached = swebench.load_instances(dataset, ids, cache_dir=cache_dir)
+                cached = swebench.load_instances(dataset, cache_dir=cache_dir)
         except (swebench.DatasetError, OSError) as exc:
             print(f"warning: SWE-bench {dataset} not readable ({exc})", file=sys.stderr)
             cached = None
@@ -348,8 +360,8 @@ def score(
     at = at or utcnow()
     for item in items:
         a = item.assessment
-        if item.kind == "eval":
-            thread, status = eval_threads.get(item.instance_id or ""), None
+        if item.instance_id:  # an eval instance, in a results file or a runs directory
+            thread, status = eval_threads.get(item.instance_id), None
         else:
             thread, status = facts.get(a.issue_url, (None, None))
         item.after = rescore_assessment(a, thread=thread, status=status, at=at)
@@ -481,7 +493,7 @@ def render(items: list[Item], *, errors: Sequence[str] = (), labelled: bool = Fa
             lines.append(
                 f"| {_cell(item.label, 80)} | {_cell(Path(item.group).name, 60)} "
                 f"| {item.truth or '-'} | {b.verdict.value}, {b.confidence.value} "
-                f"| {a.verdict.value}, {a.confidence.value} | {_cell(_why(a, b))} |"
+                f"| {a.verdict.value}, {a.confidence.value} | {_cell(_why(a, b), 600)} |"
             )
     if status_only:
         lines += ["", f"{status_only} more result(s) keep their verdict and only gain the issue's "
