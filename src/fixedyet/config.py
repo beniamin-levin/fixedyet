@@ -27,6 +27,9 @@ DEFAULT_SMALL_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
 # Token Factory has no spending limit and charges the card when the balance goes negative, so the
 # cap on lifetime model spend lives in our code (see ledger.py).
 DEFAULT_TOTAL_BUDGET_USD = 20.0
+# Fix mode: the model cost of one fix, every attempt included. A fix attempt is a few calls of
+# about 20,000 input tokens each, roughly $0.01 to $0.03 apiece at Nemotron 3 Super prices.
+DEFAULT_FIX_BUDGET_USD = 0.25
 # Local Docker checkpoints (1.5 GB each) kept after a run; see sandbox/docker.py.
 DEFAULT_KEEP_CHECKPOINTS = 6
 
@@ -62,6 +65,7 @@ class Settings(BaseModel):
     github_token: str = ""
     sandbox: Literal["nebius", "docker"] = "nebius"
     run_budget_usd: float = 0.60
+    fix_budget_usd: float = DEFAULT_FIX_BUDGET_USD  # model cost cap of one fix (all attempts)
     total_budget_usd: float = DEFAULT_TOTAL_BUDGET_USD
     max_turns: int = 20
     demo_daily_limit: int = 5
@@ -105,6 +109,7 @@ class Settings(BaseModel):
             "github_token": get("GITHUB_TOKEN"),
             "sandbox": get("FIXEDYET_SANDBOX"),
             "run_budget_usd": get("FIXEDYET_RUN_BUDGET_USD"),
+            "fix_budget_usd": get("FIXEDYET_FIX_BUDGET_USD"),
             "total_budget_usd": get("FIXEDYET_TOTAL_BUDGET_USD"),
             "max_turns": get("FIXEDYET_MAX_TURNS"),
             "demo_daily_limit": get("FIXEDYET_DEMO_DAILY_LIMIT"),

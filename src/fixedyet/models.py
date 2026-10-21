@@ -198,6 +198,78 @@ class BackportResult(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class FixStatus(StrEnum):
+    VERIFIED = "verified"  # the test fails before the patch, passes twice after; no new failures
+    NOT_FIXED = "not_fixed"  # no attempt gave a verified patch; the attempts say why
+    ALREADY_FIXED = "already_fixed"  # the reproduction test passes on main now: nothing to fix
+    NOT_APPLICABLE = "not_applicable"  # not an open bug, no reproduction test, not a GitHub issue
+    ERROR = "error"  # a step could not be run (build, the check before the patch, the suite)
+
+
+class FileEdit(BaseModel):
+    """One search/replace edit: ``old`` must occur exactly once in ``path``; ``new`` replaces it."""
+
+    path: str
+    old: str
+    new: str
+
+
+class FixAttempt(BaseModel):
+    """One answer of the model in fix mode, and what the checks made of it.
+
+    ``outcome`` is one of: ``verified``, ``invalid_edits`` (rejected before anything ran),
+    ``repro_still_fails``, ``regression``, ``suite_not_run``, ``apply_failed``, ``no_edits``
+    (the answer held no edit in the required format) or ``gave_up`` (the model said it cannot
+    fix it, for example because it judged the test wrong).
+    """
+
+    number: int
+    outcome: str
+    reason: str = ""
+    summary: str = ""  # the model's one-line summary of its change
+    explanation: str = ""  # the model's account of the root cause and the change
+    edits: list[FileEdit] = Field(default_factory=list)
+    diff: str = ""  # `git diff` of the change in the sandbox (empty when it was never applied)
+    lines_changed: int = 0
+    repro_after: SideRun | None = None
+    suite_after: SuiteRun | None = None
+    newly_failing: list[str] = Field(default_factory=list)
+    cost_usd: float = 0.0  # model cost of this answer
+
+
+class FixResult(BaseModel):
+    """A fix for an open bug, written by the model and verified in the sandbox on main."""
+
+    status: FixStatus
+    reason: str = ""  # one sentence: what was verified, or why there is no verified fix
+    issue_url: str = ""
+    title: str = ""  # the issue title
+    repo: str = ""  # "owner/name"
+    base_branch: str | None = None  # the upstream default branch: the base of the pull request
+    base_sha: str | None = None  # the commit the verification ran on
+    summary: str = ""  # one line about the verified change (model-written, sanitised)
+    explanation: str = ""  # the model's account of the root cause (unchecked text)
+    diff: str = ""  # `git diff` of the verified change to the project's source (no test)
+    files_changed: list[str] = Field(default_factory=list)
+    lines_added: int = 0
+    lines_removed: int = 0
+    context_files: list[str] = Field(default_factory=list)  # the files the model was shown
+    repro_test_path: str | None = None  # where the test ran in every check
+    repro_test_code: str | None = None
+    regression_test_path: str | None = None  # where the pull request adds it; None: no test dir
+    repro_before: SideRun | None = None  # on main before the patch
+    repro_after: SideRun | None = None  # on main with the verified patch
+    suite_before: SuiteRun | None = None
+    suite_after: SuiteRun | None = None
+    newly_failing: list[str] = Field(default_factory=list)
+    attempts: list[FixAttempt] = Field(default_factory=list)
+    log_excerpt: str = ""  # output of the step that stopped it
+    model: str = ""
+    budget_usd: float = 0.0  # the model cost cap this fix ran under
+    usage: Usage = Field(default_factory=Usage)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Assessment(BaseModel):
     issue_url: str
     title: str
@@ -212,12 +284,13 @@ class Assessment(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     model: str = ""
     backport: BackportResult | None = None  # set when a verified backport was prepared
+    fix: FixResult | None = None  # set when fix mode ran on an open bug
     created_at: datetime = Field(default_factory=utcnow)
 
 
 Stage = Literal[
     "intake", "environment", "agent", "run_reported", "run_fix",
-    "verdict", "evidence", "report", "backport", "done", "error",
+    "verdict", "evidence", "report", "backport", "fix", "done", "error",
 ]
 
 
