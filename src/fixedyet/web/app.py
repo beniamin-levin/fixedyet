@@ -15,8 +15,10 @@ Endpoints
 Maintainer mode (only when ``settings.admin_token`` is set; otherwise every endpoint below
 answers 404, and a wrong token answers 401 with nothing else)
     GET    /api/admin/check             {"ok": true} for a valid ``Authorization: Bearer`` token
-    POST   /api/reports/{id}/backport   backport the report's fix and open a DRAFT pull request in
-                                        the token owner's fork (a job: progress over /api/runs)
+    POST   /api/reports/{id}/backport   step 1: verify the report's backport in the sandbox, no
+                                        pull request (a job: progress over /api/runs)
+    POST   /api/reports/{id}/backport/pr  step 2: for a verified backport, open a DRAFT pull
+                                        request in the token owner's fork
     POST   /api/reports/{id}/hide       keep a report off the public page
     DELETE /api/reports/{id}/hide       show it again
 
@@ -26,7 +28,8 @@ the spend ledger caps the total model spend of all runs ever (``settings.total_b
 run is refused with 429 when less than ``settings.run_budget_usd`` is left under that cap.
 Finished runs are written to ``<runs_dir>/web/<id>.json`` and survive restarts. A backport job
 is a run of kind "backport": it takes the same single slot, streams the same events, and does
-not count against the daily limit.
+not count against the daily limit. It only verifies; opening the pull request is a second,
+separate request that the maintainer makes after reading the result.
 
 The page and the API work at the root of a host and under a prefix. The page asks for
 ``static/...`` and ``api/...`` without a leading slash. Behind a reverse proxy that strips a
@@ -60,14 +63,15 @@ from pydantic import BaseModel
 
 from fixedyet.models import Assessment, BackportResult, ProgressEvent
 from fixedyet.web import parse_issue_url
-from fixedyet.web.reports import ReportStore, backport_ready, valid_report_id
+from fixedyet.web.reports import ReportStore, backport_ready, public_record, valid_report_id
 
 logger = logging.getLogger("fixedyet.web")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 RUN_ID = re.compile(r"^[0-9a-f]{12}$")
 RUN_TIMEOUT_S = 25 * 60
-BACKPORT_TIMEOUT_S = 75 * 60  # two project test suites (900 s each) plus the build and the fork
+BACKPORT_TIMEOUT_S = 75 * 60  # two project test suites (900 s each) plus the build
+PULL_REQUEST_TIMEOUT_S = 60  # fork, push and open: seconds of GitHub and git, no sandbox
 KEEPALIVE_S = 15.0
 MAX_RUNS_IN_MEMORY = 100
 DEFAULT_DAILY_LIMIT = 5
@@ -112,10 +116,26 @@ async def run_backport(assessment: Assessment, *, settings: Any, progress: Any) 
 
 
 def github_token(settings: Any) -> str:
-    """The token the draft pull request is opened with: GITHUB_TOKEN, else ``gh auth token``."""
+    """The token pull requests are opened with: GITHUB_TOKEN, else ``gh auth token``."""
     from fixedyet.pullrequest import resolve_token
 
     return resolve_token(getattr(settings, "github_token", None))
+
+
+async def fetch_target_activity(repo: str, branch: str, *, settings: Any) -> dict[str, Any] | None:
+    """When the maintenance branch last moved and what the latest release is, read with the GitHub
+    token. Best effort: None when it cannot be read, and never an exception."""
+    from fixedyet.github import target_activity
+
+    try:
+        token: str | None = await asyncio.to_thread(github_token, settings)
+    except Exception:  # noqa: BLE001 - no token is fine here: public data, a lower rate limit
+        token = None
+    try:
+        return await target_activity(repo, branch, token=token)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("target activity of %s@%s unreadable (%s)", repo, branch, type(exc).__name__)
+        return None
 
 
 async def open_draft_pr(
@@ -713,8 +733,8 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         if found is None:
             return _error(404, "not_found", "No such report.")
         saved = reports.load_backport(report_id)
-        if saved and saved.get("pr_url"):  # already done: hand back the pull request
-            return JSONResponse({"report_id": report_id, "backport": saved})
+        if saved and saved.get("status") == "verified":  # already verified: nothing to redo
+            return JSONResponse({"report_id": report_id, "backport": public_record(saved)})
         assessment = Assessment.model_validate(found.assessment) if found.assessment else None
         if assessment is None or not backport_ready(assessment):
             return _error(
@@ -739,6 +759,72 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         store.tasks.add(task)
         task.add_done_callback(store.tasks.discard)
         return JSONResponse({"id": run.id}, status_code=202)
+
+    @app.post("/api/reports/{report_id}/backport/pr")
+    async def open_backport_pull_request(report_id: str, request: Request) -> Response:
+        """Step 2: a DRAFT pull request in the token owner's fork, for a verified backport.
+        Body ``{"target": "fork"}``. Opening one on the upstream project is not offered here."""
+        denied = admin_gate(request)
+        if denied is not None:
+            return denied
+        reports = get_reports()
+        found = await asyncio.to_thread(reports.find, report_id, include_hidden=True)
+        if found is None:
+            return _error(404, "not_found", "No such report.")
+        record = reports.load_backport(report_id)
+        result = _verified_result(record)
+        if record is None or result is None:
+            return _error(
+                409, "not_verified",
+                "Verify the backport first: only a verified backport gets a pull request.",
+            )
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        target = body.get("target") if isinstance(body, dict) else None
+        if target != "fork":
+            return _error(400, "invalid_request", 'Send JSON like {"target": "fork"}.')
+        existing = (record.get("prs") or {}).get("fork")
+        if isinstance(existing, dict) and existing.get("url"):  # this target has its PR already
+            return JSONResponse({
+                "report_id": report_id, "target": "fork", "pr_url": existing["url"],
+                "created": False, "backport": public_record(record),
+            })
+        settings = get_settings()
+        try:
+            token = await asyncio.to_thread(github_token, settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("backport pr %s: no GitHub token (%s)", report_id, type(exc).__name__)
+            return _error(
+                503, "no_github_token",
+                "The server has no GitHub token: GITHUB_TOKEN is unset and gh is not installed "
+                "(or not logged in), so a pull request cannot be opened.",
+            )
+
+        def say(message: str) -> None:
+            logger.info("backport pr %s: %s", report_id, message)
+
+        try:
+            async with asyncio.timeout(PULL_REQUEST_TIMEOUT_S):
+                pr = await open_draft_pr(result, token=token, say=say)
+            if not str(getattr(pr, "url", "") or ""):
+                raise ValueError("GitHub returned no pull request URL")
+        except TimeoutError:
+            return _error(
+                504, "timeout",
+                f"GitHub took longer than {PULL_REQUEST_TIMEOUT_S} seconds. Try again: the fork "
+                "and the branch are reused, and nothing is opened twice.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("backport pr %s failed", report_id)
+            return _error(502, "pull_request_failed", _public_job_error(exc, token))
+        record = _with_pr(record, "fork", pr)
+        await asyncio.to_thread(reports.save_backport, report_id, record)
+        return JSONResponse({
+            "report_id": report_id, "target": "fork", "pr_url": record["prs"]["fork"]["url"],
+            "created": bool(getattr(pr, "created", True)), "backport": public_record(record),
+        })
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
@@ -778,104 +864,107 @@ async def _execute(store: RunStore, run: Run, settings: Any) -> None:
         store.finish(run)
 
 
-class JobError(Exception):
-    """A backport job failure written for the maintainer. The text is safe to show."""
-
-
 def _public_job_error(exc: BaseException, token: str = "") -> str:
+    """A message safe to show the maintainer. ``PullRequestError`` texts are written to be shown
+    and scrubbed of the token; this scrubs once more."""
     if isinstance(exc, TimeoutError):
         return f"The backport took longer than {BACKPORT_TIMEOUT_S // 60} minutes and was stopped."
-    if isinstance(exc, JobError) or type(exc).__name__ == "PullRequestError":
-        text = str(exc)[:400]  # pullrequest.py scrubs its messages; this is a second pass
+    if type(exc).__name__ == "PullRequestError":
+        text = str(exc)[:400]
         return text.replace(token, "***") if token else text
-    return "The backport failed. The details are in the server log."
+    return "The operation failed. The details are in the server log."
+
+
+def _verified_result(record: dict[str, Any] | None) -> BackportResult | None:
+    """The BackportResult of a saved record whose status is verified, else None."""
+    if not record or record.get("status") != "verified":
+        return None
+    if not isinstance(record.get("result"), dict):
+        return None
+    try:
+        result = BackportResult.model_validate(record["result"])
+    except ValueError:
+        return None
+    return result if result.status.value == "verified" else None
+
+
+def _with_pr(record: dict[str, Any], target: str, pr: Any) -> dict[str, Any]:
+    """``record`` with the pull request of ``target`` added to ``prs``. ``pr_url``, ``pr_target``
+    and ``pr_number`` show the most recent one's."""
+    prs = dict(record.get("prs") or {})
+    prs[target] = {
+        **{
+            key: getattr(pr, key, None)
+            for key in ("number", "base_repo", "base_branch", "head", "fork", "login", "draft",
+                        "created")
+        },
+        "url": str(pr.url),
+        "opened_at": _iso(_now()),
+    }
+    return {
+        **record, "prs": prs, "pr_url": prs[target]["url"], "pr_target": target,
+        "pr_number": prs[target]["number"],
+    }
 
 
 async def _execute_backport(
     store: RunStore, reports: ReportStore, run: Run, assessment: Assessment, settings: Any
 ) -> None:
-    """Backport the fix of ``assessment`` and open a draft pull request in the token owner's fork.
+    """Step 1: verify the backport of the fix of ``assessment`` in the sandbox. No pull request.
 
-    The token is resolved first, so a server without one fails before any sandbox work. A backport
-    that is not verified gets no pull request; its result is saved all the same. A verified one
-    whose pull request failed is kept, and a second try reuses it and only repeats the pull request.
+    The result is saved with ``pr_url`` null, together with how active the target branch is, so
+    that the maintainer can read the patch and the warning before deciding on step 2.
     """
-    token = ""
 
     async def progress(event: ProgressEvent) -> None:
         run.add_event(event.model_dump(mode="json"))
 
-    def say(message: str) -> None:
-        progress_event = ProgressEvent(stage="backport", message=message)
-        run.add_event(progress_event.model_dump(mode="json"))
-
     try:
         async with asyncio.timeout(BACKPORT_TIMEOUT_S):
-            try:
-                token = await asyncio.to_thread(github_token, settings)
-            except Exception as exc:
-                logger.warning("backport job %s: no GitHub token (%s)", run.id, type(exc).__name__)
-                raise JobError(
-                    "The server has no GitHub token: GITHUB_TOKEN is unset and gh is not "
-                    "installed (or not logged in), so a pull request cannot be opened."
-                ) from exc
-            saved = reports.load_backport(run.report_id or "")
-            result: BackportResult | None = None
-            if (
-                saved and saved.get("status") == "verified"
-                and isinstance(saved.get("result"), dict)
-            ):
-                result = BackportResult.model_validate(saved["result"])
-                say("Reusing the verified backport saved earlier; only the pull request is missing")
-            if result is None:
-                result = await run_backport(assessment, settings=settings, progress=progress)
-            pr: Any = None
-            pr_error: str | None = None
-            if result.status.value == "verified":
+            result = await run_backport(assessment, settings=settings, progress=progress)
+            activity: dict[str, Any] | None = None
+            if result.repo and result.target_branch:
+                run.add_event(ProgressEvent(
+                    stage="backport",
+                    message=f"Checking how active {result.target_branch} is on {result.repo}",
+                ).model_dump(mode="json"))
                 try:
-                    pr = await open_draft_pr(result, token=token, say=say)
-                except Exception as exc:
-                    logger.exception("backport job %s: the pull request failed", run.id)
-                    pr_error = _public_job_error(exc, token)
+                    activity = await fetch_target_activity(
+                        result.repo, result.target_branch, settings=settings
+                    )
+                except Exception:  # noqa: BLE001 - never fail the job over a nice-to-have
+                    logger.warning("backport job %s: target activity failed", run.id)
             record = {
                 "report_id": run.report_id,
                 "issue_url": assessment.issue_url,
                 "status": result.status.value,
-                "pr_url": getattr(pr, "url", None) or None,
-                "pr": None if pr is None else {
-                    key: getattr(pr, key, None)
-                    for key in ("number", "base_repo", "base_branch", "head", "fork", "login",
-                                "draft", "created")
-                },
-                "pr_error": pr_error,
+                "pr_url": None,
+                "pr_target": None,
+                "pr_number": None,
+                "prs": {},
+                "target_activity": activity,
                 "result": result.model_dump(mode="json"),
                 "saved_at": _iso(_now()),
             }
             await asyncio.to_thread(reports.save_backport, run.report_id or "", record)
-        run.result = {"status": record["status"], "pr_url": record["pr_url"]}
+        run.result = {"status": record["status"], "pr_url": None}
         with contextlib.suppress(Exception):
             run.markdown = render_backport(result)
-        if pr_error:
-            run.status, run.error = "error", pr_error
-            message = pr_error
-            stage = "error"
-        else:
-            run.status = "done"
-            stage = "done"
-            message = (
-                f"Draft pull request: {record['pr_url']}" if record["pr_url"]
-                else f"Backport {result.status.value}: {result.reason} No pull request was opened."
-            )
-        run.add_event(ProgressEvent(stage=stage, message=message).model_dump(mode="json"))
+        run.status = "done"
+        message = (
+            "Verified. Read the patch, then open the draft pull request."
+            if result.status.value == "verified"
+            else f"Backport {result.status.value}: {result.reason}"
+        )
+        run.add_event(ProgressEvent(stage="done", message=message).model_dump(mode="json"))
     except asyncio.CancelledError:
         run.status = "error"
         run.error = "The server was shut down while this backport was in progress."
         raise
     except Exception as exc:
-        if not isinstance(exc, JobError):
-            logger.exception("backport job %s failed", run.id)
+        logger.exception("backport job %s failed", run.id)
         run.status = "error"
-        run.error = _public_job_error(exc, token)
+        run.error = _public_job_error(exc)
         run.add_event(ProgressEvent(stage="error", message=run.error).model_dump(mode="json"))
     finally:
         store.finish(run)

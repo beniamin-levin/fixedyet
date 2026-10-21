@@ -321,3 +321,85 @@ async def test_search_related_issues_loosens_the_query_when_nothing_else_matches
         found = await gh.search_related_issues(issue, issue.title)
     assert route.call_count == 2  # five words found only the issue itself, three found more
     assert [e.url for e in found] == ["https://github.com/acme/widgets/issues/17"]
+
+
+# -- how active a maintenance branch is ---------------------------------------------------------
+
+
+def branch_json(date: str = "2025-11-03T10:00:00Z") -> dict:
+    return {"name": "8.4.x", "commit": {"sha": "a" * 40, "commit": {"committer": {"date": date}}}}
+
+
+@respx.mock
+async def test_target_activity_reads_the_last_commit_and_the_latest_release() -> None:
+    branch = respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").respond(json=branch_json())
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(
+        json={"tag_name": "9.1.1", "published_at": "2026-09-01T08:00:00Z"}
+    )
+    got = await github.target_activity("acme/widgets", "8.4.x", token="tok")
+    assert got is not None
+    assert got["branch"] == "8.4.x" and got["last_commit_sha"] == "a" * 40
+    assert got["last_commit_date"] == "2025-11-03T10:00:00Z"
+    assert got["latest_release"] == "9.1.1" and got["release_source"] == "release"
+    assert got["latest_release_date"] == "2026-09-01T08:00:00Z"
+    assert got["checked_at"]
+    assert branch.calls.last.request.headers["authorization"] == "Bearer tok"
+
+
+@respx.mock
+async def test_target_activity_keeps_a_slash_in_the_branch_name() -> None:
+    route = respx.get(f"{API}/repos/acme/widgets/branches/stable/8.1").respond(json=branch_json())
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(json={"tag_name": "8.1.2"})
+    got = await github.target_activity("acme/widgets", "stable/8.1")
+    assert got is not None and route.called
+    assert got["latest_release_date"] is None
+
+
+@respx.mock
+async def test_without_releases_the_latest_release_is_the_highest_plain_version_tag() -> None:
+    respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").respond(json=branch_json())
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(404, json={})
+    respx.get(f"{API}/repos/acme/widgets/tags").respond(json=[
+        {"name": "9.0.0rc1", "commit": {"sha": "1" * 40}},
+        {"name": "8.4.9", "commit": {"sha": "2" * 40}},
+        {"name": "v8.4.10", "commit": {"sha": "3" * 40}},
+        {"name": "nightly", "commit": {"sha": "4" * 40}},
+        {"name": "8.3.12", "commit": {"sha": "5" * 40}},
+    ])
+    respx.get(f"{API}/repos/acme/widgets/commits/{'3' * 40}").respond(
+        json={"commit": {"committer": {"date": "2026-08-01T00:00:00Z"}}}
+    )
+    got = await github.target_activity("acme/widgets", "8.4.x")
+    assert got is not None
+    assert got["latest_release"] == "v8.4.10" and got["release_source"] == "tag"
+    assert got["latest_release_date"] == "2026-08-01T00:00:00Z"
+
+
+@respx.mock
+async def test_a_piece_that_cannot_be_read_is_none_and_nothing_is_raised() -> None:
+    respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").respond(500, json={})
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(json={"tag_name": "9.1.1"})
+    got = await github.target_activity("acme/widgets", "8.4.x")
+    assert got is not None
+    assert got["last_commit_date"] is None and got["latest_release"] == "9.1.1"
+
+    respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").respond(json=branch_json())
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(404, json={})
+    respx.get(f"{API}/repos/acme/widgets/tags").respond(500, json={})
+    got = await github.target_activity("acme/widgets", "8.4.x")
+    assert got is not None
+    assert got["latest_release"] is None and got["release_source"] is None
+    assert got["last_commit_date"] == "2025-11-03T10:00:00Z"
+
+
+@respx.mock
+async def test_target_activity_is_none_when_nothing_can_be_read() -> None:
+    respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").mock(
+        side_effect=httpx.ConnectError("no network")
+    )
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(403, json={"message": "no"})
+    assert await github.target_activity("acme/widgets", "8.4.x") is None
+
+    respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").respond(200, text="not json")
+    respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(200, text="<html>")
+    assert await github.target_activity("acme/widgets", "8.4.x") is None

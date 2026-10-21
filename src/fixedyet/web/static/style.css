@@ -331,6 +331,10 @@ ul.plain li { margin: 0.25em 0; }
 .backport-card .pr-line { font-size: 1.05rem; margin: 0 0 6px; }
 .backport-card details > :not(summary) { margin-top: 12px; }
 .backport-area { margin-top: 14px; }
+.backport-card .facts { margin: 4px 0 14px; }
+.backport-card .facts dd a { color: var(--accent); }
+.warn-box { margin: 0 0 14px; }
+.pr-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 14px; }
 .panel { border: 1px solid var(--border-strong); background: var(--surface-2); border-radius: var(--radius); padding: 14px 16px; }
 .panel > :last-child { margin-bottom: 0; }
 .job-title { font-weight: 600; margin: 0; }

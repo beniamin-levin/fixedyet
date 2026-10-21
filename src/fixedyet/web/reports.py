@@ -21,7 +21,7 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ REPORT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 BACKPORTS_DIR = "backports"
 HIDDEN_FILE = "hidden.json"
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")  # the rule backport.py applies to a fixing commit
+STALE_DAYS = 180  # a target branch with no commit for longer than this looks abandoned
 
 
 def valid_report_id(value: object) -> bool:
@@ -78,10 +79,98 @@ def _iso(value: datetime) -> str:
 
 
 def backport_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
-    """``{status, pr_url}`` of a saved backport record, or None when there is none."""
+    """``{status, pr_url, pr_target}`` of a saved backport record, or None when there is none.
+    ``pr_target`` is "upstream" or "fork": where the pull request in ``pr_url`` is."""
     if not record:
         return None
-    return {"status": record.get("status"), "pr_url": record.get("pr_url") or None}
+    return {
+        "status": record.get("status"),
+        "pr_url": record.get("pr_url") or None,
+        "pr_target": record.get("pr_target") if record.get("pr_url") else None,
+    }
+
+
+def pr_target_of(pr_url: str | None, upstream: str | None) -> str | None:
+    """"upstream" when a pull request URL is in the ``upstream`` repository, else "fork"."""
+    match = re.match(r"^https://github\.com/([^/]+/[^/]+)/pull/\d+", pr_url or "")
+    if not match:
+        return None
+    return "upstream" if upstream and match.group(1).lower() == upstream.lower() else "fork"
+
+
+def _major_minor(text: str | None) -> tuple[int, int | None] | None:
+    """``(8, 4)`` for 8.4.x, v8.4.1, stable/8.4; ``(3, None)`` for 3.x; None for neither."""
+    match = re.search(r"(\d+)\.(\d+)", text or "")
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"(\d+)\.[xX]\b", text or "")
+    return (int(match.group(1)), None) if match else None
+
+
+def target_warning(
+    activity: object, branch: str | None, *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """Why a maintainer may not want a backport to this branch, or None when it looks alive.
+
+    The rule: the branch's last commit is more than ``STALE_DAYS`` days old, or the project's
+    latest release has a newer major.minor than the branch (a 8.4.x branch, release 9.1.1).
+    ``activity`` is what ``github.target_activity`` saved; unknown pieces never raise a warning.
+    """
+    if not isinstance(activity, dict) or not branch:
+        return None
+    now = now or datetime.now(UTC)
+    reasons: list[str] = []
+    date_text = None
+    raw = activity.get("last_commit_date")
+    if isinstance(raw, str):
+        try:
+            last = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            last = None
+        if last is not None:
+            last = last if last.tzinfo else last.replace(tzinfo=UTC)
+            date_text = last.date().isoformat()
+            if now - last > timedelta(days=STALE_DAYS):
+                reasons.append("stale")
+    release = activity.get("latest_release")
+    release_text = release if isinstance(release, str) and release else None
+    ours, latest = _major_minor(branch), _major_minor(release_text)
+    if ours and latest:
+        depth = 2 if ours[1] is not None and latest[1] is not None else 1
+        if latest[:depth] > ours[:depth]:
+            reasons.append("superseded")
+    if not reasons:
+        return None
+    return {
+        "reasons": reasons,
+        "text": (
+            f"Last commit on {branch}: {date_text or 'unknown'}; latest release: "
+            f"{release_text or 'unknown'}. Maintainers may not accept backports to this branch."
+        ),
+    }
+
+
+def public_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A saved backport record as the API shows it: plus ``target_warning``, worked out now."""
+    if not record:
+        return None
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    warning = target_warning(record.get("target_activity"), result.get("target_branch"))
+    return {**record, "target_warning": warning}
+
+
+def normalise_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Give a record saved before pull requests had targets the ``prs`` map it now has: the
+    first deployment only ever opened pull requests in the fork."""
+    if isinstance(record.get("prs"), dict):
+        return record
+    prs: dict[str, Any] = {}
+    url = record.get("pr_url")
+    if url:
+        old = record.get("pr") if isinstance(record.get("pr"), dict) else {}
+        prs["fork"] = {**old, "url": url}
+        record = {**record, "pr_target": "fork", "pr_number": old.get("number")}
+    return {**record, "prs": prs}
 
 
 def summarise(
@@ -140,7 +229,10 @@ def summarise_backport(
         "duration_s": result.usage.wall_seconds,
         "cost_usd": result.usage.cost_usd,
         "example": True,
-        "backport": {"status": result.status.value, "pr_url": pr_url},
+        "backport": {
+            "status": result.status.value, "pr_url": pr_url,
+            "pr_target": pr_target_of(pr_url, result.repo),
+        },
         "can_backport": False,
     }
 
@@ -220,7 +312,9 @@ class ReportStore:
         except (OSError, ValueError):
             logger.debug("skipping unreadable saved backport %s", path.name)
             return None
-        return data if isinstance(data, dict) and isinstance(data.get("status"), str) else None
+        if not (isinstance(data, dict) and isinstance(data.get("status"), str)):
+            return None
+        return normalise_record(data)
 
     def save_backport(self, report_id: str, record: dict[str, Any]) -> None:
         path = self.backport_path(report_id)
@@ -289,6 +383,7 @@ class ReportStore:
             # the example's own result is its saved backport
             record = {
                 "status": result.status.value, "pr_url": item.get("pr_url"),
+                "pr_target": pr_target_of(item.get("pr_url"), result.repo),
                 "result": item["backport"], "saved_at": _iso(result.created_at),
             }
             return Found(
@@ -313,7 +408,7 @@ class ReportStore:
             "summary": found.summary,
             "assessment": found.assessment,
             "markdown": found.markdown,
-            "backport": found.record,
+            "backport": public_record(found.record),
             "can_backport": found.summary["can_backport"],
             "hidden": found.id in self.hidden_ids() if admin else False,
         }

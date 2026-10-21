@@ -18,7 +18,7 @@ import httpx
 import pytest
 import respx
 
-from fixedyet import pullrequest
+from fixedyet import github, pullrequest
 from fixedyet.config import PROJECT_ROOT, Settings
 from fixedyet.models import (
     Assessment,
@@ -228,7 +228,10 @@ async def test_a_backport_example_is_listed_with_its_pull_request(
     rows = {r["id"]: r for r in (await client.get("/api/reports")).json()}
     row = rows["real-backport-acme-widgets-42"]
     assert (row["kind"], row["verdict"], row["confidence"]) == ("backport", "backport_verified", "")
-    assert row["backport"] == {"status": "verified", "pr_url": "https://github.com/me/widgets/pull/1"}
+    assert row["backport"] == {
+        "status": "verified", "pr_url": "https://github.com/me/widgets/pull/1",
+        "pr_target": "fork",  # a pull request in some other repository than acme/widgets
+    }
     assert row["example"] is True and row["can_backport"] is False
     assert rows["x-bad-pr"]["backport"]["pr_url"] is None  # only a github.com link is kept
 
@@ -344,6 +347,7 @@ ADMIN_CALLS = [
     ("POST", "/api/reports/real-acme-widgets-42/backport"),
     ("POST", "/api/reports/real-acme-widgets-42/hide"),
     ("DELETE", "/api/reports/real-acme-widgets-42/hide"),
+    ("POST", "/api/reports/real-acme-widgets-42/backport/pr"),
     ("POST", "/api/reports/no-such-report/backport"),
 ]
 
@@ -508,7 +512,7 @@ async def test_a_corrupt_hidden_file_hides_nothing(
     assert [r["id"] for r in (await client.get("/api/reports")).json()] == [RUN_OLD]
 
 
-# --- the backport job ---------------------------------------------------------------------
+# --- step 1: verifying a backport --------------------------------------------------------
 
 
 class FakeBackport:
@@ -528,16 +532,39 @@ class FakeBackport:
         return self.result
 
 
+class FakeActivity:
+    """Stands in for ``fetch_target_activity``: what GitHub says about the target branch."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.error: Exception | None = None
+        self.result: dict[str, Any] | None = {
+            "branch": "8.1.x", "last_commit_sha": "c" * 40,
+            "last_commit_date": "2026-10-01T09:30:00Z",
+            "latest_release": "8.1.9", "latest_release_date": "2026-09-20T08:00:00Z",
+            "release_source": "release", "checked_at": "2026-10-21T10:00:00+00:00",
+        }
+
+    async def __call__(self, repo: str, branch: str, *, settings: Any):
+        self.calls.append((repo, branch))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 class FakePullRequests:
     """Stands in for ``open_draft_pr``."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[BackportResult, str]] = []
         self.error: Exception | None = None
+        self.gate: asyncio.Event | None = None
 
     async def __call__(self, result: BackportResult, *, token: str, say: Any):
         self.calls.append((result, token))
         say("Opening a draft pull request")
+        if self.gate is not None:
+            await self.gate.wait()
         if self.error is not None:
             raise self.error
         return pullrequest.PullRequest(
@@ -548,7 +575,14 @@ class FakePullRequests:
 
 
 @pytest.fixture
-def backport_fake(monkeypatch: pytest.MonkeyPatch) -> FakeBackport:
+def activity_fake(monkeypatch: pytest.MonkeyPatch) -> FakeActivity:
+    fake = FakeActivity()
+    monkeypatch.setattr(web, "fetch_target_activity", fake)
+    return fake
+
+
+@pytest.fixture
+def backport_fake(monkeypatch: pytest.MonkeyPatch, activity_fake: FakeActivity) -> FakeBackport:
     fake = FakeBackport()
     monkeypatch.setattr(web, "run_backport", fake)
     return fake
@@ -575,7 +609,11 @@ async def backport_job(client: httpx.AsyncClient, report_id: str = RUN_OLD) -> h
     return await client.post(f"/api/reports/{report_id}/backport", headers=AUTH)
 
 
-async def test_a_backport_job_opens_a_draft_pr_and_saves_the_result(
+def saved_record(settings: SimpleNamespace, report_id: str = RUN_OLD) -> dict:
+    return json.loads((settings.runs_dir / "backports" / f"{report_id}.json").read_text())
+
+
+async def test_verifying_a_backport_saves_the_result_and_opens_no_pull_request(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
     pr_fake: FakePullRequests,
 ) -> None:
@@ -588,51 +626,48 @@ async def test_a_backport_job_opens_a_draft_pr_and_saves_the_result(
     assert job["status"] == "done" and job["error"] is None
     assert (job["kind"], job["report_id"]) == ("backport", RUN_OLD)
     assert job["issue_url"] == ISSUE and job["assessment"] is None
-    assert job["result"] == {"status": "verified", "pr_url": "https://github.com/alice/widgets/pull/5"}
+    assert job["result"] == {"status": "verified", "pr_url": None}
     assert job["markdown"] == "# rendered backport verified"
     messages = [e["message"] for e in job["events"]]
     assert messages[:2] == ["Listing the branches", "verified"]
-    assert "Opening a draft pull request" in messages
-    assert messages[-1] == "Draft pull request: https://github.com/alice/widgets/pull/5"
+    assert "Checking how active 8.1.x is on acme/widgets" in messages
+    assert messages[-1] == "Verified. Read the patch, then open the draft pull request."
     assert job["events"][-1]["stage"] == "done"
 
     (assessment,) = backport_fake.calls
     assert assessment.issue_url == ISSUE and assessment.reproduction.fixing_commit == FIX
-    ((result, token),) = pr_fake.calls
-    assert result.status is BackportStatus.VERIFIED and token == TOKEN
+    assert pr_fake.calls == []  # step 1 never opens a pull request
 
     # saved where the examples dir does not matter: <runs_dir>/backports/<id>.json
-    record = json.loads((settings.runs_dir / "backports" / f"{RUN_OLD}.json").read_text())
+    record = saved_record(settings)
     assert record["status"] == "verified" and record["report_id"] == RUN_OLD
-    assert record["pr_url"] == "https://github.com/alice/widgets/pull/5"
-    assert record["pr"]["number"] == 5 and record["pr"]["draft"] is True
-    assert record["pr"]["base_repo"] == "alice/widgets"  # the fork, not acme/widgets
-    assert record["result"]["target_branch"] == "8.1.x" and record["pr_error"] is None
+    assert (record["pr_url"], record["pr_target"], record["pr_number"]) == (None, None, None)
+    assert record["prs"] == {}
+    assert record["result"]["target_branch"] == "8.1.x" and record["result"]["patch"]
+    assert record["target_activity"]["latest_release"] == "8.1.9"
     assert TOKEN not in json.dumps(record) and TOKEN not in json.dumps(job)
 
-    # ... and then visible to everyone, in the list and on the detail page
+    # visible to everyone: in the list (no pull request yet) and on the detail page
     (row,) = [r for r in (await client.get("/api/reports")).json() if r["id"] == RUN_OLD]
-    assert row["backport"] == {"status": "verified", "pr_url": "https://github.com/alice/widgets/pull/5"}
+    assert row["backport"] == {"status": "verified", "pr_url": None, "pr_target": None}
     detail = (await client.get(f"/api/reports/{RUN_OLD}")).json()
-    assert detail["backport"]["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    assert detail["backport"]["status"] == "verified" and detail["backport"]["pr_url"] is None
     assert detail["backport"]["result"]["status"] == "verified"
 
 
 async def test_a_backport_job_streams_its_progress_like_a_run(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     job_id = (await backport_job(client)).json()["id"]
     await wait_finished(client, job_id)
     text = (await client.get(f"/api/runs/{job_id}/events")).text
     assert text.count("event: progress") >= 4 and "event: done" in text
-    assert "Draft pull request: https://github.com/alice/widgets/pull/5" in text
+    assert "Verified. Read the patch" in text
 
 
 async def test_a_backport_does_not_use_the_daily_limit(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     before = (await client.get("/api/status")).json()
@@ -649,12 +684,12 @@ async def test_a_backport_does_not_use_the_daily_limit(
 )
 async def test_a_backport_starts_only_for_fixed_on_main_with_a_known_fix(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests, verdict: Verdict, commit: str | None,
+    verdict: Verdict, commit: str | None,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment(verdict, commit=commit))
     res = await backport_job(client)
     assert res.status_code == 422 and res.json()["error"] == "not_backportable"
-    assert backport_fake.calls == [] and pr_fake.calls == []
+    assert backport_fake.calls == []
     assert (await client.get("/api/status")).json()["busy"] is False
     summary = (await client.get("/api/reports")).json()[0]
     assert summary["can_backport"] is False
@@ -669,9 +704,9 @@ async def test_a_backport_example_cannot_be_backported_again(
     assert res.status_code == 422 and backport_fake.calls == []
 
 
-async def test_an_example_assessment_can_be_backported_and_saves_under_runs(
+async def test_an_example_assessment_can_be_verified_and_saves_under_runs(
     client: httpx.AsyncClient, settings: SimpleNamespace, examples_dir: Path,
-    backport_fake: FakeBackport, pr_fake: FakePullRequests,
+    backport_fake: FakeBackport,
 ) -> None:
     """The examples directory is read-only on the server, so results go to the runs dir."""
     (examples_dir / "real-acme-widgets-42.json").write_text(make_assessment().model_dump_json())
@@ -681,12 +716,12 @@ async def test_an_example_assessment_can_be_backported_and_saves_under_runs(
     assert (settings.runs_dir / "backports" / "real-acme-widgets-42.json").exists()
     assert names(examples_dir) == ["real-acme-widgets-42.json"]
     (row,) = (await client.get("/api/reports")).json()
-    assert row["backport"]["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    assert row["backport"] == {"status": "verified", "pr_url": None, "pr_target": None}
 
 
 async def test_a_backport_is_refused_with_409_while_anything_else_is_running(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests, monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     write_run(settings.runs_dir, RUN_NEW, make_assessment(number=43))
@@ -699,11 +734,11 @@ async def test_a_backport_is_refused_with_409_while_anything_else_is_running(
     assert second.status_code == 409 and second.json()["error"] == "busy"
     assert "in progress" in second.json()["message"]
     assert (await client.get("/api/status")).json()["busy"] is True
-    # a live run is refused while the job holds the slot, too
+
     async def pipeline(*a: Any, **k: Any) -> Assessment:
         raise AssertionError("must not start")
 
-    monkeypatch.setattr(web, "run_pipeline", pipeline)
+    monkeypatch.setattr(web, "run_pipeline", pipeline)  # a live run is refused too
     live = await client.post("/api/runs", json={"issue_url": ISSUE})
     assert live.status_code == 429 and live.json()["error"] == "busy"
     assert len(backport_fake.calls) == 1
@@ -733,9 +768,8 @@ async def test_a_backport_is_refused_with_409_while_a_live_run_is_going(
     await wait_finished(client, live.json()["id"])
 
 
-async def test_asking_again_returns_the_saved_pull_request_without_a_new_job(
+async def test_a_verified_backport_is_not_run_again(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     await wait_finished(client, (await backport_job(client)).json()["id"])
@@ -743,9 +777,9 @@ async def test_asking_again_returns_the_saved_pull_request_without_a_new_job(
     again = await backport_job(client)
     assert again.status_code == 200
     body = again.json()
-    assert body["report_id"] == RUN_OLD
-    assert body["backport"]["pr_url"] == "https://github.com/alice/widgets/pull/5"
-    assert len(backport_fake.calls) == 1 and len(pr_fake.calls) == 1
+    assert body["report_id"] == RUN_OLD and body["backport"]["status"] == "verified"
+    assert body["backport"]["result"]["target_branch"] == "8.1.x"
+    assert len(backport_fake.calls) == 1
     assert (await client.get("/api/status")).json()["busy"] is False
 
     # and even while something else is running
@@ -757,59 +791,102 @@ async def test_asking_again_returns_the_saved_pull_request_without_a_new_job(
     backport_fake.gate.set()
 
 
-async def test_a_backport_that_is_not_verified_gets_no_pull_request_and_may_be_retried(
+async def test_a_backport_that_is_not_verified_may_be_run_again(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     backport_fake.result = make_result(BackportStatus.CONFLICTS)
     job = await wait_finished(client, (await backport_job(client)).json()["id"])
     assert job["status"] == "done" and job["result"] == {"status": "conflicts", "pr_url": None}
-    assert "No pull request was opened" in job["events"][-1]["message"]
-    assert pr_fake.calls == []
+    assert "Backport conflicts" in job["events"][-1]["message"]
 
     (row,) = (await client.get("/api/reports")).json()
-    assert row["backport"] == {"status": "conflicts", "pr_url": None}
+    assert row["backport"] == {"status": "conflicts", "pr_url": None, "pr_target": None}
     saved = (await client.get(f"/api/reports/{RUN_OLD}")).json()["backport"]
     assert saved["status"] == "conflicts" and saved["pr_url"] is None
 
-    backport_fake.result = make_result()  # the second try may run again and succeed
+    backport_fake.result = make_result()  # the second try runs again, and may succeed
     retry = await backport_job(client)
     assert retry.status_code == 202
     await wait_finished(client, retry.json()["id"])
-    assert len(backport_fake.calls) == 2 and len(pr_fake.calls) == 1
+    assert len(backport_fake.calls) == 2 and saved_record(settings)["status"] == "verified"
 
 
-async def test_a_failed_pull_request_keeps_the_verified_result_and_the_retry_reuses_it(
+async def test_the_activity_of_the_target_branch_is_recorded_with_the_result(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests,
+    activity_fake: FakeActivity,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
-    pr_fake.error = pullrequest.PullRequestError(
-        f"GitHub returned 403 for POST /repos/alice/widgets/forks: nope {TOKEN}"
+    await wait_finished(client, (await backport_job(client)).json()["id"])
+    assert activity_fake.calls == [("acme/widgets", "8.1.x")]
+    assert saved_record(settings)["target_activity"] == activity_fake.result
+    detail = (await client.get(f"/api/reports/{RUN_OLD}")).json()["backport"]
+    assert detail["target_activity"]["last_commit_date"] == "2026-10-01T09:30:00Z"
+    assert detail["target_warning"] is None  # a recent commit, and 8.1.9 is the branch's own line
+
+    activity_fake.result = {**activity_fake.result, "last_commit_date": "2024-11-03T09:30:00Z"}
+    other = write_run(settings.runs_dir, RUN_NEW, make_assessment(number=43))
+    assert other.exists()
+    await wait_finished(client, (await backport_job(client, RUN_NEW)).json()["id"])
+    stale = (await client.get(f"/api/reports/{RUN_NEW}")).json()["backport"]["target_warning"]
+    assert stale["reasons"] == ["stale"]
+    assert stale["text"] == (
+        "Last commit on 8.1.x: 2024-11-03; latest release: 8.1.9. "
+        "Maintainers may not accept backports to this branch."
     )
+
+
+@pytest.mark.parametrize("failure", ["raises", "none"])
+async def test_a_failure_reading_the_branch_activity_never_fails_the_job(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    activity_fake: FakeActivity, failure: str,
+) -> None:
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    if failure == "raises":
+        activity_fake.error = RuntimeError(f"GitHub exploded with {TOKEN}")
+    else:
+        activity_fake.result = None
     job = await wait_finished(client, (await backport_job(client)).json()["id"])
-    assert job["status"] == "error" and "403" in job["error"]
-    assert TOKEN not in json.dumps(job)  # a second scrub, on top of pullrequest.py's own
-    saved = json.loads((settings.runs_dir / "backports" / f"{RUN_OLD}.json").read_text())
-    assert saved["status"] == "verified" and saved["pr_url"] is None and "403" in saved["pr_error"]
-    assert TOKEN not in json.dumps(saved)
-
-    pr_fake.error = None
-    retry = await wait_finished(client, (await backport_job(client)).json()["id"])
-    assert retry["status"] == "done"
-    assert len(backport_fake.calls) == 1  # the sandbox work was not repeated
-    assert len(pr_fake.calls) == 2
-    assert "Reusing the verified backport" in retry["events"][0]["message"]
-    saved = json.loads((settings.runs_dir / "backports" / f"{RUN_OLD}.json").read_text())
-    assert saved["pr_url"] == "https://github.com/alice/widgets/pull/5"
-    assert saved["pr_error"] is None
+    assert job["status"] == "done" and job["error"] is None
+    record = saved_record(settings)
+    assert record["status"] == "verified" and record["target_activity"] is None
+    assert TOKEN not in json.dumps(record) and TOKEN not in json.dumps(job)
+    detail = (await client.get(f"/api/reports/{RUN_OLD}")).json()["backport"]
+    assert detail["target_activity"] is None and detail["target_warning"] is None
 
 
-async def test_a_server_without_a_github_token_fails_the_job_before_any_sandbox_work(
+async def test_the_real_activity_seam_reads_github_with_the_token_and_swallows_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    async def fake_read(repo: str, branch: str, *, token: str | None = None):
+        seen.append((repo, branch, token))
+        return {"branch": branch}
+
+    monkeypatch.setattr(github, "target_activity", fake_read)
+    monkeypatch.setattr(web, "github_token", lambda settings: TOKEN)
+    got = await web.fetch_target_activity("acme/widgets", "8.1.x", settings=object())
+    assert got == {"branch": "8.1.x"} and seen == [("acme/widgets", "8.1.x", TOKEN)]
+
+    def no_token(settings: Any) -> str:
+        raise pullrequest.PullRequestError("no GitHub token")
+
+    async def explode(*args: Any, **kwargs: Any):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(web, "github_token", no_token)
+    assert (await web.fetch_target_activity("a/b", "1.x", settings=object())) == {"branch": "1.x"}
+    assert seen[-1] == ("a/b", "1.x", None)  # no token: an anonymous read of public data
+    monkeypatch.setattr(github, "target_activity", explode)
+    assert await web.fetch_target_activity("a/b", "1.x", settings=object()) is None
+
+
+async def test_a_server_without_a_github_token_still_verifies(
     tmp_path: Path, examples_dir: Path, backport_fake: FakeBackport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Only step 2 needs the token."""
     settings = make_settings(tmp_path, github_token="")
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
 
@@ -818,19 +895,19 @@ async def test_a_server_without_a_github_token_fails_the_job_before_any_sandbox_
 
     monkeypatch.setattr(pullrequest, "_gh_auth_token", no_gh)
     async with make_client(settings, examples_dir) as client:
-        res = await backport_job(client)
-        assert res.status_code == 202
-        job = await wait_finished(client, res.json()["id"])
-    assert job["status"] == "error"
-    assert "GITHUB_TOKEN is unset" in job["error"] and "gh is not installed" in job["error"]
-    assert job["events"][-1]["stage"] == "error"
-    assert backport_fake.calls == []
-    assert not (settings.runs_dir / "backports").exists()
+        job = await wait_finished(client, (await backport_job(client)).json()["id"])
+        assert job["status"] == "done" and job["result"]["status"] == "verified"
+        res = await client.post(
+            f"/api/reports/{RUN_OLD}/backport/pr", headers=AUTH, json={"target": "fork"}
+        )
+    assert res.status_code == 503 and res.json()["error"] == "no_github_token"
+    assert "GITHUB_TOKEN is unset" in res.json()["message"]
+    assert saved_record(settings)["pr_url"] is None
 
 
 async def test_an_unexpected_failure_is_friendly_and_leaks_nothing(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
 
@@ -847,7 +924,7 @@ async def test_an_unexpected_failure_is_friendly_and_leaks_nothing(
 
 async def test_a_job_that_times_out_says_so(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests, monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     monkeypatch.setattr(web, "BACKPORT_TIMEOUT_S", 0.05)
@@ -858,7 +935,6 @@ async def test_a_job_that_times_out_says_so(
 
 async def test_a_finished_job_survives_a_restart(
     settings: SimpleNamespace, examples_dir: Path, backport_fake: FakeBackport,
-    pr_fake: FakePullRequests,
 ) -> None:
     write_run(settings.runs_dir, RUN_OLD, make_assessment())
     async with make_client(settings, examples_dir) as client:
@@ -867,10 +943,256 @@ async def test_a_finished_job_survives_a_restart(
     async with make_client(settings, examples_dir) as restarted:
         again = (await restarted.get(f"/api/runs/{job_id}")).json()
     assert again["kind"] == "backport" and again["report_id"] == RUN_OLD
-    assert again["result"]["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    assert again["result"] == {"status": "verified", "pr_url": None}
 
 
-# --- the pull request always goes to the fork ----------------------------------------------
+# --- the rule for an inactive target branch ------------------------------------------------
+
+NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+
+
+def activity(commit: str | None = "2026-10-01T09:30:00Z", release: str | None = "8.4.9") -> dict:
+    return {"last_commit_date": commit, "latest_release": release}
+
+
+@pytest.mark.parametrize(
+    ("data", "branch", "reasons"),
+    [
+        (activity(), "8.4.x", None),  # recent, and the release is the branch's own line
+        (activity("2026-04-24T12:00:00Z"), "8.4.x", None),  # exactly 180 days: not more
+        (activity("2026-04-24T11:59:00Z"), "8.4.x", ["stale"]),  # a minute past 180 days
+        (activity(release="9.1.1"), "8.4.x", ["superseded"]),
+        (activity(release="8.5.0"), "8.4.x", ["superseded"]),  # a newer minor is enough
+        (activity(release="8.4.10"), "8.4.x", None),  # a newer patch is not
+        (activity(release="8.3.2"), "8.4.x", None),  # an older line is not
+        (activity(release="v9.0.0"), "stable/8.1", ["superseded"]),
+        (activity(release="4.0.0"), "3.x", ["superseded"]),  # a branch with only a major
+        (activity(release="3.9.0"), "3.x", None),
+        (activity("2024-11-03T00:00:00Z", "9.1.1"), "8.4.x", ["stale", "superseded"]),
+        (activity("2024-11-03T00:00:00+02:00"), "main", ["stale"]),  # no version in the name
+        (activity(release="9.0.0"), "main", None),
+        (activity(None, "9.1.1"), "8.4.x", ["superseded"]),
+        (activity(None, None), "8.4.x", None),  # nothing known, nothing to warn about
+        (activity("not a date"), "8.4.x", None),
+        ({}, "8.4.x", None),
+        (None, "8.4.x", None),
+        ("junk", "8.4.x", None),
+        (activity(release="9.1.1"), None, None),
+    ],
+)
+def test_the_inactive_branch_rule(data: Any, branch: str | None, reasons: list | None) -> None:
+    warning = reports.target_warning(data, branch, now=NOW)
+    assert (warning["reasons"] if warning else None) == reasons
+
+
+def test_the_warning_names_the_date_and_the_latest_release() -> None:
+    warning = reports.target_warning(
+        activity("2025-11-03T10:00:00Z", "9.1.1"), "8.4.x", now=NOW
+    )
+    assert warning is not None and warning["text"] == (
+        "Last commit on 8.4.x: 2025-11-03; latest release: 9.1.1. "
+        "Maintainers may not accept backports to this branch."
+    )
+    unknown = reports.target_warning(activity(None, "9.1.1"), "8.4.x", now=NOW)
+    assert unknown is not None
+    assert unknown["text"].startswith("Last commit on 8.4.x: unknown; latest release: 9.1.1.")
+
+
+# --- step 2: the draft pull request --------------------------------------------------------
+
+
+async def verified(client: httpx.AsyncClient, settings: SimpleNamespace) -> None:
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    await wait_finished(client, (await backport_job(client)).json()["id"])
+
+
+async def open_pr(
+    client: httpx.AsyncClient, body: Any = None, *, report_id: str = RUN_OLD
+) -> httpx.Response:
+    return await client.post(
+        f"/api/reports/{report_id}/backport/pr", headers=AUTH,
+        json={"target": "fork"} if body is None else body,
+    )
+
+
+async def test_step_2_opens_a_draft_pr_in_the_fork_and_saves_it(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests,
+) -> None:
+    await verified(client, settings)
+    res = await open_pr(client)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["target"] == "fork" and body["created"] is True
+    assert body["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    assert body["backport"]["pr_url"] == body["pr_url"]
+    ((result, token),) = pr_fake.calls
+    assert result.status is BackportStatus.VERIFIED and token == TOKEN
+
+    record = saved_record(settings)
+    assert record["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    assert (record["pr_target"], record["pr_number"]) == ("fork", 5)
+    fork = record["prs"]["fork"]
+    assert fork["url"] == record["pr_url"] and fork["draft"] is True
+    assert fork["base_repo"] == "alice/widgets"  # the fork, not acme/widgets
+    assert fork["number"] == 5
+    assert record["status"] == "verified" and record["target_activity"]  # step 1's data is kept
+    assert TOKEN not in json.dumps(record) and TOKEN not in res.text
+
+    (row,) = [r for r in (await client.get("/api/reports")).json() if r["id"] == RUN_OLD]
+    assert row["backport"] == {
+        "status": "verified", "pr_url": "https://github.com/alice/widgets/pull/5",
+        "pr_target": "fork",
+    }
+    detail = (await client.get(f"/api/reports/{RUN_OLD}")).json()["backport"]
+    assert detail["pr_url"] == row["backport"]["pr_url"] and detail["pr_target"] == "fork"
+
+
+async def test_step_2_is_idempotent_per_target(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests,
+) -> None:
+    await verified(client, settings)
+    await open_pr(client)
+    again = await open_pr(client)
+    assert again.status_code == 200
+    assert again.json()["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    assert again.json()["created"] is False
+    assert len(pr_fake.calls) == 1 and len(backport_fake.calls) == 1
+
+
+async def test_step_2_refuses_a_backport_that_is_not_verified(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests,
+) -> None:
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    res = await open_pr(client)  # nothing was verified yet
+    assert res.status_code == 409 and res.json()["error"] == "not_verified"
+
+    backport_fake.result = make_result(BackportStatus.CONFLICTS)
+    await wait_finished(client, (await backport_job(client)).json()["id"])
+    res = await open_pr(client)
+    assert res.status_code == 409 and res.json()["error"] == "not_verified"
+    assert pr_fake.calls == []
+    assert saved_record(settings)["pr_url"] is None
+
+
+async def test_step_2_refuses_an_unknown_report_and_a_stranger(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests,
+) -> None:
+    assert (await open_pr(client, report_id="20261010T100000Z-nobody-1")).status_code == 404
+    await verified(client, settings)
+    for headers in ({}, {"Authorization": "Bearer wrong"}):
+        res = await client.post(
+            f"/api/reports/{RUN_OLD}/backport/pr", headers=headers, json={"target": "fork"}
+        )
+        assert res.status_code == 401
+    assert pr_fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [None, {}, {"target": None}, {"target": "origin"}, {"target": "upstream"},
+     {"target": "upstream", "confirm": "acme/widgets"}, ["fork"], "fork"],
+)
+async def test_step_2_takes_only_the_fork_as_a_target(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests, body: Any,
+) -> None:
+    await verified(client, settings)
+    res = await client.post(
+        f"/api/reports/{RUN_OLD}/backport/pr", headers=AUTH,
+        **({} if body is None else {"json": body}),
+    )
+    assert res.status_code == 400 and res.json()["error"] == "invalid_request"
+    assert pr_fake.calls == []
+
+
+async def test_step_2_without_a_token_is_a_503_and_changes_nothing(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await verified(client, settings)
+
+    def none(settings: Any) -> str:
+        raise pullrequest.PullRequestError("no GitHub token")
+
+    monkeypatch.setattr(web, "github_token", none)
+    res = await open_pr(client)
+    assert res.status_code == 503 and res.json()["error"] == "no_github_token"
+    assert pr_fake.calls == [] and saved_record(settings)["pr_url"] is None
+
+
+async def test_a_failed_pull_request_is_reported_scrubbed_and_may_be_retried(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests, caplog: pytest.LogCaptureFixture,
+) -> None:
+    await verified(client, settings)
+    pr_fake.error = pullrequest.PullRequestError(
+        f"GitHub returned 403 for POST /repos/alice/widgets/forks: nope {TOKEN}"
+    )
+    res = await open_pr(client)
+    assert res.status_code == 502 and res.json()["error"] == "pull_request_failed"
+    assert "403" in res.json()["message"] and TOKEN not in res.text
+    assert saved_record(settings)["pr_url"] is None  # still verified, still without a PR
+    assert saved_record(settings)["status"] == "verified"
+
+    pr_fake.error = RuntimeError(f"boom with {TOKEN}")
+    res = await open_pr(client)
+    assert res.status_code == 502 and "details are in the server log" in res.json()["message"]
+    assert TOKEN not in res.text and "RuntimeError" not in res.text
+
+    pr_fake.error = None
+    ok = await open_pr(client)
+    assert ok.status_code == 200 and ok.json()["created"] is True
+    assert len(backport_fake.calls) == 1  # the sandbox work was never repeated
+
+
+async def test_a_slow_github_is_a_504_and_may_be_retried(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await verified(client, settings)
+    monkeypatch.setattr(web, "PULL_REQUEST_TIMEOUT_S", 0.05)
+    pr_fake.gate = asyncio.Event()  # never opened
+    res = await open_pr(client)
+    assert res.status_code == 504 and res.json()["error"] == "timeout"
+    assert saved_record(settings)["pr_url"] is None
+    pr_fake.gate.set()
+    assert (await open_pr(client)).status_code == 200
+
+
+async def test_a_record_from_the_first_deployment_counts_as_a_fork_pull_request(
+    client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
+    pr_fake: FakePullRequests,
+) -> None:
+    """Before targets existed the job opened a pull request in the fork and saved ``pr``."""
+    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    (settings.runs_dir / "backports").mkdir(parents=True)
+    old = {
+        "report_id": RUN_OLD, "issue_url": ISSUE, "status": "verified",
+        "pr_url": "https://github.com/alice/widgets/pull/3",
+        "pr": {"number": 3, "base_repo": "alice/widgets", "draft": True},
+        "pr_error": None, "result": make_result().model_dump(mode="json"),
+    }
+    (settings.runs_dir / "backports" / f"{RUN_OLD}.json").write_text(json.dumps(old))
+
+    (row,) = (await client.get("/api/reports")).json()
+    assert row["backport"] == {
+        "status": "verified", "pr_url": "https://github.com/alice/widgets/pull/3",
+        "pr_target": "fork",
+    }
+    detail = (await client.get(f"/api/reports/{RUN_OLD}")).json()["backport"]
+    assert detail["prs"]["fork"]["url"] == "https://github.com/alice/widgets/pull/3"
+    assert detail["pr_number"] == 3 and detail["target_warning"] is None
+    # verified already: step 1 is not redone, and the fork's pull request is returned
+    assert (await backport_job(client)).status_code == 200 and backport_fake.calls == []
+    again = await open_pr(client)
+    assert again.json()["created"] is False and pr_fake.calls == []
+
+
+# --- the pull request goes to the fork ------------------------------------------------------
 
 
 async def test_the_web_app_opens_pull_requests_on_the_fork_only(
@@ -900,7 +1222,7 @@ def test_no_code_path_in_the_web_app_names_the_upstream_target() -> None:
 
 
 @pytest.fixture
-def github():
+def github_api():
     with respx.mock(base_url="https://api.github.com", assert_all_called=False) as router:
         info = {"fork": True, "parent": {"full_name": "acme/widgets"}, "default_branch": "main"}
         router.get("/user").respond(json={"login": "alice", "id": 7, "name": "Alice"})
@@ -921,12 +1243,13 @@ def github():
         yield router
 
 
-async def test_a_job_sent_every_upstream_hint_still_opens_the_draft_in_the_fork(
+async def test_step_2_against_a_mocked_github_opens_only_a_draft_in_the_fork(
     client: httpx.AsyncClient, settings: SimpleNamespace, backport_fake: FakeBackport,
-    github: respx.MockRouter, monkeypatch: pytest.MonkeyPatch,
+    github_api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real ``open_backport_pr`` against a mocked GitHub: the only pull request created is
-    in alice's fork, whatever the request asks for. Nothing is mocked in between but the push."""
+    """The real ``open_backport_pr`` against a mocked GitHub. Nothing is faked in between but
+    the git push. An upstream request is refused before any GitHub call; the fork request makes
+    the only pull request there is, a draft with the disclosure line."""
     pushed: list[pullrequest.PushRequest] = []
 
     async def push(request: pullrequest.PushRequest) -> str:
@@ -935,35 +1258,33 @@ async def test_a_job_sent_every_upstream_hint_still_opens_the_draft_in_the_fork(
 
     monkeypatch.setattr(pullrequest, "push_with_git", push)
     monkeypatch.setattr(web, "github_token", lambda settings: TOKEN)
-    write_run(settings.runs_dir, RUN_OLD, make_assessment())
+    await verified(client, settings)
 
-    res = await client.post(
-        f"/api/reports/{RUN_OLD}/backport?target=upstream&pr_target=upstream&yes_upstream=1",
-        headers=AUTH,
-        json={"target": "upstream", "pr_target": "upstream", "confirmed_upstream": True},
+    refused = await client.post(
+        f"/api/reports/{RUN_OLD}/backport/pr?target=upstream&pr_target=upstream&yes_upstream=1",
+        headers=AUTH, json={"target": "upstream", "confirm": "acme/widgets"},
     )
-    assert res.status_code == 202
-    job = await wait_finished(client, res.json()["id"])
+    assert refused.status_code == 400 and len(github_api.calls) == 0
 
-    assert job["status"] == "done"
-    assert job["result"]["pr_url"] == "https://github.com/alice/widgets/pull/5"
-    posts = [c.request.url.path for c in github.calls if c.request.method == "POST"]
+    res = await open_pr(client)
+    assert res.status_code == 200
+    assert res.json()["pr_url"] == "https://github.com/alice/widgets/pull/5"
+    posts = [c.request.url.path for c in github_api.calls if c.request.method == "POST"]
     assert "/repos/alice/widgets/pulls" in posts
-    assert "/repos/acme/widgets/pulls" not in posts  # the upstream project saw nothing
     assert not any(p.startswith("/repos/acme/") and "/pulls" in p for p in posts)
     body = json.loads(
-        next(c for c in github.calls if c.request.url.path == "/repos/alice/widgets/pulls"
+        next(c for c in github_api.calls if c.request.url.path == "/repos/alice/widgets/pulls"
              and c.request.method == "POST").request.content
     )
     assert body["draft"] is True and body["base"] == "8.1.x"
+    assert body["head"] == "alice:fixedyet/backport-42-8.1.x"
     assert body["body"].rstrip().endswith(
         "Prepared with FixedYet (AI-assisted: NVIDIA Nemotron via Nebius Token Factory); "
         "reviewed and submitted by @alice."
     )
     (push_request,) = pushed
     assert push_request.fork_url == "https://github.com/alice/widgets.git"
-    saved = json.loads((settings.runs_dir / "backports" / f"{RUN_OLD}.json").read_text())
-    assert saved["pr"]["base_repo"] == "alice/widgets" and saved["pr"]["fork"] == "alice/widgets"
+    assert saved_record(settings)["prs"]["fork"]["base_repo"] == "alice/widgets"
 
 
 # --- the pages ----------------------------------------------------------------------------

@@ -17,7 +17,7 @@
 
   const {
     $, el, link, gh, refLink, commitLink, linkify, formatCost, formatDuration, formatDate,
-    copyText, renderReport, renderBackport, VERDICTS, BACKPORT_STATUS,
+    copyText, codeBlock, renderReport, renderBackport, VERDICTS, BACKPORT_STATUS,
   } = globalThis.FY;
 
   const TOKEN_KEY = 'fixedyet-maintainer-token';
@@ -83,7 +83,9 @@
       return el('span', { class: 'rr-nobp', text: 'No maintenance branch to backport to' });
     }
     if (!r.can_backport) return null;
-    return el('a', { class: 'btn small primary', href: `#${encodeURIComponent(r.id)}`, text: 'Backport fix → draft PR' });
+    const verified = r.backport && r.backport.status === 'verified';
+    const label = !state.admin ? 'Backport fix → draft PR' : (verified ? 'Review and open PR' : 'Verify backport');
+    return el('a', { class: 'btn small primary', href: `#${encodeURIComponent(r.id)}`, text: label });
   }
 
   function reportRow(r) {
@@ -212,25 +214,81 @@
     const repo = gh.repoOf(d.summary.issue_url);
     const number = /\/issues\/(\d+)$/.exec(d.summary.issue_url || '');
     const url = repo && number ? `https://github.com/${repo}/issues/${number[1]}` : '<issue-url>';
-    const command = `fixedyet backport ${url} --open-pr`;
-    const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy' });
-    copy.addEventListener('click', () => copyText(command, copy));
     const signIn = el('button', { class: 'linklike', type: 'button', text: 'Maintainer sign-in' });
     signIn.addEventListener('click', openSignIn);
+    const command = (text, caption) => {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy' });
+      copy.addEventListener('click', () => copyText(text, copy));
+      return [
+        el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: caption }), copy),
+        el('pre', { class: 'code', tabindex: '0' }, el('code', { text })),
+      ];
+    };
     return el('div', { class: 'panel', role: 'region', 'aria-label': 'How to open a pull request' },
       el('p', null, el('strong', { text: 'Opening pull requests on this demo is limited to its maintainer.' })),
-      el('p', { text: 'To do it yourself, install FixedYet and run this. It reproduces the backport in your own sandbox and opens a draft pull request in your fork.' }),
-      el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: 'shell' }), copy),
-      el('pre', { class: 'code', tabindex: '0' }, el('code', { text: command })),
+      el('p', { text: 'To do it yourself, install FixedYet and run one of these. Both reproduce and verify the backport in your own sandbox, then open a draft pull request.' }),
+      command(`fixedyet backport ${url} --open-pr`, 'in your fork'),
+      command(`fixedyet backport ${url} --open-pr --pr-target upstream`,
+        `on ${repo || 'the upstream project'}: it asks you to type the repository name first`),
       el('p', null, 'A verified example: ',
         el('a', { href: `#${EXAMPLE_BACKPORT}`, text: 'the backport report' }),
         ' and ', link(EXAMPLE_PR, 'its draft pull request'), '.'),
       el('p', { class: 'muted small' }, 'Are you the maintainer? Use ', signIn, '.'));
   }
 
+  // '3244 passed, 1 failed, 6 error, 124 skipped', or why the suite did not give a result.
+  function suiteText(suite) {
+    if (!suite) return 'not run';
+    if (!suite.ran) return suite.timed_out ? 'timed out' : 'did not finish';
+    const parts = [`${suite.passed} passed`];
+    for (const [count, word] of [[suite.failed, 'failed'], [suite.errors, 'error'], [suite.skipped, 'skipped']]) {
+      if (count) parts.push(`${count} ${word}`);
+    }
+    return parts.join(', ');
+  }
+
+  // The pull requests a record holds, each with where it is: in the fork or on the upstream project.
+  function prLines(record) {
+    const prs = record.prs && Object.keys(record.prs).length
+      ? record.prs
+      : (record.pr_url ? { [record.pr_target || 'fork']: { url: record.pr_url } } : {});
+    const upstream = (record.result && record.result.repo) || '';
+    return ['upstream', 'fork'].filter((target) => prs[target] && prs[target].url).map((target) => el('p', { class: 'pr-line' },
+      'Draft PR: ', link(prs[target].url, prLabel(prs[target].url), 'pr-link'),
+      el('span', { class: 'muted', text: target === 'upstream' ? ` on ${upstream}` : ' in fork' })));
+  }
+
+  // The maintainer's view of a verified backport: the facts, a warning when the branch looks
+  // inactive, the patch to review, and the step that opens the pull request.
+  function verifiedPanel(d, record, area) {
+    const result = record.result || {};
+    const repo = gh.repoOf(result.repo) || gh.repoOf(d.summary.issue_url);
+    const facts = [];
+    const fact = (label, value) => el('div', null, el('dt', { text: label }), el('dd', null, value));
+    if (result.target_branch) facts.push(fact('Target branch', link(gh.branch(repo, result.target_branch), result.target_branch)));
+    if (result.target_branch_head) facts.push(fact('Branch head', commitLink(repo, result.target_branch_head)));
+    if (result.fixing_commit) facts.push(fact('Fix on main', commitLink(repo, result.fixing_commit)));
+    facts.push(fact('Suite before', suiteText(result.suite_before)), fact('Suite after', suiteText(result.suite_after)));
+    const parts = [el('dl', { class: 'facts' }, facts)];
+    if (record.target_warning && record.target_warning.text) {
+      parts.push(el('div', { class: 'notice warn-box', role: 'note' },
+        el('strong', { text: 'This branch may not take backports. ' }), record.target_warning.text));
+    }
+    if (result.patch) {
+      parts.push(el('details', null, el('summary', { text: 'Review the patch' }), codeBlock(result.patch, 'diff')));
+    }
+    const hasFork = record.prs && record.prs.fork && record.prs.fork.url;
+    if (!hasFork) {
+      const forkButton = el('button', { class: 'btn primary', type: 'button', text: 'Open draft PR in my fork' });
+      forkButton.addEventListener('click', () => openPullRequest(d, 'fork', forkButton, area));
+      parts.push(el('div', { class: 'pr-actions' }, forkButton));
+    }
+    return parts;
+  }
+
   function backportCard(d) {
     const record = d.backport;
-    const pr = record && record.pr_url;
+    const verifiedRecord = record && record.status === 'verified';
     const card = el('section', { class: 'card backport-card' });
     card.append(el('div', { class: 'card-head' }, el('h3', { text: d.kind === 'backport' ? 'Pull request' : 'Backport' })));
     const flashed = state.flash && state.flash.id === d.id;
@@ -238,30 +296,36 @@
       card.append(notice(state.flash.text, state.flash.kind));
       state.flash = null;
     }
-    if (pr) {
-      card.append(el('p', { class: 'pr-line' }, 'Draft PR: ', link(pr, prLabel(pr), 'pr-link')));
-      card.append(el('p', { class: 'muted small', text: 'Opened as a draft in the maintainer\'s fork, not in the upstream project. Its description says it was prepared with AI.' }));
+    if (record) {
+      const lines = prLines(record);
+      lines.forEach((line) => card.append(line));
+      if (lines.length) card.append(el('p', { class: 'muted small', text: 'Opened as a draft. Its description says it was prepared with AI.' }));
     }
-    if (d.kind !== 'backport' && !pr) {
-      if (!d.can_backport) return null;
-      if (record) {
-        const meta = BACKPORT_STATUS[`backport_${record.status}`] || { label: record.status, tone: 'muted' };
-        card.append(el('p', null, 'Last try: ', el('span', { class: `badge ${meta.tone}`, text: meta.label }),
-          record.result && record.result.reason ? ` ${record.result.reason}` : ''));
-        if (record.pr_error && !flashed) card.append(notice(record.pr_error, 'error'));
+    const area = el('div', { class: 'backport-area' });
+    if (d.kind !== 'backport') {
+      if (!d.can_backport && !record) return null;
+      if (state.admin && verifiedRecord) {
+        card.append(...verifiedPanel(d, record, area), area);
+      } else if (d.can_backport && !verifiedRecord) {
+        if (record) {
+          const meta = BACKPORT_STATUS[`backport_${record.status}`] || { label: record.status, tone: 'muted' };
+          card.append(el('p', null, 'Last try: ', el('span', { class: `badge ${meta.tone}`, text: meta.label }),
+            record.result && record.result.reason ? ` ${record.result.reason}` : ''));
+        }
+        const button = el('button', { class: 'btn primary', type: 'button', text: state.admin ? 'Verify backport' : 'Backport fix → draft PR' });
+        card.append(
+          el('p', { class: 'muted', text: state.admin
+            ? 'Cherry-picks the fix onto the maintenance branch of the reported version and checks it there: the reproduction test and the project\'s own tests. No pull request is opened yet. It takes several minutes.'
+            : 'The fix is known. This cherry-picks it onto the maintenance branch of the reported version, checks it there, and opens a draft pull request.' }),
+          button, area);
+        button.addEventListener('click', () => {
+          if (state.admin) startBackport(d, button, area);
+          else if (area.firstChild) area.replaceChildren();
+          else area.replaceChildren(visitorPanel(d));
+        });
+      } else if (d.can_backport && !state.admin) {
+        card.append(el('p', { class: 'muted', text: 'This backport is verified. Only the demo\'s maintainer can open a pull request from it.' }));
       }
-      const button = el('button', { class: 'btn primary', type: 'button', text: 'Backport fix → draft PR' });
-      const area = el('div', { class: 'backport-area' });
-      card.append(
-        el('p', { class: 'muted', text: state.admin
-          ? 'Cherry-picks the fix onto the maintenance branch of the reported version, checks it there, and opens a draft pull request in your fork. It takes several minutes.'
-          : 'The fix is known. This cherry-picks it onto the maintenance branch of the reported version, checks it there, and opens a draft pull request.' }),
-        button, area);
-      button.addEventListener('click', () => {
-        if (state.admin) startBackport(d, button, area);
-        else if (area.firstChild) area.replaceChildren();
-        else area.replaceChildren(visitorPanel(d));
-      });
     }
     if (record && record.result && d.kind !== 'backport') {
       card.append(el('details', null,
@@ -344,6 +408,29 @@
     area.replaceChildren(notice((res.body && res.body.message) || 'The backport could not be started.', 'error'));
   }
 
+  // Step 2: open the draft pull request for a verified backport. A short request, no log.
+  async function openPullRequest(d, target, button, area) {
+    button.disabled = true;
+    area.replaceChildren(el('p', { class: 'muted', text: 'Opening the draft pull request…' }));
+    let res;
+    try {
+      res = await api(`api/reports/${encodeURIComponent(d.id)}/backport/pr`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+    } catch {
+      button.disabled = false;
+      area.replaceChildren(notice('Could not reach the server. Check your connection and try again.', 'error'));
+      return;
+    }
+    if (res.status === 401) { signOut('Your maintainer token was not accepted. Sign in again.'); return; }
+    if (res.status === 404) { signOut('Maintainer mode is not available on this server.'); return; }
+    if (res.ok) { await showDetail(d.id, { keepScroll: true }); return; }
+    button.disabled = false;
+    area.replaceChildren(notice((res.body && res.body.message) || 'The pull request could not be opened.', 'error'));
+  }
+
   async function resumeJob(d) {
     const jobId = store.get('sessionStorage', JOB_KEY + d.id);
     if (!jobId) return;
@@ -363,7 +450,7 @@
     const button = area.parentElement && area.parentElement.querySelector('button.primary');
     if (button) button.disabled = true;
     const log = el('ol', { class: 'job-log', 'aria-live': 'polite' });
-    area.replaceChildren(el('p', { class: 'job-title', text: 'Backport in progress. This can take 30 minutes or more.' }), log);
+    area.replaceChildren(el('p', { class: 'job-title', text: 'Verifying the backport. This can take 30 minutes or more.' }), log);
     let seen = 0;
     let finished = false;
     const add = (event) => {

@@ -11,8 +11,9 @@ import asyncio
 import logging
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -149,6 +150,75 @@ class GitHubClient:
         if response.status_code == 429 or "rate limit" in response.text.lower():
             return 60.0  # secondary rate limit without headers
         return None
+
+    # -- how alive a branch is -------------------------------------------------------------
+
+    async def target_activity(self, repo: str, branch: str) -> dict[str, Any] | None:
+        """When ``branch`` last got a commit, and the project's latest release (tag and date).
+
+        Best effort, for a maintainer deciding whether a backport is welcome: every piece that
+        cannot be read is None, nothing is raised, and None comes back when nothing could be read.
+        The latest release is ``/releases/latest``; a project without releases falls back to its
+        highest version tag.
+        """
+        base = f"/repos/{repo}"
+        commit_date = commit_sha = None
+        try:
+            data = await self._get(f"{base}/branches/{quote(branch, safe='/')}")
+            commit_sha = data["commit"]["sha"]
+            detail = data["commit"].get("commit") or {}
+            commit_date = (detail.get("committer") or detail.get("author") or {}).get("date")
+        except Exception as exc:  # noqa: BLE001 - a nice-to-have must never fail its caller
+            log.debug("branch activity of %s@%s unreadable: %s", repo, branch, type(exc).__name__)
+        release = release_date = source = None
+        try:
+            data = await self._get(f"{base}/releases/latest")
+            release = data["tag_name"]
+            release_date = data.get("published_at") or data.get("created_at")
+            source = "release"
+        except GitHubNotFound:
+            release, release_date = await self._latest_tag(base)
+            source = "tag" if release else None
+        except Exception as exc:  # noqa: BLE001
+            log.debug("latest release of %s unreadable: %s", repo, type(exc).__name__)
+        if not (commit_date or release):
+            return None
+        return {
+            "branch": branch,
+            "last_commit_sha": commit_sha,
+            "last_commit_date": commit_date,
+            "latest_release": release,
+            "latest_release_date": release_date,
+            "release_source": source,
+            "checked_at": datetime.now(UTC).isoformat(),
+        }
+
+    async def _latest_tag(self, base: str) -> tuple[str | None, str | None]:
+        """The highest plain version tag (no a/b/rc/dev suffix) and its commit date, or Nones."""
+        try:
+            tags = await self._get(f"{base}/tags", {"per_page": 100})
+            best: tuple[tuple[int, ...], str, str] | None = None
+            for tag in tags:
+                name = str(tag.get("name", ""))
+                # 8.4.1, v8.4.1, pytest-8.4.1: not 8.4.0rc1 or 1.0b2, which are pre-releases
+                match = re.fullmatch(r"(?:[A-Za-z][\w]*[-_])?v?(\d+)\.(\d+)(?:\.(\d+))?", name)
+                if match:
+                    key = tuple(int(g or 0) for g in match.groups())
+                    if best is None or key > best[0]:
+                        best = (key, name, str((tag.get("commit") or {}).get("sha", "")))
+            if best is None:
+                return None, None
+            date = None
+            if best[2]:
+                try:
+                    detail = (await self._get(f"{base}/commits/{best[2]}")).get("commit") or {}
+                    date = (detail.get("committer") or detail.get("author") or {}).get("date")
+                except Exception:  # noqa: BLE001
+                    date = None
+            return best[1], date
+        except Exception as exc:  # noqa: BLE001
+            log.debug("tags of %s unreadable: %s", base, type(exc).__name__)
+            return None, None
 
     # -- issue ---------------------------------------------------------------------------
 
@@ -295,3 +365,10 @@ async def search_related_issues(
 async def find_fix_pr(issue: Issue, *, token: str | None = None) -> tuple[str, str] | None:
     async with GitHubClient(token) as gh:
         return await gh.find_fix_pr(issue)
+
+
+async def target_activity(
+    repo: str, branch: str, *, token: str | None = None
+) -> dict[str, Any] | None:
+    async with GitHubClient(token) as gh:
+        return await gh.target_activity(repo, branch)
