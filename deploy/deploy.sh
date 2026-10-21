@@ -85,9 +85,11 @@ echo "== copying the repository =="
 rsync "${RSYNC_ARGS[@]}" ./ "$TARGET:$REMOTE_DIR/"
 
 echo "== installing on the server =="
-ssh "${SSH_OPTS[@]}" "$TARGET" bash -s -- "$REMOTE_DIR" "$SERVICE" "$ENV_FILE" "$PORT" "$UPSTREAM" "$DOCKER_HOST_ROLE" <<'REMOTE'
+ssh "${SSH_OPTS[@]}" "$TARGET" bash -s -- "$REMOTE_DIR" "$SERVICE" "$ENV_FILE" "$PORT" "${UPSTREAM:-none}" "$DOCKER_HOST_ROLE" <<'REMOTE'
 set -euo pipefail
+# ssh joins the arguments into one command line, so an empty one would vanish: "none" stands in.
 REMOTE_DIR=$1; SERVICE=$2; ENV_FILE=$3; PORT=$4; UPSTREAM=$5; DOCKER_HOST_ROLE=$6
+[ "$UPSTREAM" = none ] && UPSTREAM=""
 
 # Files must be readable by the service user whatever their mode was on the Mac.
 find "$REMOTE_DIR" \( -path "$REMOTE_DIR/runs" -o -path "$REMOTE_DIR/.venv" \) -prune \
