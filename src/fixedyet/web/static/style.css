@@ -319,6 +319,8 @@ ul.plain li { margin: 0.25em 0; }
 .rr-issue { color: var(--muted); word-break: break-all; }
 .rr-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 14px; font-size: 0.875rem; color: var(--muted); }
 .rr-pr { font-weight: 650; }
+.rr-nobp { font-size: 0.82rem; }
+.rr-meta .btn { text-decoration: none; }
 
 .back-link { display: inline-block; margin: 20px 0 0; font-weight: 600; text-decoration: none; }
 .back-link:hover { text-decoration: underline; }

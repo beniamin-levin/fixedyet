@@ -75,6 +75,17 @@
     return words.every((w) => haystack.includes(w));
   }
 
+  // The list's own way into a backport: the PR once there is one, a note when no maintenance
+  // branch exists, otherwise the button, which opens the report with its backport card on top.
+  function backportAction(r) {
+    if (r.backport && r.backport.pr_url) return link(r.backport.pr_url, 'Draft PR', 'rr-pr');
+    if (r.backport && r.backport.status === 'not_applicable') {
+      return el('span', { class: 'rr-nobp', text: 'No maintenance branch to backport to' });
+    }
+    if (!r.can_backport) return null;
+    return el('a', { class: 'btn small primary', href: `#${encodeURIComponent(r.id)}`, text: 'Backport fix → draft PR' });
+  }
+
   function reportRow(r) {
     const meta = verdictMeta(r);
     const tags = el('div', { class: 'rr-tags' },
@@ -91,7 +102,7 @@
       el('span', { class: 'rr-date', text: formatDate(r.created_at) }),
       el('span', { class: 'rr-cost', text: formatCost(r.cost_usd) }),
       r.duration_s ? el('span', { class: 'rr-time', text: formatDuration(r.duration_s) }) : null,
-      r.backport && r.backport.pr_url ? link(r.backport.pr_url, 'Draft PR', 'rr-pr') : null);
+      backportAction(r));
     const item = el('li', { class: 'report-row', 'data-id': r.id },
       el('div', { class: 'rr-main' },
         tags,
