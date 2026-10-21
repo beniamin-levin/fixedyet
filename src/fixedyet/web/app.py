@@ -6,7 +6,9 @@ Endpoints
     GET  /api/runs/{id}         status, progress events, assessment and markdown
     GET  /api/runs/{id}/events  progress as server-sent events
     GET  /api/examples          saved example assessments from the examples/ directory
-    GET  /api/status            live runs left today, and the model budget left in USD
+    GET  /api/status            live runs left today, and the model budget left in USD (with a
+                                judge code: the judges' own runs left today too)
+    GET  /api/judge/check       {"ok": true, ...} for a valid ``X-Judge-Code`` header
     GET  /reports               the "All reports" page (static/reports.html)
     GET  /api/reports           summaries of every example and finished run, newest first
     GET  /api/reports/{id}      one report: assessment, markdown, and its saved backport
@@ -33,6 +35,17 @@ Live runs cost real money, so the app allows one run at a time and a global dail
 (``settings.demo_daily_limit``, counted in a JSON file under ``settings.runs_dir``). Beyond that,
 the spend ledger caps the total model spend of all runs ever (``settings.total_budget_usd``): a
 run is refused with 429 when less than ``settings.run_budget_usd`` is left under that cap.
+
+Judge access: ``settings.judge_codes`` (``FIXEDYET_JUDGE_CODES``, comma-separated) are codes that
+hackathon judges type into the page. A run sent with a valid ``X-Judge-Code`` header counts
+against its own daily quota (``settings.judge_daily_limit``) instead of the public one, and may
+use the budget that ``settings.judge_reserve_usd`` keeps back from public runs. Codes are
+compared in constant time and never logged or echoed. Without codes the judge endpoint is a 404.
+
+Scope check: FixedYet runs pure-Python projects tested with pytest. Before a public or judge run
+is counted, the repository's main language is read from the GitHub API; a repository GitHub
+lists as another language is refused with 422 and uses up nothing. A language GitHub does not
+know, or a lookup that fails, lets the run go ahead.
 Finished runs are written to ``<runs_dir>/web/<id>.json`` and survive restarts. A backport job
 is a run of kind "backport": it takes the same single slot, streams the same events, and does
 not count against the daily limit. It only verifies; opening the pull request is a second,
@@ -56,6 +69,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass, field
@@ -70,7 +84,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from fixedyet.models import Assessment, BackportResult, FixResult, ProgressEvent
-from fixedyet.web import parse_issue_url
+from fixedyet.web import IssueRef, parse_issue_url
 from fixedyet.web.reports import (
     ReportStore,
     backport_ready,
@@ -91,6 +105,13 @@ KEEPALIVE_S = 15.0
 MAX_RUNS_IN_MEMORY = 100
 DEFAULT_DAILY_LIMIT = 5
 DEFAULT_RUN_BUDGET_USD = 0.60
+DEFAULT_JUDGE_DAILY_LIMIT = 20
+JUDGE_HEADER = "x-judge-code"
+JUDGE_COUNTER = "judge-daily"
+MIN_JUDGE_CODE_LENGTH = 12  # shorter codes are ignored: a judge code must not be guessable
+SUPPORTED_LANGUAGE = "Python"
+LANGUAGE_TIMEOUT_S = 10.0  # the language check must never hold a run request for long
+LANGUAGE_CACHE_S = 6 * 3600
 
 PAUSED_MESSAGE = (
     "Live runs are paused while the demo has no sandbox backend, so nothing can be reproduced "
@@ -142,6 +163,26 @@ async def run_fix(assessment: Assessment, *, settings: Any, progress: Any) -> Fi
     from fixedyet.fixmode import attempt_fix
 
     return await attempt_fix(assessment, settings=settings, progress=progress)
+
+
+class RepositoryNotFound(LookupError):
+    """GitHub has no public repository by that name."""
+
+
+async def fetch_repo_language(owner: str, repo: str, *, settings: Any) -> str | None:
+    """The main language GitHub lists for a public repository ("Python", "JavaScript"), or None
+    when it lists none. Raises RepositoryNotFound for a 404; any other failure raises as well,
+    and the caller lets the run go ahead."""
+    from fixedyet.github import GitHubClient, GitHubNotFound
+
+    token = str(getattr(settings, "github_token", "") or "").strip() or None
+    async with GitHubClient(token) as client:
+        try:
+            info = await client._get(f"/repos/{owner}/{repo}")
+        except GitHubNotFound as exc:
+            raise RepositoryNotFound(f"{owner}/{repo}") from exc
+    language = info.get("language") if isinstance(info, dict) else None
+    return language if isinstance(language, str) and language.strip() else None
 
 
 def github_token(settings: Any) -> str:
@@ -390,18 +431,17 @@ class RunStore:
         for old in sorted(finished, key=lambda r: r.created_at)[:-MAX_RUNS_IN_MEMORY]:
             self.runs.pop(old.id, None)  # still on disk
 
-    # daily counter
-    @property
-    def _counter_path(self) -> Path:
-        return self.dir / "daily.json"
+    # daily counters: "daily" for the public, "judge-daily" for runs with a judge code
+    def _counter_path(self, counter: str = "daily") -> Path:
+        return self.dir / f"{counter}.json"
 
     @staticmethod
     def _today() -> str:
         return _now().date().isoformat()
 
-    def runs_today(self) -> int:
+    def runs_today(self, counter: str = "daily") -> int:
         try:
-            data = json.loads(self._counter_path.read_text(encoding="utf-8"))
+            data = json.loads(self._counter_path(counter).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return 0
         if not isinstance(data, dict) or data.get("date") != self._today():
@@ -409,13 +449,14 @@ class RunStore:
         count = data.get("count", 0)
         return count if isinstance(count, int) and count > 0 else 0
 
-    def count_run(self) -> None:
+    def count_run(self, counter: str = "daily") -> None:
         try:
             self._write_json(
-                self._counter_path, {"date": self._today(), "count": self.runs_today() + 1}
+                self._counter_path(counter),
+                {"date": self._today(), "count": self.runs_today(counter) + 1},
             )
         except OSError:
-            logger.exception("could not update the daily run counter")
+            logger.exception("could not update the %s run counter", counter)
 
 
 # --- examples -------------------------------------------------------------------------
@@ -432,12 +473,14 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
     """Read ``*.json`` Assessments (optional ``*.md`` next to each). Bad files are skipped.
 
     A file may carry an ``_example`` object with ``label``, ``note`` and ``illustrative``
-    (true for hand-written samples that are not the output of a real run), and for a backport a
-    ``pr_url`` (the draft pull request that was opened from it). A file holding a BackportResult
-    (`fixedyet backport --json`, recognised by its ``status`` and no ``verdict``) becomes an
-    example of ``kind`` "backport" with ``verdict`` "backport_<status>".
+    (true for hand-written samples that are not the output of a real run), ``order`` (a number:
+    lower comes first on the demo page; files without one follow, by name), ``fix_note`` (markdown
+    shown next to the fix an assessment carries in ``fix``), and for a backport a ``pr_url`` (the
+    pull request that was opened from it). A file holding a BackportResult (`fixedyet backport
+    --json`, recognised by its ``status`` and no ``verdict``) becomes an example of ``kind``
+    "backport" with ``verdict`` "backport_<status>".
     """
-    examples: list[dict[str, Any]] = []
+    ranked: list[tuple[float, str, dict[str, Any]]] = []
     for path in sorted(directory.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -449,6 +492,9 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
             logger.warning("skipping unreadable example %s", path.name)
             continue
         meta = meta if isinstance(meta, dict) else {}
+        order = meta.get("order")
+        numeric = isinstance(order, int | float) and not isinstance(order, bool)
+        rank = float(order) if numeric else float("inf")
         pr_url = meta.get("pr_url")
         if not (isinstance(pr_url, str) and pr_url.startswith("https://github.com/")):
             pr_url = None
@@ -461,32 +507,31 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
                     markdown = render_backport(backport)
                 elif assessment is not None:
                     markdown = render_report(assessment)
+        item: dict[str, Any]
         if backport is not None:
-            examples.append(
-                {
-                    "id": path.stem,
-                    "kind": "backport",
-                    "label": str(meta.get("label") or backport.title),
-                    "note": str(meta.get("note") or ""),
-                    "illustrative": bool(meta.get("illustrative", False)),
-                    "issue_url": backport.issue_url,
-                    "title": backport.title,
-                    "verdict": f"backport_{backport.status.value}",
-                    "confidence": "",
-                    "assessment": None,
-                    "backport": backport.model_dump(mode="json"),
-                    "pr_url": pr_url,
-                    "markdown": markdown,
-                }
-            )
-            continue
-        assert assessment is not None
-        examples.append(
-            {
+            item = {
+                "id": path.stem,
+                "kind": "backport",
+                "label": str(meta.get("label") or backport.title),
+                "note": str(meta.get("note") or ""),
+                "illustrative": bool(meta.get("illustrative", False)),
+                "issue_url": backport.issue_url,
+                "title": backport.title,
+                "verdict": f"backport_{backport.status.value}",
+                "confidence": "",
+                "assessment": None,
+                "backport": backport.model_dump(mode="json"),
+                "pr_url": pr_url,
+                "markdown": markdown,
+            }
+        else:
+            assert assessment is not None
+            item = {
                 "id": path.stem,
                 "kind": "assessment",
                 "label": str(meta.get("label") or assessment.title),
                 "note": str(meta.get("note") or ""),
+                "fix_note": str(meta.get("fix_note") or ""),
                 "illustrative": bool(meta.get("illustrative", False)),
                 "issue_url": assessment.issue_url,
                 "title": assessment.title,
@@ -497,8 +542,8 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
                 "pr_url": None,
                 "markdown": markdown,
             }
-        )
-    return examples
+        ranked.append((rank, path.name, item))
+    return [item for _, _, item in sorted(ranked, key=lambda entry: entry[:2])]
 
 
 # --- security headers (pure ASGI so server-sent events are never buffered) ------------
@@ -548,7 +593,10 @@ class RunRequest(BaseModel):
 
 def create_app(settings: Any | None = None, *, examples_dir: Path | None = None) -> FastAPI:
     """Build the app. ``settings`` is resolved lazily (first request) when not given."""
-    holder: dict[str, Any] = {"settings": settings, "store": None, "reports": None}
+    holder: dict[str, Any] = {
+        "settings": settings, "store": None, "reports": None, "languages": {},
+        "short_codes_logged": False,
+    }
 
     def get_settings() -> Any:
         if holder["settings"] is None:
@@ -601,6 +649,88 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
     def run_budget() -> float:
         return float(getattr(get_settings(), "run_budget_usd", DEFAULT_RUN_BUDGET_USD))
 
+    # -- judge access --------------------------------------------------------------------
+
+    def judge_codes() -> list[str]:
+        """The configured judge codes. A code shorter than MIN_JUDGE_CODE_LENGTH is ignored (and
+        the server log says how many were, never which)."""
+        raw = str(getattr(get_settings(), "judge_codes", "") or "")
+        codes = [code.strip() for code in raw.split(",") if code.strip()]
+        valid = [code for code in codes if len(code) >= MIN_JUDGE_CODE_LENGTH]
+        if len(valid) < len(codes) and not holder["short_codes_logged"]:
+            holder["short_codes_logged"] = True
+            logger.warning(
+                "%d judge code(s) shorter than %d characters are ignored",
+                len(codes) - len(valid), MIN_JUDGE_CODE_LENGTH,
+            )
+        return valid
+
+    def is_judge(request: Request) -> bool:
+        """True for an ``X-Judge-Code`` header that matches a configured code. Every code is
+        compared in constant time, and all of them every time."""
+        given = request.headers.get(JUDGE_HEADER, "").strip().encode("utf-8")
+        codes = judge_codes()
+        if not given or not codes:
+            return False
+        matched = False
+        for code in codes:
+            matched |= hmac.compare_digest(given, code.encode("utf-8"))
+        return matched
+
+    def judge_daily_limit() -> int:
+        return int(getattr(get_settings(), "judge_daily_limit", DEFAULT_JUDGE_DAILY_LIMIT))
+
+    def judge_reserve() -> float:
+        return float(getattr(get_settings(), "judge_reserve_usd", 0.0) or 0.0)
+
+    def judge_quota() -> dict[str, int]:
+        limit = judge_daily_limit()
+        used = get_store().runs_today(JUDGE_COUNTER)
+        return {"daily_limit": limit, "runs_today": used, "remaining": max(limit - used, 0)}
+
+    # -- the scope check -----------------------------------------------------------------
+
+    async def language_refusal(ref: IssueRef) -> Response | None:
+        """A 422 when GitHub lists the repository as a language other than Python, a 400 when
+        it has no such public repository, None otherwise (an unknown language, or a lookup that
+        fails, lets the run go ahead). Answers are cached for a few hours."""
+        cache: dict[str, tuple[float, str | None]] = holder["languages"]
+        key = f"{ref.owner}/{ref.repo}".lower()
+        now = time.monotonic()
+        cached = cache.get(key)
+        if cached and now - cached[0] < LANGUAGE_CACHE_S:
+            language = cached[1]
+        else:
+            try:
+                async with asyncio.timeout(LANGUAGE_TIMEOUT_S):
+                    language = await fetch_repo_language(
+                        ref.owner, ref.repo, settings=get_settings()
+                    )
+            except RepositoryNotFound:
+                return _error(
+                    400, "repository_not_found",
+                    f"GitHub has no public repository {ref.owner}/{ref.repo}, so there is "
+                    "nothing to run. Nothing was counted.",
+                )
+            except Exception as exc:  # noqa: BLE001 - never block a run on a nice-to-have
+                logger.warning(
+                    "language of %s/%s unreadable (%s); the run goes ahead",
+                    ref.owner, ref.repo, type(exc).__name__,
+                )
+                return None
+            if len(cache) > 1000:
+                cache.clear()
+            cache[key] = (now, language)
+        if language is None or language.lower() == SUPPORTED_LANGUAGE.lower():
+            return None
+        return _error(
+            422, "unsupported_language",
+            f"FixedYet runs pure-Python projects tested with pytest, and GitHub lists "
+            f"{ref.owner}/{ref.repo} as {language}. The run was not started and nothing was "
+            "counted.",
+            language=language,
+        )
+
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
@@ -647,18 +777,31 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         )
 
     @app.get("/api/status")
-    async def status() -> dict[str, Any]:
+    async def status(request: Request) -> dict[str, Any]:
         store = get_store()
         limit = daily_limit()
         used = store.runs_today()
         busy = store.active is not None and not store.active.finished
-        return {
+        body: dict[str, Any] = {
             "daily_limit": limit,
             "runs_today": used,
             "remaining": max(limit - used, 0),
             "busy": busy,
             "budget_remaining_usd": round(budget_remaining(get_settings()), 4),
+            "judge_access": bool(judge_codes()),
         }
+        if is_judge(request):
+            body["judge"] = judge_quota()
+        return body
+
+    @app.get("/api/judge/check")
+    async def judge_check(request: Request) -> Response:
+        """200 with the judges' quota for a valid code, 401 for any other, 404 without codes."""
+        if not judge_codes():
+            return _error(404, "not_found", "Not found.")
+        if not is_judge(request):
+            return _error(401, "unauthorized", "That judge code was not accepted.")
+        return JSONResponse({"ok": True, **judge_quota()})
 
     @app.post("/api/runs", status_code=202)
     async def start_run(body: RunRequest, request: Request) -> Response:
@@ -668,36 +811,64 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             return _error(400, "invalid_issue_url", str(exc))
         store = get_store()
         examples_url = f"{request.scope.get('root_path', '')}/api/examples"
-        admin = is_admin(request)  # the maintainer's runs skip the daily limit and its counter
-        if not admin and store.runs_today() >= daily_limit():
-            if daily_limit() <= 0:  # a limit of 0 is "paused", not "used up today"
-                message = PAUSED_MESSAGE
-            else:
-                message = (
-                    "Today's live runs are used up. Each run costs real compute, so the demo "
-                    "has a daily limit. Read the example reports instead, or run FixedYet "
-                    "yourself."
+        admin = is_admin(request)  # the maintainer's runs skip the daily limits and the counters
+        judge = not admin and is_judge(request)  # a judge's runs use the judges' own quota
+
+        def refusal() -> Response | None:
+            """Why this run cannot start now, or None. Synchronous, so nothing can start
+            between this check and ``store.create``."""
+            if judge and store.runs_today(JUDGE_COUNTER) >= judge_daily_limit():
+                return _error(
+                    429, "judge_limit",
+                    f"Today's judge runs are used up ({judge_daily_limit()} a day; they start "
+                    "again at midnight UTC). The saved reports show what a run produces.",
+                    examples=examples_url,
                 )
-            return _error(429, "daily_limit", message, examples=examples_url)
-        if budget_remaining(get_settings()) + 1e-9 < run_budget():  # tolerance: float sums
-            return _error(
-                429,
-                "budget_exhausted",
-                "The demo's total spending budget is used up, so it cannot start another live "
-                "run. Read the example reports instead, or run FixedYet yourself.",
-                examples=examples_url,
-            )
-        if store.active is not None and not store.active.finished:
-            return _error(
-                429,
-                "busy",
-                "Another run is in progress and the demo runs one issue at a time. Try again in "
-                "a few minutes, or read the example reports meanwhile.",
-                headers={"Retry-After": "120"},
-                examples=examples_url,
-            )
+            if not admin and not judge and store.runs_today() >= daily_limit():
+                if daily_limit() <= 0:  # a limit of 0 is "paused", not "used up today"
+                    message = PAUSED_MESSAGE
+                else:
+                    message = (
+                        "Today's live runs are used up. Each run costs real compute, so the demo "
+                        "has a daily limit. Read the example reports instead, or run FixedYet "
+                        "yourself."
+                    )
+                return _error(429, "daily_limit", message, examples=examples_url)
+            left = budget_remaining(get_settings())
+            reserve = 0.0 if admin or judge else judge_reserve()
+            if left - reserve + 1e-9 < run_budget():  # tolerance: float sums
+                message = (
+                    "The demo's total spending budget is used up, so it cannot start another "
+                    "live run. Read the example reports instead, or run FixedYet yourself."
+                )
+                if left + 1e-9 >= run_budget():
+                    message = (
+                        "The public share of the demo's budget is used up: what is left is kept "
+                        "for the hackathon judges. Read the example reports instead, or run "
+                        "FixedYet yourself."
+                    )
+                return _error(429, "budget_exhausted", message, examples=examples_url)
+            if store.active is not None and not store.active.finished:
+                return _error(
+                    429,
+                    "busy",
+                    "Another run is in progress and the demo runs one issue at a time. Try "
+                    "again in a few minutes, or read the example reports meanwhile.",
+                    headers={"Retry-After": "120"},
+                    examples=examples_url,
+                )
+            return None
+
+        refused = refusal()
+        if refused is None and not admin:
+            # Only pure-Python projects can be run: say so before anything is counted.
+            refused = await language_refusal(ref) or refusal()  # the lookup awaited: check again
+        if refused is not None:
+            return refused
         run = store.create(ref.url)
-        if not admin:
+        if judge:
+            store.count_run(JUDGE_COUNTER)
+        elif not admin:
             store.count_run()
         task = asyncio.create_task(_execute(store, run, get_settings()))
         store.tasks.add(task)

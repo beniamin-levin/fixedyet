@@ -469,6 +469,7 @@ async def test_daily_limit(tmp_path: Path, fake: Fake) -> None:
             "remaining": 0,
             "busy": False,
             "budget_remaining_usd": 20.0,
+            "judge_access": False,
         }
 
     # The count lives in a file, so a restart does not reset it.
@@ -807,9 +808,11 @@ async def test_a_backport_result_in_the_examples_folder_is_listed(
 
 
 def test_the_page_script_can_draw_a_backport_example() -> None:
+    """The demo page lists the examples and opens each on the reports page, which draws it."""
     shared = (web.STATIC_DIR / "common.js").read_text(encoding="utf-8")
     script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    assert "function renderBackport" in shared and "ex.backport" in script
-    script = shared + script
+    reports = (web.STATIC_DIR / "reports.js").read_text(encoding="utf-8")
+    assert "function renderBackport" in shared and "renderBackport(" in reports
+    assert "reports#${encodeURIComponent(ex.id)}" in script
     for status in BackportStatus:
-        assert f"backport_{status.value}:" in script
+        assert f"backport_{status.value}:" in shared

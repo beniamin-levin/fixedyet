@@ -36,7 +36,8 @@ DEFAULT_KEEP_CHECKPOINTS = 6
 _ROOT_PATH_RE = re.compile(r"^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
 
 _SECRET_FIELDS = frozenset(
-    {"nebius_api_key", "contree_token", "tavily_api_key", "github_token", "admin_token"}
+    {"nebius_api_key", "contree_token", "tavily_api_key", "github_token", "admin_token",
+     "judge_codes"}
 )
 
 
@@ -76,6 +77,13 @@ class Settings(BaseModel):
     keep_checkpoints: int = Field(default=DEFAULT_KEEP_CHECKPOINTS, ge=0)
     root_path: str = ""  # URL prefix the demo is served under, e.g. "/fixedyet"
     admin_token: str = ""  # turns on maintainer mode in the web demo; empty means off
+    # Web demo access for hackathon judges: comma-separated codes, each 12+ characters. A run
+    # started with one counts against its own daily quota, not the public one.
+    judge_codes: str = ""
+    judge_daily_limit: int = Field(default=20, ge=0)
+    # Model budget kept for judges: public runs stop when less than this (plus one run) is left
+    # under total_budget_usd. Judges, and the maintainer, may use it.
+    judge_reserve_usd: float = Field(default=0.0, ge=0)
 
     @field_validator("root_path")
     @classmethod
@@ -121,6 +129,9 @@ class Settings(BaseModel):
             "keep_checkpoints": get("FIXEDYET_KEEP_CHECKPOINTS"),
             "root_path": get("FIXEDYET_ROOT_PATH"),
             "admin_token": get("FIXEDYET_ADMIN_TOKEN"),
+            "judge_codes": get("FIXEDYET_JUDGE_CODES"),
+            "judge_daily_limit": get("FIXEDYET_JUDGE_DAILY_LIMIT"),
+            "judge_reserve_usd": get("FIXEDYET_JUDGE_RESERVE_USD"),
         }
         # Unset values fall back to the field defaults rather than being passed as None.
         return cls(**{key: value for key, value in raw.items() if value is not None})

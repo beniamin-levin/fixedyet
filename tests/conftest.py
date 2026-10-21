@@ -39,6 +39,18 @@ def _relative_runs_dir_is_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("FIXEDYET_LEDGER_PATH", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _repositories_are_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The web app reads a repository's language from GitHub before it counts a run. Tests never
+    touch the network: every repository is Python unless a test says otherwise."""
+    from fixedyet.web import app as web_app
+
+    async def python(owner: str, repo: str, *, settings: Any) -> str | None:
+        return "Python"
+
+    monkeypatch.setattr(web_app, "fetch_repo_language", python)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(

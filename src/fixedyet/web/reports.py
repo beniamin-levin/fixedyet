@@ -175,6 +175,19 @@ def public_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
     return {**record, "target_warning": warning}
 
 
+def example_fix_record(assessment: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The fix a curated example carries in its assessment (``fix``), as the record the page
+    shows for a fix saved on this server. ``example`` marks it: it was verified elsewhere, so
+    there is no pull request step to offer for it here."""
+    fix = assessment.get("fix") if isinstance(assessment, dict) else None
+    if not isinstance(fix, dict) or not isinstance(fix.get("status"), str):
+        return None
+    return {
+        "status": fix["status"], "pr_url": None, "pr_target": None, "pr_number": None,
+        "prs": {}, "result": fix, "saved_at": fix.get("created_at"), "example": True,
+    }
+
+
 def normalise_record(record: dict[str, Any]) -> dict[str, Any]:
     """Give a record saved before pull requests had targets the ``prs`` map it now has: the
     first deployment only ever opened pull requests in the fork."""
@@ -420,6 +433,7 @@ class ReportStore:
         report_id = str(item["id"])
         extra = {
             "label": item.get("label", ""), "note": item.get("note", ""),
+            "fix_note": item.get("fix_note", ""),
             "illustrative": bool(item.get("illustrative", False)),
             "pr_url": item.get("pr_url"),
         }
@@ -437,6 +451,8 @@ class ReportStore:
                 assessment=None, markdown=item.get("markdown", ""), record=record, extra=extra,
             )
         assessment = Assessment.model_validate(item["assessment"])
+        if fix_record is None:  # a fix saved on this server wins over the example's own
+            fix_record = example_fix_record(item["assessment"])
         return Found(
             id=report_id, example=True,
             summary=summarise(report_id, assessment, example=True, record=record,

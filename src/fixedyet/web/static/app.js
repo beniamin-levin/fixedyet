@@ -1,4 +1,5 @@
-/* FixedYet demo page: run form, live progress, example reports. No build step, no dependencies.
+/* FixedYet demo page: run form, live progress, example reports, judge access. No build step, no
+ * dependencies.
  *
  * The helpers, the markdown renderer and the report renderers are in common.js (FY), which the
  * reports page shares. Everything that comes from the server is untrusted and goes into the page
@@ -11,8 +12,10 @@
   'use strict';
 
   const {
-    $, el, link, gh, linkify, formatDuration, renderReport, renderBackport, VERDICTS, BACKPORT_STATUS,
+    $, el, link, gh, linkify, formatDuration, renderReport, VERDICTS, BACKPORT_STATUS, FIX_STATUS,
   } = globalThis.FY;
+
+  const JUDGE_KEY = 'fixedyet-judge-code';
 
   function showReport(node) {
     $('#report-body').replaceChildren(node);
@@ -122,23 +125,53 @@
 
   function clearNotice() { $('#notice').hidden = true; }
 
+  // localStorage can be blocked or empty (a private window, cleared site data): the page works
+  // without it, a judge just types the code again.
+  function stored(key) {
+    try { return window.localStorage.getItem(key) || ''; } catch { return ''; }
+  }
+
+  function store(key, value) {
+    try {
+      if (value) window.localStorage.setItem(key, value);
+      else window.localStorage.removeItem(key);
+    } catch { /* nothing to do */ }
+  }
+
   // The maintainer's key, saved by "Maintainer sign-in" on the reports page (same origin). Their
   // runs skip the daily limit; the server checks the key, this only changes the hint and button.
-  function maintainerToken() {
-    try { return window.localStorage.getItem('fixedyet-maintainer-token') || ''; } catch { return ''; }
+  function maintainerToken() { return stored('fixedyet-maintainer-token'); }
+
+  // A hackathon judge's code: their runs use the judges' own daily quota, not the public one.
+  // The server checks it on every request; it is never put into the page.
+  function judgeCode() { return stored(JUDGE_KEY); }
+
+  function authHeaders() {
+    if (maintainerToken()) return { Authorization: `Bearer ${maintainerToken()}` };
+    return judgeCode() ? { 'X-Judge-Code': judgeCode() } : {};
   }
 
   async function refreshStatus() {
     try {
-      const res = await fetch('api/status');
+      const res = await fetch('api/status', { headers: authHeaders() });
       if (!res.ok) return;
       const s = await res.json();
       const hint = $('#form-hint');
       const button = $('#run-button');
+      $('#judge-line').hidden = !s.judge_access || Boolean(maintainerToken());
+      if (judgeCode() && !s.judge && !maintainerToken()) {
+        store(JUDGE_KEY, '');  // the code was withdrawn, or judge access is closed
+        $('#judge-state').textContent = s.judge_access ? 'Your judge code is no longer accepted.' : '';
+      }
+      $('#judge-link').textContent = judgeCode() ? 'Stop using the judge code' : 'Hackathon judge? Enter your code';
       if (maintainerToken()) {
         hint.textContent = `Signed in as maintainer: no daily limit. One run at a time` +
           `${s.busy ? ', and one is in progress right now' : ''}.`;
         button.disabled = false;
+      } else if (s.judge) {
+        hint.textContent = `Judge code accepted: ${s.judge.remaining} of ${s.judge.daily_limit} judge runs left today. One run at a time` +
+          `${s.busy ? ', and one is in progress right now' : ''}.`;
+        button.disabled = s.judge.remaining <= 0;
       } else if (s.remaining <= 0) {
         hint.textContent = s.daily_limit <= 0
           ? 'Live runs are paused while the demo has no sandbox backend. The example reports below show what a run produces.'
@@ -156,41 +189,38 @@
 
   let examples = [];
 
+  // "pydantic/pydantic#14043" for a pull request URL.
+  function prLabel(url) {
+    const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url || '');
+    return m ? `${m[1]}#${m[2]}` : 'Pull request';
+  }
+
+  // Each example opens on the reports page, which shows the verdict first, then the verified fix
+  // or backport, then the two-sided result.
   function drawExamples() {
     const list = $('#example-list');
     list.replaceChildren();
     $('#examples').hidden = examples.length === 0;
     for (const ex of examples) {
       const meta = VERDICTS[ex.verdict] || BACKPORT_STATUS[ex.verdict] || { label: ex.verdict, tone: 'muted' };
+      const fix = ex.assessment && ex.assessment.fix;
+      const fixMeta = fix ? FIX_STATUS[`fix_${fix.status}`] : null;
       const tags = el('div', { class: 'tags' },
         el('span', { class: `badge ${meta.tone}`, text: meta.label }),
+        fixMeta ? el('span', { class: `badge ${fixMeta.tone}`, text: fixMeta.label }) : null,
         el('span', { class: 'badge outline', text: ex.illustrative ? 'Illustrative sample' : 'Real run' }));
-      const open = el('button', { class: 'btn small', type: 'button', text: 'Open report' });
-      open.addEventListener('click', () => showExample(ex));
+      const open = el('a', { class: 'btn small', href: `reports#${encodeURIComponent(ex.id)}`, text: 'Open report' });
       const repo = gh.repoOf(ex.issue_url);
       const issue = /\/issues\/(\d+)/.exec(ex.issue_url);
       const actions = el('div', { class: 'ex-actions' }, open,
-        ex.pr_url ? link(ex.pr_url, 'Draft PR', 'ex-pr') : null);
+        ex.pr_url ? link(ex.pr_url, `PR ${prLabel(ex.pr_url)}`, 'ex-pr') : null);
       list.append(el('div', { class: 'example', 'data-id': ex.id },
         tags,
         el('div', { class: 'ex-title', text: ex.title }),
+        ex.label ? el('div', { class: 'ex-label', text: ex.label }) : null,
         link(ex.issue_url, repo && issue ? `${repo}#${issue[1]}` : ex.issue_url, 'ex-repo'),
         actions));
     }
-  }
-
-  function showExample(ex) {
-    stopWatching();
-    timeline.stopClock();
-    $('#progress').hidden = true;
-    const banner = ex.illustrative
-      ? (ex.note || 'Illustrative sample, written by hand to show the report format. It is not the output of a live run.')
-      : (ex.note || 'Saved report from a real run of FixedYet.');
-    if (ex.backport) {
-      showReport(renderBackport(ex.backport, ex.markdown, { banner }));
-      return;
-    }
-    showReport(renderReport({ assessment: ex.assessment, markdown: ex.markdown }, { banner }));
   }
 
   async function loadExamples() {
@@ -276,10 +306,7 @@
     try {
       res = await fetch('api/runs', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(maintainerToken() ? { Authorization: `Bearer ${maintainerToken()}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ issue_url: url }),
       });
     } catch {
@@ -293,7 +320,7 @@
       notice(body.message || 'The run could not be started.', limited ? 'warn' : 'error', limited);
       if (limited) pointAtExamples();
       await refreshStatus();
-      if (res.status !== 429) $('#run-button').disabled = false;
+      if (!limited) $('#run-button').disabled = false;
       return;
     }
     history.replaceState(null, '', `?run=${encodeURIComponent(body.id)}`);
@@ -304,7 +331,7 @@
   async function openExistingRun(id) {
     const data = await fetchRun(id);
     if (!data) { notice('That run was not found. It may predate the last cleanup.', 'error'); return; }
-    if (data.kind === 'backport' && data.report_id) {  // a maintainer's backport job lives on the reports page
+    if ((data.kind === 'backport' || data.kind === 'fix') && data.report_id) {  // a maintainer's job lives on the reports page
       location.replace(`reports#${encodeURIComponent(data.report_id)}`);
       return;
     }
@@ -324,6 +351,50 @@
     showReport(renderReport(data));
   }
 
+  // ---------- judge access ----------
+
+  async function checkJudgeCode(code) {
+    try {
+      const res = await fetch('api/judge/check', { headers: { 'X-Judge-Code': code } });
+      return { 200: 'ok', 401: 'unauthorized', 404: 'off' }[res.status] || 'error';
+    } catch {
+      return 'error';
+    }
+  }
+
+  function toggleJudgeForm() {
+    if (judgeCode()) {  // "Stop using the judge code"
+      store(JUDGE_KEY, '');
+      $('#judge-state').textContent = 'The judge code is no longer used on this browser.';
+      refreshStatus();
+      return;
+    }
+    $('#judge-form').hidden = !$('#judge-form').hidden;
+    $('#judge-state').textContent = '';
+    if (!$('#judge-form').hidden) $('#judge-code').focus();
+  }
+
+  async function submitJudgeCode(event) {
+    event.preventDefault();
+    const input = $('#judge-code');
+    const code = input.value.trim();
+    if (!code) return;
+    $('#judge-state').textContent = 'Checking…';
+    const result = await checkJudgeCode(code);
+    if (result === 'ok') {
+      store(JUDGE_KEY, code);
+      input.value = '';
+      $('#judge-form').hidden = true;
+      $('#judge-state').textContent = 'Judge code accepted. Your runs use the judges\' own daily quota.';
+      refreshStatus();
+      return;
+    }
+    $('#judge-state').textContent = {
+      unauthorized: 'That code was not accepted. Check it and try again.',
+      off: 'Judge access is not open on this server.',
+    }[result] || 'Could not reach the server.';
+  }
+
   // ---------- start-up ----------
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -337,6 +408,10 @@
       }
       startRun(value);
     });
+
+    $('#judge-link').addEventListener('click', toggleJudgeForm);
+    $('#judge-form').addEventListener('submit', submitJudgeCode);
+    $('#judge-cancel').addEventListener('click', () => { $('#judge-form').hidden = true; $('#judge-code').value = ''; });
 
     refreshStatus();
     loadExamples();

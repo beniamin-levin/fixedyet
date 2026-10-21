@@ -1,6 +1,7 @@
 {
   "_example": {
-    "label": "Verified backport (real run)",
+    "label": "Verified backport, draft PR in a fork",
+    "order": 4,
     "illustrative": false,
     "note": "- **Real run, 21 Oct 2026** on [pytest-dev/pytest#13784](https://github.com/pytest-dev/pytest/issues/13784)\n- Ran `fixedyet run`, then `fixedyet backport`: Docker sandbox, Nemotron 3 Super via Nebius Token Factory\n- The fix from main was **cherry-picked onto 8.4.x and verified there**\n- **Draft PR** opened in the owner's fork: [beniamin-levin/pytest#1](https://github.com/beniamin-levin/pytest/pull/1). **Nothing was sent upstream.**\n- Checkpoint image tags refer to images on the machine that ran it.",
     "pr_url": "https://github.com/beniamin-levin/pytest/pull/1"

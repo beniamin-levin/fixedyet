@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>FixedYet: reproduce before you answer</title>
-  <meta name="description" content="Paste a public GitHub issue. An agent writes a pytest reproduction, runs it in a microVM sandbox at the reported version and again on main, and rules decide the verdict.">
+  <meta name="description" content="Paste a public GitHub issue. An agent on NVIDIA Nemotron writes a pytest reproduction, runs it in a sandbox at the reported version and again on main, and fixed rules decide the verdict.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f5fbf'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="static/style.css">
   <script src="static/common.js" defer></script>
@@ -28,9 +28,9 @@
     <section class="hero">
       <h1>Reproduce before you answer</h1>
       <p class="lead">
-        Paste a public GitHub issue. An agent writes a pytest reproduction, runs it in a microVM
-        sandbox at the reported version and again on main, and fixed rules, not the model,
-        decide the verdict.
+        Paste a public GitHub issue. An agent on NVIDIA Nemotron writes a pytest reproduction,
+        runs it in a Docker sandbox at the reported version and again on main, and fixed rules,
+        not the model, decide the verdict.
       </p>
 
       <form id="run-form" class="run-form" novalidate>
@@ -39,8 +39,20 @@
                spellcheck="false" placeholder="https://github.com/owner/repo/issues/123" required>
         <button id="run-button" type="submit" class="btn primary">Run</button>
       </form>
+      <p class="scope">Works on pure-Python projects tested with pytest. An issue from a
+        repository GitHub lists as another language is turned away before a run is counted.</p>
       <p id="form-hint" class="hint" aria-live="polite"></p>
       <div id="notice" class="notice" role="alert" hidden></div>
+      <p class="judge-line" id="judge-line" hidden>
+        <button type="button" id="judge-link" class="linklike">Hackathon judge? Enter your code</button>
+        <span id="judge-state" class="muted" aria-live="polite"></span>
+      </p>
+      <form id="judge-form" class="admin-form" hidden>
+        <label class="sr-only" for="judge-code">Judge code</label>
+        <input id="judge-code" type="password" autocomplete="off" spellcheck="false" placeholder="Judge code">
+        <button type="submit" class="btn small primary">Use code</button>
+        <button type="button" id="judge-cancel" class="btn small">Cancel</button>
+      </form>
     </section>
 
     <section id="progress" class="card" aria-labelledby="progress-title" hidden>
@@ -59,7 +71,8 @@
     <section id="examples" class="examples" aria-labelledby="examples-title" hidden>
       <h2 id="examples-title">Example reports</h2>
       <p class="muted" id="examples-intro">
-        See what a report looks like without spending a live run, or browse
+        Real runs on real issues: an open bug with a fix verified in the sandbox, backports
+        that went upstream and to a fork, and a bug already fixed on main. Or browse
         <a href="reports">every saved report</a>.
       </p>
       <div id="example-list" class="example-list"></div>
@@ -92,7 +105,8 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <p>Built on NVIDIA Nemotron via Nebius Token Factory, Nebius Sandboxes and Tavily.</p>
+      <p>Built on NVIDIA Nemotron via Nebius Token Factory, and Tavily. Code runs in a Docker
+        sandbox; a Nebius Sandboxes backend is implemented and waiting for beta access.</p>
       <p><a href="https://github.com/beniamin-levin/fixedyet">github.com/beniamin-levin/fixedyet</a>
         <span aria-hidden="true">·</span> MIT licence
         <span aria-hidden="true">·</span> Nebius x NVIDIA Global AI Hackathon 2026</p>

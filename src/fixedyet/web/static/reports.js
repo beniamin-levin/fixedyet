@@ -1,6 +1,7 @@
-/* FixedYet reports page: every saved report in a list, one report in detail, and the maintainer's
- * controls (backport a fix to a draft pull request, attempt a fix of an open bug, hide a report).
- * No build step.
+/* FixedYet reports page: every saved report in a list (one row per issue, its earlier runs folded
+ * under it), one report in detail (the verdict first, then the verified fix or backport, then the
+ * two-sided result), and the maintainer's controls (backport a fix to a draft pull request,
+ * attempt a fix of an open bug, hide a report). No build step.
  *
  * The helpers and the report renderers are in common.js (FY), shared with the demo page.
  * Everything that comes from the server is untrusted and goes into the page as text, never as HTML.
@@ -18,8 +19,8 @@
 
   const {
     $, el, link, gh, refLink, commitLink, linkify, formatCost, formatDuration, formatDate,
-    copyText, codeBlock, renderReport, renderBackport, renderFix, otherCallers, VERDICTS,
-    BACKPORT_STATUS, FIX_STATUS,
+    copyText, codeBlock, renderReport, renderBackport, renderFix, renderMarkdown, otherCallers,
+    VERDICTS, BACKPORT_STATUS, FIX_STATUS,
   } = globalThis.FY;
 
   const TOKEN_KEY = 'fixedyet-maintainer-token';
@@ -30,7 +31,7 @@
   const EXAMPLE_PR = 'https://github.com/beniamin-levin/pytest/pull/1';
 
   const state = {
-    reports: [], filter: 'all', query: '', token: '', admin: false,
+    reports: [], filter: 'all', query: '', token: '', admin: false, expanded: new Set(),
     nav: 0, scroll: 0, detail: null, flash: null, source: null, pollTimer: null,
   };
 
@@ -65,10 +66,23 @@
 
   // ---------- the list ----------
 
-  function matchesFilter(r) {
-    if (state.filter === 'all') return true;
-    if (state.filter === 'other') return !SHOWN_VERDICTS.includes(r.verdict);
-    return r.verdict === state.filter;
+  function matchesFilter(r, filter = state.filter) {
+    if (filter === 'all') return true;
+    if (filter === 'other') return !SHOWN_VERDICTS.includes(r.verdict);
+    return r.verdict === filter;
+  }
+
+  // One group per issue, newest run first (the list arrives newest first and stays in order).
+  const issueKey = (r) => (r.repo && r.number ? `${r.repo.toLowerCase()}#${r.number}` : `id:${r.id}`);
+
+  function groupByIssue(rows) {
+    const groups = new Map();
+    for (const r of rows) {
+      const key = issueKey(r);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
+    return [...groups.entries()].map(([key, items]) => ({ key, items }));
   }
 
   function matchesQuery(r) {
@@ -80,7 +94,7 @@
   // The list's own way into a backport: the PR once there is one, a note when no maintenance
   // branch exists, otherwise the button, which opens the report with its backport card on top.
   function backportAction(r) {
-    if (r.backport && r.backport.pr_url) return link(r.backport.pr_url, 'Draft PR', 'rr-pr');
+    if (r.backport && r.backport.pr_url) return link(r.backport.pr_url, `PR ${prLabel(r.backport.pr_url)}`, 'rr-pr');
     if (r.backport && r.backport.status === 'not_applicable') {
       return el('span', { class: 'rr-nobp', text: 'No maintenance branch to backport to' });
     }
@@ -93,14 +107,15 @@
   // An open bug's way into fix mode: the PR once there is one; for the maintainer, the button that
   // opens the report with its fix card on top; for a visitor, only a verified fix is mentioned.
   function fixAction(r) {
-    if (r.fix && r.fix.pr_url) return link(r.fix.pr_url, 'Draft PR', 'rr-pr');
+    if (r.fix && r.fix.pr_url) return link(r.fix.pr_url, `PR ${prLabel(r.fix.pr_url)}`, 'rr-pr');
     if (!r.can_fix) return null;
     const verified = r.fix && r.fix.status === 'verified';
     if (!state.admin) return verified ? el('span', { class: 'rr-nobp', text: 'Verified fix' }) : null;
     return el('a', { class: 'btn small primary', href: `#${encodeURIComponent(r.id)}`, text: verified ? 'Review fix and open PR' : 'Attempt a fix' });
   }
 
-  function reportRow(r) {
+  // `earlier`: for the newest run of an issue, {count, key, open} of the runs folded under it.
+  function reportRow(r, earlier = null, older = false) {
     const meta = verdictMeta(r);
     const tags = el('div', { class: 'rr-tags' },
       el('span', { class: `badge ${meta.tone}`, text: meta.label }),
@@ -108,10 +123,24 @@
       r.example ? el('span', { class: 'badge outline', text: 'Example' }) : null,
       r.hidden ? el('span', { class: 'badge muted', text: 'hidden' }) : null);
     const ref = r.repo && r.number ? `${r.repo}#${r.number}` : r.issue_url;
+    let toggle = null;
+    if (earlier && earlier.count) {
+      const words = `${earlier.count} earlier run${earlier.count === 1 ? '' : 's'}`;
+      toggle = el('button', {
+        class: 'linklike rr-earlier', type: 'button', 'aria-expanded': String(earlier.open),
+        text: earlier.open ? `Hide ${words}` : words,
+      });
+      toggle.addEventListener('click', () => {
+        if (state.expanded.has(earlier.key)) state.expanded.delete(earlier.key);
+        else state.expanded.add(earlier.key);
+        drawList();
+      });
+    }
     const sub = el('div', { class: 'rr-sub' },
       link(r.issue_url, ref, 'rr-issue'),
       r.reported_version ? el('span', null, 'reported ', refLink(r.repo, r.reported_version)) : null,
-      r.fixing_commit ? el('span', null, 'fix ', commitLink(r.repo, r.fixing_commit)) : null);
+      r.fixing_commit ? el('span', null, 'fix ', commitLink(r.repo, r.fixing_commit)) : null,
+      toggle);
     // The right side is two rows that never move: the action on the top row (level with the
     // tags), the date, cost and time on the bottom one (level with the repo line). The action
     // row keeps its height when it is empty.
@@ -121,7 +150,7 @@
         el('span', { class: 'rr-date', text: formatDate(r.created_at) }),
         el('span', { class: 'rr-cost', text: formatCost(r.cost_usd) }),
         r.duration_s ? el('span', { class: 'rr-time', text: formatDuration(r.duration_s) }) : null));
-    const item = el('li', { class: 'report-row', 'data-id': r.id },
+    const item = el('li', { class: `report-row${older ? ' earlier' : ''}`, 'data-id': r.id },
       el('div', { class: 'rr-main' },
         tags,
         el('a', { class: 'rr-title', href: `#${encodeURIComponent(r.id)}`, text: r.title || 'Untitled issue' }),
@@ -133,21 +162,33 @@
     return item;
   }
 
+  // The chips count issues, the way the list shows them. An issue's earlier runs fold under its
+  // newest one that matches the filter.
   function drawList() {
     const byQuery = state.reports.filter(matchesQuery);
     for (const chip of document.querySelectorAll('.chip-btn')) {
       const name = chip.dataset.filter;
       chip.setAttribute('aria-pressed', String(name === state.filter));
-      const count = byQuery.filter((r) => (name === 'all' ? true : name === 'other' ? !SHOWN_VERDICTS.includes(r.verdict) : r.verdict === name)).length;
+      const count = groupByIssue(byQuery.filter((r) => matchesFilter(r, name))).length;
       let badge = chip.querySelector('.count');
       if (!badge) { badge = el('span', { class: 'count' }); chip.append(badge); }
       badge.textContent = String(count);
     }
-    const rows = byQuery.filter(matchesFilter);
-    $('#report-list').replaceChildren(...rows.map(reportRow));
+    const rows = byQuery.filter((r) => matchesFilter(r));
+    const groups = groupByIssue(rows);
+    const items = [];
+    for (const { key, items: runs } of groups) {
+      const open = state.expanded.has(key);
+      items.push(reportRow(runs[0], { count: runs.length - 1, key, open }));
+      if (open) runs.slice(1).forEach((r) => items.push(reportRow(r, null, true)));
+    }
+    $('#report-list').replaceChildren(...items);
+    const total = groupByIssue(state.reports).length;
     $('#list-status').textContent = !state.reports.length
       ? 'No reports yet.'
-      : (rows.length ? `${rows.length} of ${state.reports.length} reports` : 'No report matches. Try another filter or search.');
+      : (groups.length
+        ? `${groups.length} of ${total} issues, ${rows.length} report${rows.length === 1 ? '' : 's'}`
+        : 'No report matches. Try another filter or search.');
   }
 
   async function loadList() {
@@ -267,7 +308,7 @@
       : (record.pr_url ? { [record.pr_target || 'fork']: { url: record.pr_url } } : {});
     const upstream = (record.result && record.result.repo) || '';
     return ['upstream', 'fork'].filter((target) => prs[target] && prs[target].url).map((target) => el('p', { class: 'pr-line' },
-      'Draft PR: ', link(prs[target].url, prLabel(prs[target].url), 'pr-link'),
+      'Pull request: ', link(prs[target].url, prLabel(prs[target].url), 'pr-link'),
       el('span', { class: 'muted', text: target === 'upstream' ? ` on ${upstream}` : ' in fork' })));
   }
 
@@ -366,7 +407,7 @@
           else if (area.firstChild) area.replaceChildren();
           else area.replaceChildren(visitorPanel(d));
         });
-      } else if (d.can_backport && !state.admin) {
+      } else if (d.can_backport && !state.admin && !prLines(record).length) {
         card.append(el('p', { class: 'muted', text: 'This backport is verified. Only the demo\'s maintainer can open a pull request from it.' }));
       }
     }
@@ -404,13 +445,46 @@
     return parts;
   }
 
+  // A verified fix as everyone sees it: what changed, where it was verified, the diff itself (not
+  // folded away) and the callers it did not run. The pull request buttons are the maintainer's.
+  function verifiedFixView(d, record) {
+    const result = record.result || {};
+    const repo = gh.repoOf(result.repo) || gh.repoOf(d.summary.issue_url);
+    const branch = result.base_branch || 'main';
+    const fact = (label, value) => el('div', null, el('dt', { text: label }), el('dd', null, value));
+    const facts = [];
+    if (result.base_sha) facts.push(fact('Verified on', el('span', null, `${branch} at `, commitLink(repo, result.base_sha))));
+    const files = (result.files_changed || []).length;
+    facts.push(fact('Change', `${files} file${files === 1 ? '' : 's'}, +${result.lines_added || 0} −${result.lines_removed || 0}`));
+    facts.push(fact('Suite without', suiteText(result.suite_before)), fact('Suite with', suiteText(result.suite_after)));
+    const parts = [
+      el('p', { class: 'fix-lead' }, el('span', { class: 'badge good', text: 'Verified fix' }),
+        ' The reproduction test fails twice without this change and passes twice with it; the project\'s own tests show no new failures.'),
+      el('dl', { class: 'facts' }, facts),
+    ];
+    if (result.summary) parts.push(el('p', { class: 'fix-summary' }, el('strong', { text: result.summary })));
+    if (result.diff) {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy diff' });
+      copy.addEventListener('click', () => copyText(result.diff, copy));
+      parts.push(el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: `git diff on ${branch}` }), copy),
+        codeBlock(result.diff, 'diff'));
+    }
+    const callers = otherCallers(result, repo);
+    if (callers) parts.push(callers);
+    if (d.fix_note) parts.push(el('div', { class: 'fix-note' }, renderMarkdown(d.fix_note, repo)));
+    parts.push(el('p', { class: 'muted small', text: record.example
+      ? 'Verified on the live demo. No pull request was opened from it.'
+      : 'Only the demo\'s maintainer can open a pull request from it.' }));
+    return parts;
+  }
+
   function fixCard(d) {
     if (d.kind === 'backport') return null;
     const record = d.fix;
     if (!d.can_fix && !record) return null;
     const verified = record && record.status === 'verified';
     const card = el('section', { class: 'card backport-card fix-card' });
-    card.append(el('div', { class: 'card-head' }, el('h3', { text: 'Fix' })));
+    card.append(el('div', { class: 'card-head' }, el('h3', { text: verified ? 'Fix, verified in the sandbox' : 'Fix' })));
     if (state.flash && state.flash.id === d.id && state.flash.card === 'fix') {
       card.append(notice(state.flash.text, state.flash.kind));
       state.flash = null;
@@ -421,7 +495,9 @@
       if (lines.length) card.append(el('p', { class: 'muted small', text: 'Opened as a draft. Its description says the change was written by AI and verified by machine.' }));
     }
     const area = el('div', { class: 'fix-area' });
-    if (state.admin && verified) {
+    if (verified && (!state.admin || record.example)) {
+      card.append(...verifiedFixView(d, record));
+    } else if (state.admin && verified) {
       card.append(...verifiedFixPanel(d, record, area), area);
     } else if (d.can_fix && !verified) {
       if (record) {
@@ -440,26 +516,25 @@
         card.append(el('p', { class: 'muted' }, 'The bug is still there on the default branch. Only the demo\'s maintainer can run a fix attempt here. To try it yourself: ',
           el('code', { text: `fixedyet fix ${url}` }), '.'));
       }
-    } else if (verified && !state.admin) {
-      card.append(el('p', { class: 'muted', text: 'A verified fix exists. Only the demo\'s maintainer can open a pull request from it.' }));
     }
     if (record && record.result) {
       card.append(el('details', null,
-        el('summary', { text: 'Show the fix report' }),
+        el('summary', { text: verified ? 'Show the whole fix report: attempts, suite, test' : 'Show the fix report' }),
         renderFix(record.result, null, {})));
     }
     return card.childElementCount > 1 ? card : null;
   }
 
+  // The verdict comes first, then what can be done about it (the fix or the backport), then the
+  // rest of the report: the two-sided result, the test, the evidence.
   function drawDetail(d) {
     state.detail = d;
-    const parts = [detailBar(d)];
-    const card = backportCard(d);
-    if (card) parts.push(card);
-    const fix = fixCard(d);
-    if (fix) parts.push(fix);
-    parts.push(reportNode(d));
-    $('#detail').replaceChildren(...parts);
+    const report = reportNode(d);
+    const actions = [backportCard(d), fixCard(d)].filter(Boolean);
+    const verdict = report.firstElementChild;
+    if (verdict && verdict.classList.contains('verdict-card')) verdict.after(...actions);
+    else report.prepend(...actions);
+    $('#detail').replaceChildren(detailBar(d), report);
     if (state.admin && d.can_backport) resumeJob(d, 'backport');
     if (state.admin && d.can_fix) resumeJob(d, 'fix');
   }

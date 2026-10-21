@@ -93,6 +93,9 @@ Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does no
 | `FIXEDYET_LEDGER_PATH` | no | the spend ledger file. Leave it out of this file: the units set it (see [The spend ledger](#the-spend-ledger)) |
 | `FIXEDYET_MAX_TURNS` | no | agent turns per run, default `20` |
 | `FIXEDYET_DEMO_DAILY_LIMIT` | no | live runs per UTC day for the whole site, default `5`. This is the spending limit of the demo |
+| `FIXEDYET_JUDGE_CODES` | no | comma-separated codes for hackathon judges, 12 characters or more each (`openssl rand -hex 8`); shorter ones are ignored. A visitor types one in under the run form ("Hackathon judge? Enter your code"); their runs then count against `FIXEDYET_JUDGE_DAILY_LIMIT` instead of the public limit. Sent as `X-Judge-Code`, compared in constant time, never logged. Empty or unset means off |
+| `FIXEDYET_JUDGE_DAILY_LIMIT` | no | live runs per UTC day for all judge codes together, default `20` |
+| `FIXEDYET_JUDGE_RESERVE_USD` | no | model budget kept for judges, default `0`: public runs are refused once less than this plus one run's budget is left under `FIXEDYET_TOTAL_BUDGET_USD`; judges and the maintainer may use it |
 | `FIXEDYET_RUNS_DIR` | no | default `runs`, which is `/opt/fixedyet/runs` |
 
 After editing the file, run `deploy/deploy.sh SERVER_ADDRESS` again (or `sudo systemctl restart fixedyet` on the server).
@@ -110,7 +113,7 @@ curl -s http://127.0.0.1:8090/api/status   # budget_remaining_usd: the cap minus
 
 If a ledger is ever moved by hand, copy the file to the new path before the first run there. When the new file does not exist yet, FixedYet reads the old `<runs dir>/spend-ledger.json` of the current runs directory and writes its total to the new place on the next spend, so a move never resets the total.
 
-Worst-case spend is `FIXEDYET_DEMO_DAILY_LIMIT` times `FIXEDYET_RUN_BUDGET_USD` per day for model tokens, plus Tavily credits and sandbox time. Set the limit to what the credits can carry. Independently of both, `FIXEDYET_TOTAL_BUDGET_USD` stops all model calls once the ledger total reaches it; `GET /api/status` shows `budget_remaining_usd`.
+Worst-case spend is (`FIXEDYET_DEMO_DAILY_LIMIT` + `FIXEDYET_JUDGE_DAILY_LIMIT`) times `FIXEDYET_RUN_BUDGET_USD` per day for model tokens, plus Tavily credits and sandbox time. Set the limit to what the credits can carry. Independently of both, `FIXEDYET_TOTAL_BUDGET_USD` stops all model calls once the ledger total reaches it; `GET /api/status` shows `budget_remaining_usd`.
 
 ## Maintainer mode
 
@@ -124,6 +127,16 @@ The public reports page (`/fixedyet/reports`) needs nothing. Maintainer mode add
 The work has two steps. **Verify backport** is a job that takes the same single slot as a live run (a second one is refused with 409) and does not count against `FIXEDYET_DEMO_DAILY_LIMIT`: the cherry-pick, the reproduction test and the project's suite, in the sandbox, with no pull request. It needs no model call, so it adds sandbox time and no token spend; `FIXEDYET_TOTAL_BUDGET_USD` is unchanged. After the verification it also reads, with `GITHUB_TOKEN`, when the target branch last got a commit and the project's latest release (best effort: a failure there is stored as null and never fails the job). Its result is saved in `/opt/fixedyet/runs/backports/<report id>.json`, and a verified result is not run again. **Opening the draft PR** (`POST /api/reports/<id>/backport/pr`, body `{"target": "fork"}` or `{"target": "upstream", "confirm": "<owner/repo>"}`) takes a few seconds, needs a verified result (409 `not_verified` otherwise) and the token (503 `no_github_token` without one), and returns the pull request, which it also saves; asking again returns the same one. Every pull request body ends with the fixed AI-assistance disclosure line, naming the token owner.
 
 On an **open bug** the card offers **Attempt a fix** instead: the same kind of job (one slot, 409 when busy, not counted against the daily limit), but it does call the model, so it spends up to `FIXEDYET_FIX_BUDGET_USD` (default $0.25) through the same spend ledger, and it is refused with 429 when `FIXEDYET_TOTAL_BUDGET_USD` has less than that left. It runs fix mode (the README's "Fix mode" section) and saves to `/opt/fixedyet/runs/fixes/<report id>.json`; a verified fix is not run again. The card then shows the verified diff and the same two pull request buttons, which call `POST /api/reports/<id>/fix/pr` with the same body and the same rules. The pull request goes from `fixedyet/fix-<issue>` on the fork to the default branch and adds the reproduction test as a regression test.
+
+## Judge access
+
+Hackathon judges must be able to use the demo until the judging period ends, and the public daily limit could lock them out. Judge codes give them their own quota:
+
+1. `openssl rand -hex 8` once per code (12 characters or more; shorter codes are ignored), then in `/etc/fixedyet.env`: `FIXEDYET_JUDGE_CODES=judge-<that>` (comma-separated for more than one), and `FIXEDYET_JUDGE_DAILY_LIMIT=20` if the default does not suit.
+2. Optionally keep budget back from the public: `FIXEDYET_JUDGE_RESERVE_USD=6` refuses public runs once less than $6 plus one run's budget is left under `FIXEDYET_TOTAL_BUDGET_USD`. Judges and the maintainer can still spend it.
+3. Restart, then check: `curl -s -H "X-Judge-Code: <code>" http://127.0.0.1:8090/api/judge/check` answers `{"ok": true, ...}`, and without the header `api/status` shows `"judge_access": true`.
+
+Put the code in the private testing instructions of the submission, never in the repository. A judge types it under the run form ("Hackathon judge? Enter your code"); the browser keeps it in localStorage and sends it as `X-Judge-Code`. Every run, public or judge, first reads the repository's language from the GitHub API and is refused with 422 (and counted nowhere) when GitHub lists it as anything but Python.
 
 ## Live runs on a second VM (Docker sandbox)
 

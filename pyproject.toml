@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fixedyet"
 version = "0.1.0"
-description = "Reproduce GitHub bug reports in microVM sandboxes at the reported version, check them against main, and return a rule-based verdict."
+description = "Reproduce GitHub bug reports in a sandbox at the reported version, check them against main, and return a rule-based verdict."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
