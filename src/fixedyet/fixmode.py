@@ -794,8 +794,17 @@ def parse_proposal(text: str) -> Proposal:
         elif explaining and not line.strip().startswith("```"):
             explanation.append(line.strip())
         i += 1
-    proposal.explanation = " ".join(" ".join(explanation).split())[:2_000]
+    proposal.explanation = _dedupe_sentences(" ".join(" ".join(explanation).split()))[:2_000]
     return proposal
+
+
+def _dedupe_sentences(text: str) -> str:
+    """Drop sentences that repeat an earlier one word for word (models sometimes say it twice)."""
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if sentence and sentence not in kept:
+            kept.append(sentence)
+    return " ".join(kept)
 
 
 def clean_summary(text: str, fallback: str) -> str:
@@ -817,6 +826,7 @@ class EditOutcome:
     files: dict[str, str] = field(default_factory=dict)  # path -> edited text (changed files)
     problems: list[str] = field(default_factory=list)
     lines_changed: int = 0
+    hints: list[str] = field(default_factory=list)  # for the model: the lines it probably meant
 
     @property
     def ok(self) -> bool:
@@ -852,6 +862,73 @@ def _loose_occurrences(content: str, old: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _shifted_occurrences(content: str, old: str) -> list[tuple[int, int, int]]:
+    """``(start, end, shift)`` of ``old`` in ``content`` when the block matches only after moving
+    every line by the same indentation ``shift`` (models often re-indent a copied block)."""
+    wanted = [line.rstrip() for line in old.split("\n")[:-1]]
+    solid = [line for line in wanted if line.strip()]
+    if not solid:
+        return []
+    base = min(_indent(line) for line in solid)
+    shape = [line[base:] if line.strip() else "" for line in wanted]
+    lines = content.split("\n")
+    offsets, position = [], 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line) + 1
+    found: list[tuple[int, int, int]] = []
+    for i in range(len(lines) - len(wanted) + 1):
+        window = [line.rstrip() for line in lines[i:i + len(wanted)]]
+        filled = [line for line in window if line.strip()]
+        if len(filled) != len(solid):
+            continue
+        indent = min(_indent(line) for line in filled)
+        if [line[indent:] if line.strip() else "" for line in window] == shape:
+            end_line = i + len(wanted) - 1
+            found.append((offsets[i], offsets[end_line] + len(lines[end_line]) + 1,
+                          indent - base))
+    return found
+
+
+def _reindent(text: str, shift: int) -> str:
+    out = []
+    for line in text.split("\n"):
+        if not line.strip() or shift == 0:
+            out.append(line)
+        elif shift > 0:
+            out.append(" " * shift + line)
+        else:
+            out.append(line[min(-shift, _indent(line)):])
+    return "\n".join(out)
+
+
+def closest_lines(content: str, old: str, *, cutoff: float = 0.6) -> str | None:
+    """The run of lines in ``content`` most like ``old`` (same number of lines), when it is at
+    least ``cutoff`` similar: what the model probably meant to copy."""
+    wanted = old.rstrip("\n").split("\n")
+    lines = content.split("\n")
+    size = len(wanted)
+    if not wanted or size > 60 or size > len(lines):
+        return None
+    target = "\n".join(wanted)
+    best, best_ratio = None, cutoff
+    matcher = difflib.SequenceMatcher(autojunk=False)
+    matcher.set_seq2(target)
+    for i in range(len(lines) - size + 1):
+        window = "\n".join(lines[i:i + size])
+        matcher.set_seq1(window)
+        if matcher.real_quick_ratio() < best_ratio or matcher.quick_ratio() < best_ratio:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best, best_ratio = window, ratio
+    return best
+
+
 def changed_lines(before: str, after: str) -> int:
     """Lines added plus lines removed."""
     count = 0
@@ -881,8 +958,21 @@ def apply_edits(
         outcome.problems.append(f"{len(edits)} edits is too many; at most {MAX_EDITS}")
         return outcome
     current: dict[str, str] = {}
+    seen: set[tuple[str, str, str]] = set()
+    places: dict[tuple[str, str], int] = {}  # (path, old block without indentation) -> edit
     for number, edit in enumerate(edits, 1):
         path = normalize_path(edit.path)
+        if (path, edit.old, edit.new) in seen:  # the same edit twice: models repeat themselves
+            continue
+        seen.add((path, edit.old, edit.new))
+        place = (path, "\n".join(line.strip() for line in edit.old.strip().splitlines()))
+        if place in places:
+            outcome.problems.append(
+                f"edit {number} changes the same lines as edit {places[place]}; send exactly "
+                "one edit for each place, not alternatives"
+            )
+            continue
+        places[place] = number
         problem = path_problem(path, tracked)
         if problem:
             outcome.problems.append(f"edit {number}: {problem}")
@@ -905,12 +995,25 @@ def apply_edits(
         spans = [(i, i + len(old)) for i in _occurrences(padded, old)]
         if not spans and not crlf:
             spans = _loose_occurrences(padded, old)
+        if not spans and not crlf:
+            shifted = _shifted_occurrences(padded, old)
+            if len(shifted) == 1:  # one place, once re-indented: move the replacement with it
+                start, end, shift = shifted[0]
+                spans, new = [(start, end)], _reindent(new, shift)
+            else:
+                spans = [(a, b) for a, b, _ in shifted]
         if len(spans) != 1:
             if not spans:
                 outcome.problems.append(
                     f"edit {number}: the SEARCH block for {path} does not occur in the file; "
                     "copy the lines exactly as shown, with their indentation"
                 )
+                near = closest_lines(padded, old)
+                if near is not None:
+                    outcome.hints.append(
+                        f"For edit {number}, the closest lines in {path} are these; a SEARCH "
+                        f"block must repeat them character for character:\n{near}"
+                    )
             else:
                 outcome.problems.append(
                     f"edit {number}: the SEARCH block for {path} occurs {len(spans)} times; "
@@ -986,7 +1089,7 @@ unique in the file>
 >>>>>>> REPLACE
 
 Repeat FILE and the SEARCH/REPLACE block for every place you change. Each SEARCH block must
-match the file exactly once.
+match the file exactly once. Send exactly one edit for each place: never alternatives.
 
 Only in your first answer, instead of edits, you may ask to see more code, with up to
 {MAX_EXTRA_FILES} lines like:
@@ -1454,8 +1557,11 @@ class _FixRun:
         if not edited.ok:
             attempt.outcome = "invalid_edits"
             attempt.reason = "; ".join(edited.problems)[:600]
+            hints = "".join(
+                "\n\n" + _data("closest lines", truncate(h, 2_000)) for h in edited.hints[:3]
+            )
             return ("Your edits were rejected and nothing was run:\n"
-                    + "\n".join(f"- {p}" for p in edited.problems)
+                    + "\n".join(f"- {p}" for p in edited.problems) + hints
                     + "\n\nThe files are unchanged. Send a corrected, complete set of edits "
                     "against the original code shown above.")
 

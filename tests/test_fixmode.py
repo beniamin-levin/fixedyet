@@ -142,6 +142,11 @@ def test_fences_bold_labels_and_a_bare_path_line_are_tolerated() -> None:
     assert p.summary == "Fix it"
 
 
+def test_an_explanation_said_twice_is_kept_once() -> None:
+    p = fm.parse_proposal("EXPLANATION: A is wrong. B fixes it.\nA is wrong. B fixes it.\n")
+    assert p.explanation == "A is wrong. B fixes it."
+
+
 def test_need_and_cannot_fix_are_read() -> None:
     p = fm.parse_proposal("NEED: widgets/core.py parse, other\nNEED: widgets/__init__.py\n")
     assert p.needs == [("widgets/core.py", ["parse", "other"]), ("widgets/__init__.py", [])]
@@ -181,6 +186,29 @@ def test_an_old_block_that_does_not_occur_is_rejected_with_the_reason() -> None:
     assert not out.ok and "does not occur" in out.problems[0]
 
 
+def test_a_repeated_identical_edit_is_applied_once() -> None:
+    one = edit("    return text.split(',')[:-1]\n", "    return text.split(',')\n")
+    out = fm.apply_edits([one, one], FILES, TRACKED)
+    assert out.ok and out.files["widgets/core.py"] == CORE.replace("[:-1]", "")
+
+
+def test_alternative_edits_of_the_same_lines_are_rejected_with_the_reason() -> None:
+    old = "    return text.split(',')[:-1]\n"
+    out = fm.apply_edits([edit(old, "    return text.split(',')\n"),
+                          edit("  " + old, "    return list(text.split(','))\n")], FILES, TRACKED)
+    assert not out.ok and "same lines as edit 1" in out.problems[0]
+
+
+def test_a_near_miss_comes_back_with_the_lines_the_model_probably_meant() -> None:
+    regex = 'X = (\n    r"(?:[A-Z]{2,6}"\n    r"|[A-Z0-9-]{2,})\\Z"\n)\n'
+    files = {**FILES, "widgets/core.py": regex}
+    out = fm.apply_edits([edit('    r"(?:[A-Z]{2,6}"\n    r"|[A-Z0-9-]{2,})\\Z\n', "x\n")],
+                         files, TRACKED)
+    assert not out.ok and "does not occur" in out.problems[0]
+    assert out.hints and '    r"|[A-Z0-9-]{2,})\\Z"' in out.hints[0]
+    assert fm.closest_lines("a\nb\n", "something else entirely\n") is None
+
+
 def test_an_old_block_that_occurs_twice_is_rejected() -> None:
     files = {**FILES, "widgets/core.py": "x = 1\ny = 2\nx = 1\n"}
     out = fm.apply_edits([edit("x = 1\n", "x = 3\n")], files, TRACKED)
@@ -199,6 +227,15 @@ def test_trailing_whitespace_differences_are_forgiven_but_nothing_else() -> None
                           files, TRACKED).ok
     assert not fm.apply_edits([edit("def f():\n  return 1\n", "def f():\n  return 2\n")],
                               files, TRACKED).ok
+
+
+def test_a_block_indented_differently_matches_once_and_the_replacement_follows_it() -> None:
+    old = "        return text.split(',')[:-1]\n"  # eight spaces where the file has four
+    out = fm.apply_edits([edit(old, "        return text.split(',')\n")], FILES, TRACKED)
+    assert out.ok and out.files["widgets/core.py"] == CORE.replace("[:-1]", "")
+    files = {**FILES, "widgets/core.py": "def a():\n    x = 1\n\n\ndef b():\n        x = 1\n"}
+    out = fm.apply_edits([edit("  x = 1\n", "  x = 2\n")], files, TRACKED)
+    assert not out.ok and "occurs 2 times" in out.problems[0]  # two places: no guessing
 
 
 def test_edits_to_one_file_apply_in_order() -> None:
@@ -808,3 +845,75 @@ async def test_nothing_to_tie_the_failure_to_is_not_fixed_without_a_model_call()
     result, _, llm = await run_fix([GOOD], world, a=a)
     assert result.status is FixStatus.NOT_FIXED and "could be tied" in result.reason
     assert llm.prompts == []
+
+
+# -- the markdown summary and the command line --------------------------------------------------
+
+
+async def test_the_markdown_summary_lists_every_attempt_and_the_verified_diff() -> None:
+    from fixedyet.report import render_fix_markdown
+
+    result, _, _ = await run_fix([WRONG, GOOD])
+    text = render_fix_markdown(result)
+    assert text.startswith("# Verified fix: the test fails on main without it")
+    assert "| 1 | `repro_still_fails` |" in text and "| 2 | `verified` |" in text
+    assert "Verified diff:" in text and "+    return text.split(',')" in text
+    assert "| Without the change | FAIL | FAIL |" in text
+    assert "**Regression test in the pull request:** `tests/test_issue_42.py`" in text
+    failed, _, _ = await run_fix([WRONG, WRONG, WRONG])
+    text = render_fix_markdown(failed)
+    assert text.startswith("# No verified fix") and "Diff (not verified)" not in text
+
+
+def test_the_fix_command_checks_its_arguments_before_anything_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from fixedyet import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(nebius_api_key="k"))
+    monkeypatch.setattr(cli, "_run_fix", lambda *a, **k: pytest.fail("must not run"))
+    assert cli.main(["fix"]) == 2
+    assert "--from-assessment" in capsys.readouterr().err
+    assert cli.main(["fix", ISSUE, "--pr-target", "upstream"]) == 2
+    assert cli.main(["fix", ISSUE, "--yes-upstream"]) == 2
+    assert cli.main(["fix", ISSUE, "--budget", "0"]) == 2
+    fixed = tmp_path / "a.json"
+    fixed.write_text(assessment(verdict=Verdict.FIXED_ON_MAIN).model_dump_json())
+    assert cli.main(["fix", "--from-assessment", str(fixed)]) == 2
+    assert "needs open_bug" in capsys.readouterr().err
+    other = tmp_path / "b.json"
+    other.write_text(assessment().model_dump_json())
+    assert cli.main(["fix", "https://github.com/acme/widgets/issues/7",
+                     "--from-assessment", str(other)]) == 2
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(nebius_api_key=""))
+    assert cli.main(["fix", "--from-assessment", str(other)]) == 2
+    assert "NEBIUS_API_KEY" in capsys.readouterr().err
+
+
+def test_the_fix_command_writes_the_result_and_the_preview(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from fixedyet import cli
+
+    saved = tmp_path / "a.json"
+    saved.write_text(assessment().model_dump_json())
+    seen: dict[str, Any] = {}
+    real = fm.attempt_fix
+
+    async def fake_attempt(a: Assessment, **kwargs: Any) -> fm.FixResult:
+        seen.update(kwargs)
+        return await real(
+            a, sandbox=ScriptedSandbox(), llm=FakeLLM([GOOD]), github=FakeGitHub(),
+            list_branches=lister, settings=Settings(nebius_api_key="k"),
+        )
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(nebius_api_key="k"))
+    monkeypatch.setattr(fm, "attempt_fix", fake_attempt)
+    out_json, preview = tmp_path / "r.json", tmp_path / "p.md"
+    code = cli.main(["fix", "--from-assessment", str(saved), "--json", str(out_json),
+                     "--pr-preview", str(preview), "--pr-login", "alice", "--budget", "0.1"])
+    assert code == 0 and seen["budget_usd"] == 0.1
+    assert fm.FixResult.model_validate_json(out_json.read_text()).status is FixStatus.VERIFIED
+    text = preview.read_text()
+    assert "head: alice:fixedyet/fix-42" in text and text.count("reviewed and submitted by") == 1
+    assert "# Verified fix" in capsys.readouterr().out
