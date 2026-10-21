@@ -17,9 +17,12 @@ import shlex
 import time
 import urllib.parse
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 
+from fixedyet import testdeps
 from fixedyet.models import ExecResult, Outcome, ProgressCallback, ProgressEvent, SideRun
 from fixedyet.sandbox.base import Sandbox, SandboxError
 
@@ -49,6 +52,12 @@ _LINE_PREFIX_RE = re.compile(r"^\| ?", re.MULTILINE)
 _RUN_START_RE = re.compile(r"^__RUN_START__=\d+$", re.MULTILINE)
 _EXTRA_OK_RE = re.compile(r"^__EXTRA_OK__=(\S+)$", re.MULTILINE)
 _EXTRA_FAILED_RE = re.compile(r"^__EXTRA_FAILED__=(\S+)$", re.MULTILINE)
+_TESTDEPS_RE = {
+    name: re.compile(rf"^__TESTDEPS_{name}__=(.+)$", re.MULTILINE)
+    for name in ("OK", "PARTIAL", "FAILED", "MISSING", "IGNORED", "CRASHED")
+}
+
+TESTDEPS_PATH = "/tmp/ir_testdeps.py"  # noqa: S108 - inside the sandbox, not on the host
 
 
 class EnvBuildError(RuntimeError):
@@ -158,11 +167,67 @@ def installed_extras(result: ExecResult) -> tuple[list[str], list[str]]:
     return _EXTRA_OK_RE.findall(result.stdout), _EXTRA_FAILED_RE.findall(result.stdout)
 
 
+@dataclass
+class DepsReport:
+    """What the test-dependency step of the baseline script says it did (`testdeps.py`)."""
+
+    installed: list[str] = field(default_factory=list)  # sources fully installed
+    partial: list[str] = field(default_factory=list)  # sources with some requirements missing
+    failed: list[str] = field(default_factory=list)  # sources nothing could be installed from
+    missing: list[str] = field(default_factory=list)  # requirements that did not install
+    ignored: int = 0  # entries refused because they were not plain index requirements
+    crashed: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.installed or self.partial or self.failed or self.ignored or self.crashed)
+
+    def describe(self) -> str:
+        """One progress line: 'installed group:test; could not install foo, bar; ...'."""
+        parts = []
+        if self.installed or self.partial:
+            parts.append(f"installed {', '.join(self.installed + self.partial)}")
+        if self.failed:
+            parts.append(f"nothing installed from {', '.join(self.failed)}")
+        if self.missing:
+            shown = ", ".join(self.missing[:6]) + (", ..." if len(self.missing) > 6 else "")
+            parts.append(f"could not install {shown}")
+        if self.ignored:
+            parts.append(f"ignored {self.ignored} entries that are not plain requirements")
+        if self.crashed:
+            parts.append("the step itself failed")
+        return "; ".join(parts)
+
+
+def installed_test_deps(result: ExecResult) -> DepsReport:
+    """The `DepsReport` read from the baseline script's markers (empty when none apply)."""
+
+    def lines(name: str) -> list[str]:
+        return [value.strip() for value in _TESTDEPS_RE[name].findall(result.stdout)]
+
+    ignored = [int(v) for v in lines("IGNORED") if v.isdigit()]
+    return DepsReport(
+        installed=lines("OK"),
+        partial=lines("PARTIAL"),
+        failed=lines("FAILED"),
+        missing=lines("MISSING"),
+        ignored=ignored[-1] if ignored else 0,
+        crashed=bool(lines("CRASHED")),
+    )
+
+
+def helper_source() -> str:
+    """The text of `fixedyet.testdeps`, which the baseline script runs inside the sandbox."""
+    return Path(testdeps.__file__).read_text(encoding="utf-8")
+
+
 def baseline_script(repo: str, ref: str, extras: Sequence[str] = ()) -> str:
     """Shell script that clones ``repo``, checks out ``ref`` and installs it with pytest.
 
+    After the editable install it runs `fixedyet.testdeps` (shipped to `TESTDEPS_PATH` by
+    `build_baseline`): the project's PEP 735 test dependency groups and test requirements files.
     ``extras`` are further requirements (see `extra_packages_from_steps`) installed last; a
-    failure to install one is reported on stdout and does not fail the build.
+    failure to install one of them, or a test dependency, is reported on stdout and does not fail
+    the build.
     """
     url = shlex.quote(f"https://github.com/{_check_repo(repo)}")
     quoted_ref = shlex.quote(_check_ref(ref))
@@ -184,6 +249,8 @@ def baseline_script(repo: str, ref: str, extras: Sequence[str] = ()) -> str:
             f"({INSTALL_CHAIN}) || exit 12",
             "echo __STEP__=pytest",
             "pip install pytest || exit 13",
+            "echo __STEP__=testdeps",
+            f"python {TESTDEPS_PATH} {repo_dir} || echo __TESTDEPS_CRASHED__=exit",
             *extra_lines,
             "echo __STEP__=sanity",
             'python -c "import sys; print(sys.version)" || exit 14',
@@ -217,8 +284,10 @@ async def build_baseline(
     """Build and checkpoint the environment for ``repo`` at ``ref``.
 
     Clones github.com/<repo> into `REPO_DIR`, checks out ``ref``, installs it editable with
-    test extras when available, installs pytest and ``extra_packages`` (`installed_extras` reads
-    back which of them worked), runs a sanity step, and saves the filesystem.
+    test extras when available, installs pytest, the project's test dependency groups and
+    requirements files (`installed_test_deps` reads back what that did) and ``extra_packages``
+    (`installed_extras` reads back which of them worked), runs a sanity step, and saves the
+    filesystem.
     Returns ``(checkpoint_image, setup_result)``. Raises `EnvBuildError` on any failure.
     """
     script = baseline_script(repo, ref, extra_packages)  # validates the inputs before any call
@@ -233,7 +302,8 @@ async def build_baseline(
     await _emit(progress, f"Base image ready ({_short(base)}); cloning, installing, checkpointing")
     try:
         result = await sb.run(
-            base, script, workdir="/work", timeout_s=timeout_s, keep=True, network=True
+            base, script, files={TESTDEPS_PATH: helper_source()}, workdir="/work",
+            timeout_s=timeout_s, keep=True, network=True,
         )
     except SandboxError as exc:
         await _emit(progress, f"Sandbox failed during baseline build: {exc}")
@@ -252,6 +322,9 @@ async def build_baseline(
     if not result.image:
         await _emit(progress, "Baseline built but the sandbox returned no checkpoint image")
         raise EnvBuildError("sandbox returned no checkpoint image for the baseline", result)
+    deps = installed_test_deps(result)
+    if deps:
+        await _emit(progress, f"Test dependencies of the project: {deps.describe()}")
     installed, failed = installed_extras(result)
     if installed or failed:
         note = f"installed {', '.join(installed) or 'none'}"

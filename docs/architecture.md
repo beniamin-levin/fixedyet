@@ -21,6 +21,7 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 | `src/fixedyet/cli.py` | core | `fixedyet run|backport|doctor|eval|serve|mcp|gc` |
 | `src/fixedyet/sandbox/*` | sandbox | `Sandbox` protocol, Nebius and Docker backends |
 | `src/fixedyet/envbuild.py` | sandbox | baseline checkpoint builder |
+| `src/fixedyet/testdeps.py` | sandbox | test dependency installer; shipped into the baseline sandbox and run there (standard library only) |
 | `src/fixedyet/web/*` | web | FastAPI demo app and static page |
 | `src/fixedyet/mcp_server.py` | web | MCP server |
 | `deploy/*`, `README.md` | web | nginx, systemd, deploy script, README |
@@ -59,7 +60,11 @@ class DockerSandbox:
 async def build_baseline(sb: Sandbox, *, repo: str, ref: str, python_version: str | None,
                          progress: ProgressCallback | None = None) -> tuple[str, ExecResult]
     # clones github.com/<repo> into /work/repo, checks out ref, installs editable with test extras
-    # when available, installs pytest, runs a short sanity import; returns (checkpoint_image, setup_result).
+    # when available, installs pytest, then the project's test dependencies (testdeps.py: PEP 735
+    # groups test/tests/testing, requirements/test*.txt and kin; `pip install --group` when pip has
+    # it, else tomllib + install by name; plain requirements only, never fatal), runs a short sanity
+    # import; returns (checkpoint_image, setup_result). installed_test_deps(setup_result) reads back
+    # what the dependency step did.
     # Raises EnvBuildError on failure.
 REPO_DIR = "/work/repo"
 async def run_test_on_side(sb: Sandbox, image: str, *, test_path: str, test_code: str,

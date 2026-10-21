@@ -1,0 +1,112 @@
+{
+  "_example": {
+    "label": "Verified backport (real run)",
+    "illustrative": false,
+    "note": "Real run on 2026-10-21 on pytest-dev/pytest#13784: fixedyet run, then fixedyet backport, with the Docker sandbox backend and Nemotron 3 Super through Token Factory. The fix from main was cherry-picked onto 8.4.x and checked there. A draft pull request was opened inside the owner's fork (https://github.com/beniamin-levin/pytest/pull/1); nothing was sent to the upstream project. The checkpoint image tags name images on the machine that ran it."
+  },
+  "status": "verified",
+  "reason": "the reproduction test fails on 8.4.x before the cherry-pick and passes after; the project's suite has no newly failing tests (3244 passed, 1 failed, 6 error, 124 skipped before, 3245 passed, 1 failed, 6 error, 124 skipped after)",
+  "issue_url": "https://github.com/pytest-dev/pytest/issues/13784",
+  "title": "Inclusion of capteesys in pytest function and run with -s causes doubled prints to stdout",
+  "repo": "pytest-dev/pytest",
+  "reported_version": "8.4.1",
+  "target_branch": "8.4.x",
+  "target_branch_head": "3964af432eb80bf183b3928c7d17f8e95c739faa",
+  "fixing_commit": "46ea2a3cfc50ae42310c278387be49d165d71581",
+  "cherry_picked_commit": "f727cd0f704befeba0fc0bcaa89441a674a540e2",
+  "commit_message": "Fix capteesys producing doubled output with --capture=no (#14205)\n\nWhen capteesys is used with -s (--capture=no), output was printed\ntwice: once by TeeCaptureIO teeing to the original stream in\nreal-time, and again by pop_outerr_to_orig() writing the buffered\ncontent back via writeorg() on close.\n\nSkip the writeorg() call when tee is enabled, since the output was\nalready delivered live.\n\nFixes #13784.\n\n(cherry picked from commit 46ea2a3cfc50ae42310c278387be49d165d71581)",
+  "patch": "From f727cd0f704befeba0fc0bcaa89441a674a540e2 Mon Sep 17 00:00:00 2001\nFrom: Fridayworks <aifriday700@gmail.com>\nDate: Sat, 23 May 2026 11:20:40 -0400\nSubject: [PATCH] Fix capteesys producing doubled output with --capture=no\n (#14205)\n\nWhen capteesys is used with -s (--capture=no), output was printed\ntwice: once by TeeCaptureIO teeing to the original stream in\nreal-time, and again by pop_outerr_to_orig() writing the buffered\ncontent back via writeorg() on close.\n\nSkip the writeorg() call when tee is enabled, since the output was\nalready delivered live.\n\nFixes #13784.\n\n(cherry picked from commit 46ea2a3cfc50ae42310c278387be49d165d71581)\n---\n changelog/13784.bugfix.rst |  1 +\n src/_pytest/capture.py     |  9 ++++++++-\n testing/test_capture.py    | 20 ++++++++++++++++++++\n 3 files changed, 29 insertions(+), 1 deletion(-)\n create mode 100644 changelog/13784.bugfix.rst\n\ndiff --git a/changelog/13784.bugfix.rst b/changelog/13784.bugfix.rst\nnew file mode 100644\nindex 000000000..a2f4cf543\n--- /dev/null\n+++ b/changelog/13784.bugfix.rst\n@@ -0,0 +1 @@\n+Fixed ``capteesys`` producing doubled output when used with ``--capture=no`` (``-s``).\ndiff --git a/src/_pytest/capture.py b/src/_pytest/capture.py\nindex 6d98676be..f9f8f9e4a 100644\n--- a/src/_pytest/capture.py\n+++ b/src/_pytest/capture.py\n@@ -944,7 +944,14 @@ class CaptureFixture(Generic[AnyStr]):\n \n     def close(self) -> None:\n         if self._capture is not None:\n-            out, err = self._capture.pop_outerr_to_orig()\n+            if self._config.get(\"tee\"):\n+                # When tee is enabled, output was already written to the\n+                # original stream in real-time by TeeCaptureIO.  Using\n+                # pop_outerr_to_orig() would write it a second time via\n+                # writeorg(), causing doubled output (see #13784).\n+                out, err = self._capture.readouterr()\n+            else:\n+                out, err = self._capture.pop_outerr_to_orig()\n             self._captured_out += out\n             self._captured_err += err\n             self._capture.stop_capturing()\ndiff --git a/testing/test_capture.py b/testing/test_capture.py\nindex d9dacebd9..a55c7b250 100644\n--- a/testing/test_capture.py\n+++ b/testing/test_capture.py\n@@ -478,6 +478,26 @@ class TestCaptureFixture:\n         result.stdout.fnmatch_lines([\"sTdoUt\", \"sTdeRr\"])  # no tee, just reported\n         assert not result.stderr.lines\n \n+    def test_capteesys_no_double_output_with_capture_no(\n+        self, pytester: Pytester\n+    ) -> None:\n+        \"\"\"Capteesys with --capture=no should not produce doubled output (#13784).\"\"\"\n+        p = pytester.makepyfile(\n+            \"\"\"\\\n+            def test_one(capteesys):\n+                print(\"hello world stdout\")\n+                out, err = capteesys.readouterr()\n+                assert out == \"hello world stdout\\\\n\"\n+            \"\"\"\n+        )\n+        result = pytester.runpytest(p, \"--quiet\", \"--quiet\", \"-rN\", \"-s\")\n+        assert result.ret == ExitCode.OK\n+        # \"hello world stdout\" should appear exactly once, not twice.\n+        count = result.stdout.lines.count(\"hello world stdout\")\n+        assert count == 1, (\n+            f\"Expected 'hello world stdout' once, but found {count} times\"\n+        )\n+\n     def test_capsyscapfd(self, pytester: Pytester) -> None:\n         p = pytester.makepyfile(\n             \"\"\"\\\n",
+  "repro_test_path": "tests/test_fixedyet_repro.py",
+  "repro_test_code": "import pytest\n\ndef test_capteesys_doubling(pytester):\n    # Create a test file with the problematic test\n    pytester.makepyfile(\"\"\"\n        import sys\n        def test_dummy(request, capteesys):\n            print(\"Hello world stdout\", flush=True)\n            print(\"Hello world stderr\", file=sys.stderr, flush=True)\n    \"\"\")\n    # Run with -s to disable capture\n    result = pytester.runpytest(\"-s\")\n    # Combine stdout and stderr lines from pytest output\n    combined = result.stdout.lines + result.stderr.lines\n    # Count occurrences of each expected line\n    out_line = \"Hello world stdout\"\n    err_line = \"Hello world stderr\"\n    out_count = sum(1 for line in combined if out_line in line)\n    err_count = sum(1 for line in combined if err_line in line)\n    # Each should appear exactly once\n    assert out_count == 1, f\"Expected '{out_line}' to appear once, found {out_count} times\"\n    assert err_count == 1, f\"Expected '{err_line}' to appear once, found {err_count} times\"\n",
+  "repro_before": {
+    "ref": "8.4.x (before)",
+    "outcomes": [
+      "fail",
+      "fail"
+    ],
+    "checkpoint_image": "fixedyet-ckpt:fd83434b5be04dbb",
+    "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n___________________________ test_capteesys_doubling ____________________________\n\npytester = <Pytester PosixPath('/tmp/pytest-of-root/pytest-1/test_capteesys_doubling0')>\n\n    def test_capteesys_doubling(pytester):\n        # Create a test file with the problematic test\n        pytester.makepyfile(\"\"\"\n            import sys\n            def test_dummy(request, capteesys):\n                print(\"Hello world stdout\", flush=True)\n                print(\"Hello world stderr\", file=sys.stderr, flush=True)\n        \"\"\")\n        # Run with -s to disable capture\n        result = pytester.runpytest(\"-s\")\n        # Combine stdout and stderr lines from pytest output\n        combined = result.stdout.lines + result.stderr.lines\n        # Count occurrences of each expected line\n        out_line = \"Hello world stdout\"\n        err_line = \"Hello world stderr\"\n        out_count = sum(1 for line in combined if out_line in line)\n        err_count = sum(1 for line in combined if err_line in line)\n        # Each should appear exactly once\n>       assert out_count == 1, f\"Expected '{out_line}' to appear once, found {out_count} times\"\nE       AssertionError: Expected 'Hello world stdout' to appear once, found 2 times\nE       assert 2 == 1\n\n/work/repo/tests/test_fixedyet_repro.py:21: AssertionError\n----------------------------- Captured stdout call -----------------------------\n============================= test session starts ==============================\nplatform linux -- Python 3.12.15, pytest-8.4.3.dev6+g3964af432, pluggy-1.7.0\nrootdir: /tmp/pytest-of-root/pytest-1/test_capteesys_doubling0\ncollected 1 item\n\ntest_capteesys_doubling.py Hello world stdout\nHello world stdout\n.\n\n============================== 1 passed in 0.00s ===============================\n----------------------------- Captured stderr call -----------------------------\nHello world stderr\nHello world stderr\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_capteesys_doubling - AssertionError...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.02s"
+  },
+  "repro_after": {
+    "ref": "8.4.x (after)",
+    "outcomes": [
+      "pass",
+      "pass"
+    ],
+    "checkpoint_image": "fixedyet-ckpt:3673a636fcc443aa",
+    "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.01s"
+  },
+  "suite_before": {
+    "ran": true,
+    "exit_code": 1,
+    "timed_out": false,
+    "passed": 3244,
+    "failed": 1,
+    "errors": 6,
+    "skipped": 124,
+    "failing_tests": [
+      "testing/test_error_diffs.py::test_error_diff[Compare attrs classes]",
+      "testing/acceptance_test.py",
+      "testing/python/metafunc.py",
+      "testing/test_assertion.py",
+      "testing/test_junitxml.py",
+      "testing/test_monkeypatch.py",
+      "testing/test_legacypath.py::test_cache_makedir"
+    ],
+    "duration_s": 67.99,
+    "log_excerpt": "[...]\nImportError while importing test module '/work/repo/testing/test_assertion.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntesting/test_assertion.py:10: in <module>\n    import attr\nE   ModuleNotFoundError: No module named 'attr'\n__________________ ERROR collecting testing/test_junitxml.py ___________________\nImportError while importing test module '/work/repo/testing/test_junitxml.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntesting/test_junitxml.py:13: in <module>\n    import xmlschema\nE   ModuleNotFoundError: No module named 'xmlschema'\n_________________ ERROR collecting testing/test_monkeypatch.py _________________\nImportError while importing test module '/work/repo/testing/test_monkeypatch.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntesting/test_monkeypatch.py:11: in <module>\n    import setuptools\nE   ModuleNotFoundError: No module named 'setuptools'\n_____________________ ERROR at setup of test_cache_makedir _____________________\nfile /work/repo/testing/test_legacypath.py, line 88\n  def test_cache_makedir(cache: pytest.Cache) -> None:\nE       fixture 'cache' not found\n>       available fixtures: LineMatcher, _config_for_test, _pytest, _sys_snapshot, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, color_mapping, doctest_namespace, dummy_yaml_custom_test, linecomp, mock_timing, monkeypatch, pytestconfig, pytester, record_property, record_testsuite_property, record_xml_attribute, recwarn, remove_ci_env_var, reset_colors, set_column_width, testdir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tw_mock\n>       use 'pytest --fixtures [testpath]' for help on them.\n\n/work/repo/testing/test_legacypath.py:88\n=================================== FAILURES ===================================\n/work/repo/testing/test_error_diffs.py:295: Failed: nomatch: ''\n=========================== short test summary info ============================\nFAILED testing/test_error_diffs.py::test_error_diff[Compare attrs classes] - ...\nERROR testing/acceptance_test.py\nERROR testing/python/metafunc.py\nERROR testing/test_assertion.py\nERROR testing/test_junitxml.py\nERROR testing/test_monkeypatch.py\nERROR testing/test_legacypath.py::test_cache_makedir\n1 failed, 3244 passed, 124 skipped, 10 xfailed, 1 xpassed, 6 errors in 67.99s (0:01:07)"
+  },
+  "suite_after": {
+    "ran": true,
+    "exit_code": 1,
+    "timed_out": false,
+    "passed": 3245,
+    "failed": 1,
+    "errors": 6,
+    "skipped": 124,
+    "failing_tests": [
+      "testing/test_error_diffs.py::test_error_diff[Compare attrs classes]",
+      "testing/acceptance_test.py",
+      "testing/python/metafunc.py",
+      "testing/test_assertion.py",
+      "testing/test_junitxml.py",
+      "testing/test_monkeypatch.py",
+      "testing/test_legacypath.py::test_cache_makedir"
+    ],
+    "duration_s": 69.64,
+    "log_excerpt": "[...]\nImportError while importing test module '/work/repo/testing/test_assertion.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntesting/test_assertion.py:10: in <module>\n    import attr\nE   ModuleNotFoundError: No module named 'attr'\n__________________ ERROR collecting testing/test_junitxml.py ___________________\nImportError while importing test module '/work/repo/testing/test_junitxml.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntesting/test_junitxml.py:13: in <module>\n    import xmlschema\nE   ModuleNotFoundError: No module named 'xmlschema'\n_________________ ERROR collecting testing/test_monkeypatch.py _________________\nImportError while importing test module '/work/repo/testing/test_monkeypatch.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntesting/test_monkeypatch.py:11: in <module>\n    import setuptools\nE   ModuleNotFoundError: No module named 'setuptools'\n_____________________ ERROR at setup of test_cache_makedir _____________________\nfile /work/repo/testing/test_legacypath.py, line 88\n  def test_cache_makedir(cache: pytest.Cache) -> None:\nE       fixture 'cache' not found\n>       available fixtures: LineMatcher, _config_for_test, _pytest, _sys_snapshot, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, color_mapping, doctest_namespace, dummy_yaml_custom_test, linecomp, mock_timing, monkeypatch, pytestconfig, pytester, record_property, record_testsuite_property, record_xml_attribute, recwarn, remove_ci_env_var, reset_colors, set_column_width, testdir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tw_mock\n>       use 'pytest --fixtures [testpath]' for help on them.\n\n/work/repo/testing/test_legacypath.py:88\n=================================== FAILURES ===================================\n/work/repo/testing/test_error_diffs.py:295: Failed: nomatch: ''\n=========================== short test summary info ============================\nFAILED testing/test_error_diffs.py::test_error_diff[Compare attrs classes] - ...\nERROR testing/acceptance_test.py\nERROR testing/python/metafunc.py\nERROR testing/test_assertion.py\nERROR testing/test_junitxml.py\nERROR testing/test_monkeypatch.py\nERROR testing/test_legacypath.py::test_cache_makedir\n1 failed, 3245 passed, 124 skipped, 10 xfailed, 1 xpassed, 6 errors in 69.64s (0:01:09)"
+  },
+  "newly_failing": [],
+  "conflicting_files": [],
+  "candidate_branches": [
+    "4.6.x",
+    "5.3.x",
+    "5.4.x",
+    "6.0.x",
+    "6.1.x",
+    "6.2.x",
+    "7.0.x",
+    "7.1.x",
+    "7.2.x",
+    "7.3.x",
+    "7.4.x",
+    "8.0.x",
+    "8.1.x",
+    "8.2.x",
+    "8.3.x",
+    "8.4.x",
+    "9.0.x",
+    "9.1.x"
+  ],
+  "log_excerpt": "",
+  "usage": {
+    "llm_calls": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cost_usd": 0.0,
+    "sandbox_runs": 6,
+    "search_credits": 0,
+    "wall_seconds": 156.73
+  },
+  "created_at": "2026-10-21T10:47:50.546843Z"
+}

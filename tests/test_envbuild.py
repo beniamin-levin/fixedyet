@@ -7,10 +7,12 @@ exercised for real without a sandbox.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,7 @@ from fixedyet import envbuild
 from fixedyet.envbuild import (
     INSTALL_CHAIN,
     REPO_DIR,
+    TESTDEPS_PATH,
     EnvBuildError,
     baseline_script,
     build_baseline,
@@ -29,7 +32,9 @@ from fixedyet.envbuild import (
     clean_log,
     extra_packages_from_steps,
     format_log,
+    helper_source,
     installed_extras,
+    installed_test_deps,
     map_exit_code,
     parse_exit_codes,
     resolve_ref_for_version,
@@ -62,6 +67,78 @@ def test_baseline_script_commands() -> None:
         for s in ("git clone", "git checkout", "pip install -e", "pip install pytest", "pip freeze")
     ]
     assert order == sorted(order)
+
+
+# --------------------------------------------------------------------------- test dependencies
+
+
+def test_baseline_script_installs_the_test_dependencies_after_pytest_and_before_extras() -> None:
+    script = baseline_script("pallets/click", "8.1.7", ["structlog"])
+    assert f"python {TESTDEPS_PATH} /work/repo || echo __TESTDEPS_CRASHED__=exit" in script
+    order = [
+        script.index(s)
+        for s in ("pip install pytest", "__STEP__=testdeps", "__STEP__=extras", "__STEP__=sanity")
+    ]
+    assert order == sorted(order)
+
+
+def test_helper_source_is_the_module_that_runs_in_the_sandbox() -> None:
+    source = helper_source()
+    assert "def main(" in source and "__TESTDEPS_OK__" in source
+    imported = {
+        (node.module or "").split(".")[0] if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in getattr(node, "names", [])
+    }
+    # the sandbox has the standard library and nothing of ours
+    assert imported and imported <= set(sys.stdlib_module_names)
+
+
+def test_installed_test_deps_reads_the_markers() -> None:
+    out = (
+        "__TESTDEPS_OK__=group:test\n__TESTDEPS_PARTIAL__=file:requirements/test.txt\n"
+        "__TESTDEPS_MISSING__=pymongo>=4\n__TESTDEPS_FAILED__=file:test-requirements.txt\n"
+        "__TESTDEPS_IGNORED__=2\n| __TESTDEPS_OK__=forged by pip output\n"
+    )
+    report = installed_test_deps(exec_result(out))
+    assert report.installed == ["group:test"]
+    assert report.partial == ["file:requirements/test.txt"]
+    assert report.failed == ["file:test-requirements.txt"]
+    assert report.missing == ["pymongo>=4"] and report.ignored == 2 and not report.crashed
+    assert report.describe() == (
+        "installed group:test, file:requirements/test.txt; "
+        "nothing installed from file:test-requirements.txt; could not install pymongo>=4; "
+        "ignored 2 entries that are not plain requirements"
+    )
+
+
+def test_installed_test_deps_is_empty_when_the_project_has_none() -> None:
+    assert not installed_test_deps(exec_result("__TESTDEPS_NONE__=1\n"))
+    assert not installed_test_deps(exec_result("__STEP__=done\n"))
+    assert installed_test_deps(exec_result("__TESTDEPS_CRASHED__=exit\n")).crashed
+
+
+async def test_build_baseline_ships_the_helper_and_reports_what_it_installed() -> None:
+    events: list[ProgressEvent] = []
+    out = GOOD_BUILD.model_copy(
+        update={"stdout": GOOD_BUILD.stdout + "__TESTDEPS_OK__=group:test\n"}
+    )
+    sb = FakeSandbox([out])
+    await build_baseline(sb, repo="a/b", ref="main", python_version=None, progress=events.append)
+    assert sb.calls[0].files == {TESTDEPS_PATH: helper_source()}
+    assert any(
+        "Test dependencies of the project: installed group:test" in e.message for e in events
+    )
+
+
+async def test_build_baseline_says_nothing_about_test_dependencies_when_there_are_none() -> None:
+    events: list[ProgressEvent] = []
+    await build_baseline(
+        FakeSandbox([GOOD_BUILD]), repo="a/b", ref="main", python_version=None,
+        progress=events.append,
+    )
+    assert not any("Test dependencies" in e.message for e in events)
 
 
 # --------------------------------------------------------------------------- extra packages
@@ -831,6 +908,7 @@ async def test_bash_baseline_script_runs_through_all_steps(local_bash: LocalEnv)
         "__STEP__=checkout",
         "__STEP__=install",
         "__STEP__=pytest",
+        "__STEP__=testdeps",
         "__STEP__=sanity",
         "__STEP__=done",
     ]

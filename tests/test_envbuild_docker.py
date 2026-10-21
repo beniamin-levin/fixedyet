@@ -11,6 +11,7 @@ import shutil
 import pytest
 import pytest_asyncio
 
+from fixedyet import envbuild
 from fixedyet.envbuild import build_baseline, installed_extras, run_test_on_side
 from fixedyet.models import ExecResult, Outcome, ProgressEvent
 from fixedyet.sandbox.docker import DockerSandbox
@@ -198,3 +199,70 @@ async def test_extra_packages_are_installed_in_the_checkpoint_and_a_bad_one_is_r
         sandbox, image, test_path="tests/test_extra.py", test_code=check, runs=1, network=False
     )
     assert side.outcomes == [Outcome.PASS], side.log_excerpt
+
+
+# --------------------------------------------------------------------------- test dependencies
+
+DEPS_REPO = {
+    "/work/repo/pyproject.toml": (
+        '[project]\nname = "widgets"\nversion = "1"\n\n'
+        "[dependency-groups]\n"
+        'tests = ["six==1.16.0", {include-group = "more"}]\n'
+        'more = ["iniconfig==2.0.0"]\n'
+        'docs = ["mccabe==0.7.0"]\n'
+        'dev = ["pyflakes==3.2.0"]\n'
+    ),
+    "/work/repo/requirements/test-extra.txt": "tomli-w==1.0.0\n# a comment\n",
+    "/work/repo/requirements-dev.txt": "colorama==0.4.6\n",
+}
+DEPS_RUN = (
+    "cd /work/repo && python /tmp/ir_testdeps.py /work/repo; echo ---; pip list --format=freeze"
+)
+
+
+@pytest.mark.parametrize("upgrade_pip", [False, True], ids=["pip-from-the-image", "pip-with-group"])
+async def test_test_dependency_groups_and_files_are_installed_in_the_sandbox(
+    upgrade_pip: bool,
+) -> None:
+    """Runs the shipped helper with a real pip, with and without ``pip install --group``."""
+    sandbox = DockerSandbox()
+    base = await sandbox.base_image("3.12")
+    upgrade = "pip install --quiet 'pip>=25.1' && " if upgrade_pip else ""
+    result = await sandbox.run(
+        base,
+        upgrade + DEPS_RUN,
+        files={**DEPS_REPO, envbuild.TESTDEPS_PATH: envbuild.helper_source()},
+        workdir="/work/repo",
+        timeout_s=600,
+    )
+    assert result.exit_code == 0, result.stderr
+    markers, _, frozen = result.stdout.partition("---\n")
+    installed = {line.split("==")[0].lower().replace("_", "-") for line in frozen.splitlines()}
+    assert {"six", "iniconfig", "tomli-w"} <= installed  # the test group, its include, the file
+    assert not installed & {"mccabe", "pyflakes", "colorama"}  # docs and dev are left alone
+    assert "__TESTDEPS_OK__=group:tests" in markers
+    assert "__TESTDEPS_OK__=file:requirements/test-extra.txt" in markers
+    assert "__TESTDEPS_FAILED__" not in markers and "__TESTDEPS_CRASHED__" not in markers
+    assert ("installed with pip --group tests" in markers) is upgrade_pip
+
+
+async def test_a_test_dependency_that_cannot_be_installed_does_not_stop_the_others() -> None:
+    sandbox = DockerSandbox()
+    base = await sandbox.base_image("3.12")
+    files = {
+        "/work/repo/pyproject.toml": (
+            '[project]\nname = "widgets"\nversion = "1"\n\n[dependency-groups]\n'
+            'test = ["six==1.16.0", "fixedyet-no-such-package-xyz", '
+            '"evil @ https://example.invalid/evil.whl"]\n'
+        ),
+        envbuild.TESTDEPS_PATH: envbuild.helper_source(),
+    }
+    result = await sandbox.run(
+        base, DEPS_RUN, files=files, workdir="/work/repo", timeout_s=600
+    )
+    assert result.exit_code == 0, result.stderr
+    report = envbuild.installed_test_deps(result)
+    assert report.partial == ["group:test"] and report.missing == ["fixedyet-no-such-package-xyz"]
+    assert report.ignored == 1  # the URL was refused, not attempted
+    assert "six==1.16.0" in result.stdout
+    assert "evil" not in result.stdout.split("---")[1]

@@ -37,7 +37,7 @@ flowchart LR
 ```
 
 1. **Intake.** Fetch the issue and its comments through the GitHub API. Nemotron 3 Nano extracts a repro contract: version, setup, snippet, expected and observed behaviour. Nemotron 3 Super is the fallback if Nano returns an invalid contract. No runnable snippet means the run stops with `needs_info`.
-2. **Baseline checkpoint.** A sandbox clones the repository, checks out the reported version, installs it, adds the packages the issue asks for with a plain `pip install <name>` (names and version pins only, never URLs or options), and is saved as an image. The test-writing sandbox has no network, so this is the only place a dependency can come from.
+2. **Baseline checkpoint.** A sandbox clones the repository, checks out the reported version, installs it, installs the project's own test dependencies (see below), adds the packages the issue asks for with a plain `pip install <name>` (names and version pins only, never URLs or options), and is saved as an image. The test-writing sandbox has no network, so this is the only place a dependency can come from.
 3. **Write the test.** A hand-written tool-calling loop (no agent framework) lets Nemotron 3 Super read files, search the code, write a test and run pytest. Each attempt starts from the checkpoint, so failed attempts leave nothing behind.
 4. **Run both sides.** Two forks of the checkpoint run the same test, one at the reported version and one on the fix side, twice each.
 5. **Decide.** The matrix below gives the verdict. Confidence is high only when every run on both sides agrees and neither side errored.
@@ -93,6 +93,16 @@ Keys in `.env` (never committed):
 | `FIXEDYET_KEEP_CHECKPOINTS` | Docker backend only: how many of the newest checkpoint images to keep (default 6) |
 
 Sandboxes is a beta product, so access may need to be requested from Nebius. The Docker backend runs the same flow on a local daemon.
+
+### Test dependencies
+
+Projects often keep what their tests need outside the package's own extras, and a missing `hypothesis` or `xmlschema` turns a whole test file into a collection error. After the editable install the baseline step therefore reads these from the checkout and installs them, once, into the checkpoint:
+
+- PEP 735 `[dependency-groups]` named `test`, `tests` or `testing` (and the same names in `[tool.pdm.dev-dependencies]`), with `include-group` resolved;
+- requirements files: `requirements/test*.txt`, `test-requirements.txt`, `requirements-test.txt`, `tests/requirements.txt` and a few spellings of those;
+- a `dev` group or `requirements-dev.txt` only when the project has no test group or file at all, since dev groups tend to hold linters and documentation tools.
+
+A group is installed with `pip install --group <name>` when the pip in the image supports it (pip 25.1 and newer; the `python:3.12` image ships an older one), otherwise its entries are read with `tomllib` and installed by name, in one command first and one at a time if that fails. A dependency that cannot be installed is reported in the progress log and never fails the build. Only plain requirements (`name[extras] version-pins ; marker`) are installed: URLs, VCS references, local paths, pip options, an `-r` include or a symlink that leaves the repository, the project's own name and anything past three sources or 120 requirements are refused and counted. The code is `src/fixedyet/testdeps.py`; it runs inside the sandbox with the standard library only and reads the files as text.
 
 ### Disk use of the Docker backend
 
@@ -165,6 +175,8 @@ fixedyet backport URL --open-pr                                      # also open
 fixedyet backport URL --open-pr --pr-target upstream                 # ... on the upstream project (asks first)
 ```
 
+A real case, end to end (`fixedyet run`, then `fixedyet backport --open-pr`, Docker sandbox): [pytest-dev/pytest#13784](https://github.com/pytest-dev/pytest/issues/13784), where `capteesys` printed everything twice under `-s` on pytest 8.4.1. The fix was merged to `main` after the `8.4.x` branch was cut and never backported. FixedYet found `8.4.x`, cherry-picked the fix without conflicts, showed the reproduction test failing before and passing after, and showed the project's suite (about 3,250 tests) with no new failure. The draft pull request is [in the owner's fork](https://github.com/beniamin-levin/pytest/pull/1), not in the upstream project. The saved result is `examples/real-backport-pytest-dev-pytest-13784.json` and appears on the demo page.
+
 Without `--open-pr` nothing leaves your machine except the sandbox's own clone of the public repository. The command prints a markdown summary and exits 0 only for a verified backport.
 
 ### The gates
@@ -217,7 +229,7 @@ The token needs to create a fork, push to it and open pull requests: a fine-grai
 
 ### Limits
 
-- Pytest projects that install with pip, like the rest of FixedYet. A project whose tests need a dependency group or a service the installer does not provide cannot be verified (`error`).
+- Pytest projects that install with pip, like the rest of FixedYet. Test dependencies come from [the groups and files listed above](#test-dependencies); a project whose tests need anything else (a service, a system library, a tox-only dependency list) cannot be fully verified, and its missing tests sit in the baseline.
 - The suite runs without network, so a test that needs one fails before and after alike and sits in the baseline. A test that is flaky can still be reported as a regression; the failing ids are listed so that you can see.
 - Projects that keep one rolling branch (`stable`) instead of one branch per minor release give `not_applicable` unless you pass `--target-branch`. `pallets/click` is such a project at the time of writing.
 
@@ -289,6 +301,7 @@ src/fixedyet/
   agent.py         the hand-written tool-calling loop
   verdict.py       the decision matrix (pure function)
   envbuild.py      baseline checkpoint and per-side runs
+  testdeps.py      installs a project's test dependency groups and requirements files (runs in the sandbox)
   sandbox/         Nebius Sandboxes and Docker backends
   evidence.py      Tavily search and extract
   report.py        markdown rendering
