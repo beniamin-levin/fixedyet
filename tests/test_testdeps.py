@@ -213,6 +213,31 @@ def test_plan_reads_requirements_files_and_follows_inner_includes(tmp_path: Path
     ]
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tests-pallets-min.txt",
+        "test-min.txt",
+        "tests_minimum.txt",
+        "test.lowest.txt",
+        "test-oldest.txt",
+    ],
+)
+def test_plan_skips_minimum_version_requirements_files(tmp_path: Path, name: str) -> None:
+    repo = make_repo(
+        tmp_path,
+        {
+            f"requirements/{name}": "werkzeug==2.0.0\n",
+            "requirements/tests.txt": "pytest\n",
+            "requirements/test-mindful.txt": "coverage\n",  # "min" inside a word is not a marker
+        },
+    )
+    assert [(s.kind, s.name) for s in plan(repo)] == [
+        ("file", "requirements/test-mindful.txt"),
+        ("file", "requirements/tests.txt"),
+    ]
+
+
 def test_requirements_file_refuses_options_urls_paths_and_escaping_includes(
     tmp_path: Path,
 ) -> None:

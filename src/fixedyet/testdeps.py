@@ -13,7 +13,8 @@ What it installs, and only this:
     test group at all, because dev groups tend to hold linters and documentation tools; uv's
     ``dev-dependencies`` list counts as a ``dev`` group);
   * the same for requirements files: ``requirements/test*.txt``, ``test-requirements.txt`` and a
-    few spellings of it (``requirements-dev.txt`` and its kin only as the same fallback).
+    few spellings of it (``requirements-dev.txt`` and its kin only as the same fallback). A
+    ``requirements/test*.txt`` file whose name says min, minimum, lowest or oldest is skipped.
 
 How it installs: ``pip install --group <name>`` when the pip in the image has ``--group`` (pip
 25.1 and newer) and every entry of the group is a plain requirement; otherwise the entries are
@@ -64,6 +65,11 @@ FALLBACK_FILES = (
 )
 TEST_FILE_GLOB_DIR = "requirements"
 _GLOBBED_FILE_RE = re.compile(r"^test[A-Za-z0-9_.-]*\.txt$")
+# A file of minimum (or lowest, or oldest) versions describes a second environment that the
+# project's CI builds on purpose. Installed here it would downgrade what the project itself
+# declares (Flask's requirements/tests-pallets-min.txt pins Werkzeug==2.0.0 under a Flask that
+# needs 2.2.2), so such a file is never read.
+_MIN_VERSIONS_RE = re.compile(r"(?:^|[-_.])(?:min|minimum|minimal|lowest|oldest)(?=[-_.]|$)")
 
 MAX_SOURCES = 3
 MAX_REQUIREMENTS = 120
@@ -310,7 +316,11 @@ def file_candidates(repo: Path) -> tuple[list[str], list[str]]:
             names = sorted(p.name for p in directory.iterdir() if p.is_file())
         except OSError:
             names = []
-        tests += [f"{TEST_FILE_GLOB_DIR}/{n}" for n in names if _GLOBBED_FILE_RE.match(n)]
+        tests += [
+            f"{TEST_FILE_GLOB_DIR}/{n}"
+            for n in names
+            if _GLOBBED_FILE_RE.match(n) and not _MIN_VERSIONS_RE.search(n)
+        ]
     return tests, existing(FALLBACK_FILES)
 
 
