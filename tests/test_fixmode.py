@@ -945,3 +945,11 @@ async def test_an_assessment_with_a_fix_gains_a_fix_section() -> None:
     text = render_markdown(a)
     assert "## Fix" in text and "**Status:** `verified`" in text
     assert text.index("## Fix") < text.index("## Usage")
+
+
+def test_fix_mode_gives_a_long_reasoning_answer_time_to_arrive() -> None:
+    from fixedyet.llm import LLM
+
+    client = LLM(Settings(nebius_api_key="k"), timeout_s=fm.FIX_REQUEST_TIMEOUT_S)._get_client()
+    assert client.timeout == fm.FIX_REQUEST_TIMEOUT_S > 180
+    assert LLM(Settings(nebius_api_key="k"))._get_client().timeout == 180.0

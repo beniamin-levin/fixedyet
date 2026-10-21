@@ -101,6 +101,9 @@ MAX_READ_BYTES = 400_000
 FEEDBACK_CHARS = 3_500
 ISSUE_CHARS = 8_000
 FIX_MAX_TOKENS = 16_000  # the reasoning model spends part of this thinking before it answers
+# At the 60-80 output tokens a second seen live, 16,000 tokens take up to about four minutes: a
+# request needs longer than the client's usual 180 s, or a long answer is cut off and retried.
+FIX_REQUEST_TIMEOUT_S = 420.0
 APPLY_TIMEOUT_S = 300
 SURVEY_TIMEOUT_S = 300
 
@@ -1180,7 +1183,8 @@ async def attempt_fix(
     settings = settings or get_settings()
     budget = float(settings.fix_budget_usd if budget_usd is None else budget_usd)
     rep = assessment.reproduction
-    llm = llm or LLM(settings.model_copy(update={"run_budget_usd": budget}))
+    llm = llm or LLM(settings.model_copy(update={"run_budget_usd": budget}),
+                     timeout_s=FIX_REQUEST_TIMEOUT_S, max_attempts=3)
     usage = llm.usage
     result = FixResult(
         status=FixStatus.ERROR, issue_url=assessment.issue_url, title=assessment.title,

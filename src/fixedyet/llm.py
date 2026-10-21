@@ -143,8 +143,10 @@ class LLM:
         client: Any | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         max_attempts: int = 5,
+        timeout_s: float = 180.0,
     ) -> None:
         self.settings = settings or get_settings()
+        self._timeout_s = timeout_s  # per request; a long reasoning answer needs more
         self.usage = Usage()
         self._client = client
         self._sleep = sleep
@@ -162,7 +164,7 @@ class LLM:
                 api_key=self.settings.nebius_api_key,
                 base_url=self.settings.nebius_base_url,
                 max_retries=0,
-                timeout=180.0,
+                timeout=self._timeout_s,
             )
         return self._client
 
