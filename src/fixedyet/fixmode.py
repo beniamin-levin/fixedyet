@@ -35,6 +35,7 @@ import builtins
 import difflib
 import keyword
 import logging
+import math
 import re
 import shlex
 import time
@@ -97,6 +98,9 @@ MAX_LISTED_SOURCES = 200
 MAX_LISTING = 20_000
 MAX_DEFINITIONS = 400
 MAX_NAMES = 40
+MAX_TERMS = 30  # distinctive identifiers counted across the source (symbol-based localization)
+SYMBOL_POINTS = 60.0  # what the file that mentions them most gets in the ranking
+MAX_TERM_ANCHORS = 12  # windows around the mentions, per file
 MAX_READ_BYTES = 400_000
 FEEDBACK_CHARS = 3_500
 ISSUE_CHARS = 8_000
@@ -204,7 +208,7 @@ def regression_test_path(tracked: Iterable[str], issue_number: int) -> str | Non
 _PREFIX_LINES = envbuild._PREFIX_LINES
 _MARK = {
     name: re.compile(rf"^__{name}__=(.*)$", re.MULTILINE)
-    for name in ("HEAD", "LS", "DEF", "SETUP_FAILED", "DIFF_B64")
+    for name in ("HEAD", "LS", "DEF", "CNT", "QCNT", "SETUP_FAILED", "DIFF_B64")
 }
 _DEF_LINE = re.compile(r"^(?P<path>.+?\.py):(?P<line>\d+):(?P<text>.*)$")
 
@@ -222,8 +226,12 @@ def definition_pattern(names: Iterable[str]) -> str | None:
     )
 
 
-def survey_script(names: Iterable[str] = ()) -> str:
-    """List the tracked files and find where ``names`` are defined. Reads only; prints markers.
+def survey_script(
+    names: Iterable[str] = (), terms: Iterable[str] = (), quoted: Iterable[str] = ()
+) -> str:
+    """List the tracked files, find where ``names`` are defined, and count in every Python file
+    how often each of ``terms`` occurs as a whole word, and each of ``quoted`` as a string
+    literal (``"escaped"``: a name a registry maps). Reads only; prints markers.
 
     Every line of git's output gets a marker prefix, so a file name or a line of source can
     never forge a marker of its own.
@@ -241,6 +249,17 @@ def survey_script(names: Iterable[str] = ()) -> str:
             f"git -c core.quotepath=off grep -n -I -E {shlex.quote(pattern)} -- '*.py' "
             f"| head -n {MAX_DEFINITIONS} | awk '{{ print \"__DEF__=\" $0 }}'"
         )
+    for term in [t for t in dict.fromkeys(terms) if _IDENT_RE.match(t)][:MAX_TERMS]:
+        lines.append(
+            f"git -c core.quotepath=off grep -c -w -I -F -e {term} -- '*.py' "
+            f"| awk '{{ print \"__CNT__={term}\\t\" $0 }}'"
+        )
+    for term in [t for t in dict.fromkeys(quoted) if _IDENT_RE.match(t)][:MAX_TERMS]:
+        pattern = shlex.quote(f"[\"']{term}[\"']")
+        lines.append(
+            f"git -c core.quotepath=off grep -c -I -E {pattern} -- '*.py' "
+            f"| awk '{{ print \"__QCNT__={term}\\t\" $0 }}'"
+        )
     lines += ["exit 0", ""]
     return "\n".join(lines)
 
@@ -250,6 +269,8 @@ class Survey:
     head: str | None = None
     files: list[str] = field(default_factory=list)
     definitions: list[tuple[str, int, str]] = field(default_factory=list)  # (path, line, text)
+    counts: dict[str, dict[str, int]] = field(default_factory=dict)  # term -> {path: mentions}
+    quoted: dict[str, dict[str, int]] = field(default_factory=dict)  # term -> {path: as "term"}
     failed: str | None = None
 
 
@@ -262,9 +283,19 @@ def parse_survey(result: ExecResult) -> Survey:
         match = _DEF_LINE.match(raw)
         if match:
             definitions.append((match["path"], int(match["line"]), match["text"]))
+    def tally(marker: str) -> dict[str, dict[str, int]]:
+        found: dict[str, dict[str, int]] = {}
+        for raw in _MARK[marker].findall(out):
+            term, _, rest = raw.partition("\t")
+            path, _, number = rest.rpartition(":")
+            if _IDENT_RE.match(term) and path and number.strip().isdigit():
+                found.setdefault(term, {})[path] = int(number)
+        return found
+
     failed = _MARK["SETUP_FAILED"].findall(out)
     return Survey(
         head=heads[-1].strip() if heads else None, files=files, definitions=definitions,
+        counts=tally("CNT"), quoted=tally("QCNT"),
         failed=failed[-1] if failed else (None if files else "listing"),
     )
 
@@ -424,6 +455,108 @@ def issue_code_names(text: str) -> list[str]:
     return names[:MAX_NAMES]
 
 
+def _bound_names(code: str) -> set[str]:
+    """Names a test binds itself (variables, functions, arguments): its own, not the project's."""
+    tree = _parse(code)
+    if tree is None:
+        return set()
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            bound.add(node.name)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+    return bound
+
+
+def distinctive_terms(issue_text: str, test_code: str = "") -> dict[str, float]:
+    """The identifiers most likely to name the code at fault, each with a weight, best first.
+
+    3: the tests and filters a template applies after ``is`` or ``|`` (``{{ x is escaped }}``);
+    2: words in the issue's `code spans`, and CamelCase, CONSTANT_CASE and snake_case names in
+    its prose; 1: CamelCase and CONSTANT_CASE names in its code blocks and in the test, and
+    single words in quotes; 0.5: snake_case names in code. Common words, keywords, builtins and
+    the names the test binds itself are left out.
+    """
+    blocks = " ".join(re.findall(r"```.*?```", issue_text, re.DOTALL))
+    prose = re.sub(r"```.*?```", " ", issue_text, flags=re.DOTALL)
+    code = f"{blocks}\n{test_code}"
+    everything = f"{issue_text}\n{test_code}"
+    local = _bound_names(test_code)
+    found: dict[str, float] = {}
+
+    def add(words: Iterable[str], weight: float) -> None:
+        for word in words:
+            if _useful_name(word) and word not in local and word not in found:
+                found[word] = weight
+
+    camel = r"\b[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+\b"
+    constant = r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b"
+    snake = r"\b_{0,2}[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b"
+    for segment in re.findall(r"\{\{.*?\}\}|\{%.*?%\}", everything, re.DOTALL):
+        add(re.findall(r"\bis\s+(?:not\s+)?([A-Za-z_][A-Za-z0-9_]*)", segment), 3.0)
+        add(re.findall(r"\|\s*([A-Za-z_][A-Za-z0-9_]*)", segment), 3.0)
+    for span in re.findall(r"`([^`\n]+)`", prose):
+        add(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", span), 2.0)
+    add(re.findall(camel, prose), 2.0)
+    add(re.findall(constant, prose), 2.0)
+    add(re.findall(snake, prose), 2.0)
+    add(re.findall(camel, code), 1.0)
+    add(re.findall(constant, code), 1.0)
+    add(re.findall(r"""(?<![\w\\])["']([A-Za-z_][A-Za-z0-9_]{2,40})["']""", everything), 1.0)
+    add(re.findall(snake, code), 0.5)
+    ordered = sorted(found.items(), key=lambda kv: -kv[1])  # stable: first seen first
+    return dict(ordered[:MAX_TERMS])
+
+
+def symbol_scores(
+    counts: dict[str, dict[str, int]], sources: Sequence[str],
+    term_weights: dict[str, float] | None = None,
+    quoted: dict[str, dict[str, int]] | None = None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """``({file: score}, {term: weight})``: how much each source file mentions the terms. A term
+    weighs its own weight (`distinctive_terms`, default 1) times more the fewer files mention it
+    (log of files over files mentioning it). Breadth beats repetition: a file's mentions of one
+    term count only a little more than one mention. A file that has the term as a string literal
+    (``"escaped": test_escaped``, a registry) counts it twice more."""
+    known = set(sources)
+    total = len(known)
+    scores: dict[str, float] = {}
+    weights: dict[str, float] = {}
+    for term, per_file in counts.items():
+        hits = {p: n for p, n in per_file.items() if p in known and n > 0}
+        if not hits:
+            continue
+        weight = math.log((total + 1) / len(hits)) * (term_weights or {}).get(term, 1.0)
+        if weight <= 0:
+            continue
+        weights[term] = weight
+        for path, n in hits.items():
+            scores[path] = scores.get(path, 0.0) + weight * (1 + 0.25 * math.log(n))
+            if (quoted or {}).get(term, {}).get(path):
+                scores[path] += 2 * weight
+    return scores, weights
+
+
+def term_anchors(
+    content: str, weights: dict[str, float], limit: int = MAX_TERM_ANCHORS
+) -> dict[int, float]:
+    """``{line: weight}`` for the lines of ``content`` that mention the weighted terms: the
+    first few mentions of each term, the rarest terms first."""
+    found: dict[int, float] = {}
+    lines = content.splitlines()
+    for term, weight in sorted(weights.items(), key=lambda kv: -kv[1]):
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])")
+        hits = [n for n, line in enumerate(lines, 1) if pattern.search(line)][:3]
+        for line in hits:
+            found[line] = max(found.get(line, 0.0), 5.0 * weight)
+        if len(found) >= limit:
+            break
+    return dict(sorted(found.items(), key=lambda kv: -kv[1])[:limit])
+
+
 @dataclass
 class TestNames:
     """What a reproduction test uses: imported modules and names, and attributes it calls."""
@@ -473,6 +606,7 @@ class Candidate:
     score: float = 0.0
     anchors: dict[int, float] = field(default_factory=dict)  # line -> weight
     reasons: list[str] = field(default_factory=list)
+    terms: dict[str, float] = field(default_factory=dict)  # distinctive terms it mentions
 
     def anchor(self, line: int, weight: float) -> None:
         self.anchors[line] = max(self.anchors.get(line, 0.0), weight)
@@ -486,6 +620,9 @@ def rank_files(
     names: TestNames,
     issue_names: Sequence[str],
     definitions: Sequence[tuple[str, int, str]],
+    counts: dict[str, dict[str, int]] | None = None,
+    term_weights: dict[str, float] | None = None,
+    quoted: dict[str, dict[str, int]] | None = None,
     limit: int = MAX_CONTEXT_FILES,
 ) -> list[Candidate]:
     """The files to show the model, best first, each with the lines to centre windows on.
@@ -493,7 +630,10 @@ def rank_files(
     Weights, highest first: a frame of the project's own code in the failing traceback (deeper
     frames weigh more), a file the issue names, a file that defines a name the test imports, a
     file that defines a name in the issue's code, a module the test imports, a file that
-    defines an attribute the test uses.
+    defines an attribute the test uses. Next to these, the files that mention the issue's
+    distinctive terms most (``counts``, see `symbol_scores`) get up to `SYMBOL_POINTS`, so code
+    that the traceback and the imports never reach (a registry of template tests, say) can rank
+    first too.
     """
     known = set(tracked)
     sources = [p for p in tracked if path_problem(p, known) is None]
@@ -519,25 +659,31 @@ def rank_files(
     imported = set(names.imported)
     from_issue = set(issue_names)
     attributes = set(names.attributes)
+    counted: dict[tuple[str, str], set[str]] = {}  # (path, kind) -> names already scored
+    caps = {"imported": 99, "issue": 2, "attribute": 2}
     for path, line, text in definitions:
         c = get(path)
         if c is None:
             continue
         match = re.search(r"(?:def|class)\s+([A-Za-z_]\w*)|^\s*([A-Za-z_]\w*)", text)
         name = (match.group(1) or match.group(2)) if match else ""
-        weight = 0.0
-        why = ""
-        if name in imported:
-            weight, why = 20.0, "defines what the test imports"
+        if name in imported:  # the issue naming it too sets it apart from incidental API
+            weight = 20.0 if name in from_issue or name in (term_weights or {}) else 8.0
+            kind, why = "imported", "defines what the test imports"
         elif name in from_issue:
-            weight, why = 10.0, "defines a name in the issue"
+            kind, weight, why = "issue", 10.0, "defines a name in the issue"
         elif name in attributes:
-            weight, why = 4.0, "defines what the test calls"
-        if weight:
-            c.score += weight
-            c.anchor(line, weight)
-            if why not in c.reasons:
-                c.reasons.append(why)
+            kind, weight, why = "attribute", 4.0, "defines what the test calls"
+        else:
+            continue
+        c.anchor(line, weight)
+        seen = counted.setdefault((path, kind), set())
+        if name in seen or len(seen) >= caps[kind]:  # each name once; a few per kind and file
+            continue
+        seen.add(name)
+        c.score += weight
+        if why not in c.reasons:
+            c.reasons.append(why)
     for dotted in names.imported_modules:
         for path in module_files(dotted, sources):
             if (c := get(path)) is not None:
@@ -550,8 +696,22 @@ def rank_files(
                 c.score += 6.0 if not path.endswith("__init__.py") else 2.0
                 if "imported by the test" not in c.reasons:
                     c.reasons.append("imported by the test")
+    scores, weights = symbol_scores(counts or {}, sources, term_weights, quoted)
+    best = max(scores.values(), default=0.0)
+    for path, score in scores.items():
+        if best <= 0 or (c := get(path)) is None:
+            continue
+        c.score += SYMBOL_POINTS * score / best
+        c.terms = {t: w for t, w in weights.items() if (counts or {}).get(t, {}).get(path)}
+        if "mentions the issue's names" not in c.reasons:
+            c.reasons.append("mentions the issue's names")
     ranked = sorted(found.values(), key=lambda c: (-c.score, len(c.path), c.path))
-    return [c for c in ranked if c.score > 0][:limit]
+    top = ranked[0].score if ranked else 0.0
+    strong = ("traceback", "named in the issue")
+    return [  # a file far behind the best one is noise; it would only take the best one's room
+        c for c in ranked
+        if c.score > 0 and (c.score >= 0.15 * top or any(r in c.reasons for r in strong))
+    ][:limit]
 
 
 # -- showing code: whole files, or windows around the anchors ------------------------------------
@@ -831,6 +991,7 @@ class EditOutcome:
     problems: list[str] = field(default_factory=list)
     lines_changed: int = 0
     hints: list[str] = field(default_factory=list)  # for the model: the lines it probably meant
+    missed: list[tuple[str, int | None]] = field(default_factory=list)  # (path, closest line)
 
     @property
     def ok(self) -> bool:
@@ -911,15 +1072,22 @@ def _reindent(text: str, shift: int) -> str:
 
 
 def closest_lines(content: str, old: str, *, cutoff: float = 0.6) -> str | None:
-    """The run of lines in ``content`` most like ``old`` (same number of lines), when it is at
-    least ``cutoff`` similar: what the model probably meant to copy."""
+    """The run of lines in ``content`` most like ``old``, or None (see `closest_match`)."""
+    near = closest_match(content, old, cutoff=cutoff)
+    return near[1] if near else None
+
+
+def closest_match(content: str, old: str, *, cutoff: float = 0.6) -> tuple[int, str] | None:
+    """``(first line, text)`` of the run of lines in ``content`` most like ``old`` (same number
+    of lines), when it is at least ``cutoff`` similar: what the model probably meant to copy."""
     wanted = old.rstrip("\n").split("\n")
     lines = content.split("\n")
     size = len(wanted)
     if not wanted or size > 60 or size > len(lines):
         return None
     target = "\n".join(wanted)
-    best, best_ratio = None, cutoff
+    best: tuple[int, str] | None = None
+    best_ratio = cutoff
     matcher = difflib.SequenceMatcher(autojunk=False)
     matcher.set_seq2(target)
     for i in range(len(lines) - size + 1):
@@ -929,7 +1097,7 @@ def closest_lines(content: str, old: str, *, cutoff: float = 0.6) -> str | None:
             continue
         ratio = matcher.ratio()
         if ratio > best_ratio:
-            best, best_ratio = window, ratio
+            best, best_ratio = (i + 1, window), ratio
     return best
 
 
@@ -1019,11 +1187,12 @@ def apply_edits(
                     f"edit {number}: the SEARCH block for {path} does not occur in the file; "
                     "copy the lines exactly as shown, with their indentation"
                 )
-                near = closest_lines(padded, old)
+                near = closest_match(padded, old)
+                outcome.missed.append((path, near[0] if near else None))
                 if near is not None:
                     outcome.hints.append(
                         f"For edit {number}, the closest lines in {path} are these; a SEARCH "
-                        f"block must repeat them character for character:\n{near}"
+                        f"block must repeat them character for character:\n{near[1]}"
                     )
             else:
                 outcome.problems.append(
@@ -1106,10 +1275,25 @@ unique in the file>
 Repeat FILE and the SEARCH/REPLACE block for every place you change. Each SEARCH block must
 match the file exactly once. Send exactly one edit for each place: never alternatives.
 
-Only in your first answer, instead of edits, you may ask to see more code, with up to
-{MAX_EXTRA_FILES} lines like:
+Once per fix, instead of edits, you may ask to see more code (any file in the list of source
+files, also one you have not been shown), with up to {MAX_EXTRA_FILES} lines like:
 NEED: <path from the list of source files> <optional names of functions or classes in it>
 """
+
+
+FORMAT_REMINDER = f"""\
+The format, and the limits: at most {MAX_EDITS} edits and {MAX_CHANGED_LINES} changed lines in all.
+Make the smallest change that fixes the root cause: no refactoring, no reformatting, no
+unrelated edits, one edit for each place.
+
+SUMMARY: <one line>
+EXPLANATION: <two to five sentences>
+FILE: <path exactly as listed>
+<<<<<<< SEARCH
+<lines copied exactly from the file as shown>
+=======
+<the lines that replace them>
+>>>>>>> REPLACE"""
 
 
 def _data(kind: str, text: str, **attrs: str) -> str:
@@ -1247,6 +1431,7 @@ class _Context:
     sources: list[str]
     files: dict[str, str]  # path -> original text, every file read so far
     shown: list[ShownFile]
+    seen: set[str] = field(default_factory=set)  # every file the model has been shown
 
 
 @dataclass
@@ -1276,6 +1461,7 @@ class _FixRun:
     test_code: str = ""
     suite_before: SuiteRun | None = None
     brief: bool = False  # ask without the model's reasoning (after an answer was cut off)
+    term_weights: dict[str, float] = field(default_factory=dict)  # distinctive terms, weighted
 
     async def go(self) -> None:
         result, rep = self.result, self.assessment.reproduction
@@ -1316,9 +1502,12 @@ class _FixRun:
         )
         await self.say("Listing the repository and finding the code the test uses")
         names = test_names(rep.repro_test_code)
-        wanted = [*names.imported, *issue_code_names(thread), *names.attributes]
+        terms = distinctive_terms(thread, rep.repro_test_code)
+        strong = [term for term, weight in terms.items() if weight >= 2]
+        wanted = [*names.imported, *strong, *names.attributes]
+        templated = [term for term, weight in terms.items() if weight >= 3]
         survey = parse_survey(await sb.run(
-            self.base_image, survey_script(wanted), workdir=REPO_DIR,
+            self.base_image, survey_script(wanted, terms, templated), workdir=REPO_DIR,
             timeout_s=SURVEY_TIMEOUT_S, network=False,
         ))
         if survey.failed or not survey.files:
@@ -1357,8 +1546,10 @@ class _FixRun:
         ranked = rank_files(
             tracked=survey.files, frames=frames,
             issue_files=issue_named_files(f"{thread}\n{self.assessment.root_cause}", tracked),
-            names=names, issue_names=issue_code_names(thread), definitions=survey.definitions,
+            names=names, issue_names=strong, definitions=survey.definitions,
+            counts=survey.counts, term_weights=terms, quoted=survey.quoted,
         )
+        _, self.term_weights = symbol_scores(survey.counts, sources, terms, survey.quoted)
         if not ranked:
             _conclude(result, FixStatus.NOT_FIXED, "no source file of the project could be tied "
                       "to the failure (no frame in the traceback, no file named in the issue, no "
@@ -1371,7 +1562,10 @@ class _FixRun:
             text = files.get(candidate.path)
             if text is None:
                 continue
-            anchors = sorted(candidate.anchors, key=lambda line: -candidate.anchors[line])
+            weights = dict(candidate.anchors)
+            for line, weight in term_anchors(text, candidate.terms).items():
+                weights[line] = max(weights.get(line, 0.0), weight)
+            anchors = sorted(weights, key=lambda line: -weights[line])
             item = show_file(candidate.path, text, anchors, min(room, MAX_FILE_SHARE_BYTES))
             if item is not None:
                 shown.append(item)
@@ -1382,7 +1576,8 @@ class _FixRun:
         result.context_files = [s.path for s in shown]
         await self.say("Showing the model " + ", ".join(
             f"{s.path} ({'whole' if s.whole else 'windows'})" for s in shown))
-        context = _Context(tracked=tracked, sources=sources, files=files, shown=shown)
+        context = _Context(tracked=tracked, sources=sources, files=files, shown=shown,
+                           seen={item.path for item in shown})
         prompt = first_prompt(
             issue=issue, root_cause=self.assessment.root_cause, test_path=self.test_path,
             test_code=self.test_code, branch=branch, sha=sha, before=before, sources=sources,
@@ -1493,7 +1688,8 @@ class _FixRun:
             extra_cost = 0.0
             proposal = parse_proposal(text)
             proposal.cut_off = cut_off
-            if proposal.needs and not proposal.edits and not proposal.gave_up and may_ask:
+            asks = proposal.needs and not proposal.edits and not proposal.gave_up
+            if asks and may_ask:  # once per fix, at any point: the code it asked for
                 may_ask = False
                 extra_cost = cost  # the next answer's attempt carries this call's cost
                 await self.say("The model asked for more code: " + ", ".join(
@@ -1501,11 +1697,16 @@ class _FixRun:
                 messages.append({"role": "user", "content": await self._more_code(
                     context, proposal.needs[:MAX_EXTRA_FILES])})
                 continue
-            may_ask = False
             attempt = FixAttempt(number=number, outcome="no_edits", summary=proposal.summary,
                                  explanation=proposal.explanation, edits=proposal.edits,
-                                 cost_usd=round(cost, 6))
+                                 cost_usd=round(cost, 6), answer=(text or "")[:1_500])
             result.attempts.append(attempt)
+            if asks:  # a second request: an attempt without edits, but it gets the code
+                attempt.reason = "asked for more code again; the one request per fix was used"
+                await self.say(f"Attempt {number}: no_edits ({attempt.reason})")
+                messages.append({"role": "user", "content": await self._more_code(
+                    context, proposal.needs[:MAX_EXTRA_FILES]) + "\n\n" + FORMAT_REMINDER})
+                continue
             if proposal.gave_up and not proposal.edits:
                 attempt.outcome, attempt.reason = "gave_up", proposal.gave_up
                 _conclude(result, FixStatus.NOT_FIXED,
@@ -1553,6 +1754,7 @@ class _FixRun:
                 continue
             room -= len(item.text)
             blocks.append(_data("file", item.text, path=item.path, lines=item.lines))
+            context.seen.add(path)
             if path not in self.result.context_files:
                 self.result.context_files.append(path)
         parts = ["Here is the code you asked for. Now answer with your edits in the required "
@@ -1572,11 +1774,11 @@ class _FixRun:
             if proposal.cut_off:
                 attempt.reason = ("the answer ran out of tokens before any edit (the model's "
                                   "reasoning used them up)")
-                return ("Your answer was cut off before it gave any edit. Answer now, briefly: "
-                        "SUMMARY, EXPLANATION, then FILE and SEARCH/REPLACE blocks.")
+                return ("Your answer was cut off before it gave any edit. Answer now, briefly.\n\n"
+                        + FORMAT_REMINDER)
             attempt.reason = "; ".join(proposal.problems) or "no edit block in the answer"
-            return ("Your answer held no usable edit (" + attempt.reason + "). Answer in the "
-                    "required format: SUMMARY, EXPLANATION, then FILE and SEARCH/REPLACE blocks.")
+            return ("Your answer held no usable edit (" + attempt.reason + ").\n\n"
+                    + FORMAT_REMINDER)
         paths = [normalize_path(e.path) for e in proposal.edits]
         unread = [p for p in dict.fromkeys(paths)
                   if p not in context.files and path_problem(p, context.tracked) is None]
@@ -1590,10 +1792,11 @@ class _FixRun:
             hints = "".join(
                 "\n\n" + _data("hint", truncate(h, 2_000)) for h in edited.hints[:3]
             )
+            files = await self._guessed_files(context, proposal, edited)
             return ("Your edits were rejected and nothing was run:\n"
-                    + "\n".join(f"- {p}" for p in edited.problems) + hints
+                    + "\n".join(f"- {p}" for p in edited.problems) + hints + files
                     + "\n\nThe files are unchanged. Send a corrected, complete set of edits "
-                    "against the original code shown above.")
+                    "against the original code.\n\n" + FORMAT_REMINDER)
 
         await self.say(f"Applying {len(edited.files)} file(s), {edited.lines_changed} changed "
                        "line(s), in the sandbox")
@@ -1674,6 +1877,47 @@ class _FixRun:
                     "breaking these tests.")
         attempt.outcome = "verified"
         return ""
+
+    async def _guessed_files(
+        self, context: _Context, proposal: Proposal, edited: EditOutcome
+    ) -> str:
+        """The files the model edited without having seen them, or where its SEARCH block was not
+        found: shown now (windows around where it aimed), so that it can copy lines exactly."""
+        aims: dict[str, list[int]] = {}
+        for path, line in edited.missed:
+            aims.setdefault(path, []).extend([line] if line else [])
+        for edit in proposal.edits:
+            path = normalize_path(edit.path)
+            if path not in context.seen:
+                aims.setdefault(path, [])
+        blocks: list[str] = []
+        room = MAX_EXTRA_BYTES
+        for path, lines in list(aims.items())[:MAX_EXTRA_FILES]:
+            content = context.files.get(path)
+            if content is None or path_problem(path, context.tracked) is not None:
+                continue
+            olds = " ".join(e.old for e in proposal.edits if normalize_path(e.path) == path)
+            weights = {line: 50.0 for line in lines}
+            for line in symbol_lines(content, re.findall(r"(?:def|class)\s+(\w+)", olds)):
+                weights.setdefault(line, 20.0)
+            for line, weight in term_anchors(content, self.term_weights).items():
+                weights.setdefault(line, weight)
+            anchors = sorted(weights, key=lambda n: -weights[n])
+            item = show_file(path, content, anchors, min(room, MAX_FILE_SHARE_BYTES))
+            if item is None:
+                continue
+            room -= len(item.text)
+            blocks.append(_data("file", item.text, path=item.path, lines=item.lines))
+            context.seen.add(path)
+            if path not in self.result.context_files:
+                self.result.context_files.append(path)
+        if not blocks:
+            return ""
+        await self.say("Showing the model the file(s) it aimed at: " + ", ".join(
+            p for p in aims if p in context.seen)[:300])
+        return ("\n\nYou edited code you had not been shown, or copied lines that are not in "
+                "the file. Here it is as it really is; copy SEARCH lines from it exactly:\n\n"
+                + "\n\n".join(blocks))
 
     async def _suite(self, image: str) -> SuiteRun:
         """The project's suite in a fork of ``image``, without network."""

@@ -355,6 +355,7 @@ def test_files_are_ranked_traceback_first_then_issue_then_definitions() -> None:
         definitions=[("src/pkg/helpers.py", 30, "def nested_expr(opener):"),
                      ("src/pkg/core.py", 400, "    def ignore(self, other):"),
                      ("tests/test_core.py", 3, "def nested_expr():")],
+        term_weights={"nested_expr": 1.0},  # the issue names it too: not incidental API
     )
     paths = [c.path for c in ranked]
     assert paths[:2] == ["src/pkg/util.py", "src/pkg/other.py"]
@@ -646,7 +647,7 @@ async def test_a_good_first_answer_is_verified() -> None:
     assert (result.suite_before.passed, result.suite_after.passed) == (120, 121)
     assert result.regression_test_path == "tests/test_issue_42.py"
     assert result.repro_test_path == "tests/test_issue_42.py"  # verified where the PR puts it
-    assert result.context_files == ["widgets/core.py", "widgets/__init__.py"]  # best first
+    assert result.context_files == ["widgets/core.py"]  # __init__.py is far behind: left out
     assert [a.outcome for a in result.attempts] == ["verified"]
     assert result.usage.llm_calls == 1 and result.usage.cost_usd == pytest.approx(0.01)
     assert result.usage.sandbox_runs == len(sandbox.calls) and result.usage.wall_seconds >= 0
@@ -957,3 +958,179 @@ def test_fix_mode_gives_a_long_reasoning_answer_time_to_arrive() -> None:
     client = LLM(Settings(nebius_api_key="k"), timeout_s=fm.FIX_REQUEST_TIMEOUT_S)._get_client()
     assert client.timeout == fm.FIX_REQUEST_TIMEOUT_S > 180
     assert LLM(Settings(nebius_api_key="k"))._get_client().timeout == 180.0
+
+
+# -- symbol-based localization --------------------------------------------------------------
+
+ISSUE_2244 = (
+    "ChainableUndefined causes `is escaped` test to pass for `undefined` child elements\n"
+    "When using `ChainableUndefined` the `is escaped` test incorrectly passes.\n"
+    "```jinja\n{{ parent.child | safe if parent.child is escaped }}\n```\n"
+    "We render with a FileSystemLoader and the nhs_frontend package."
+)
+TEST_2244 = (
+    "from jinja2 import Environment, ChainableUndefined\n\n"
+    "def test_it():\n    template_string = '{{ x if x is mapping else y }}'\n"
+    "    env = Environment(undefined=ChainableUndefined)\n"
+    "    assert env.from_string(template_string).render() == ''\n"
+)
+
+
+def test_distinctive_terms_come_from_templates_code_spans_names_and_quotes() -> None:
+    terms = fm.distinctive_terms(ISSUE_2244, TEST_2244)
+    assert terms["escaped"] == terms["safe"] == terms["mapping"] == 3.0  # after is / |
+    assert terms["undefined"] == 2.0 and terms["ChainableUndefined"] == 2.0
+    assert terms["FileSystemLoader"] == 2.0 and terms["nhs_frontend"] == 2.0
+    assert "template_string" not in terms and "env" not in terms  # the test's own names
+    assert not {"is", "if", "else", "When", "using", "test"} & set(terms)
+    assert list(terms)[:4] == ["safe", "escaped", "mapping", "undefined"] or \
+        list(terms)[0] in ("safe", "escaped")
+    quoted = fm.distinctive_terms("It should be 'escaped' here", "")
+    assert quoted == {"escaped": 1.0}
+
+
+def test_symbol_scores_favour_rare_terms_breadth_and_registries() -> None:
+    sources = [f"pkg/m{i}.py" for i in range(8)]
+    counts = {
+        "escaped": {"pkg/m0.py": 2, "pkg/m1.py": 1},
+        "mapping": {"pkg/m0.py": 2},
+        "undefined": {p: 40 for p in sources[1:7]},  # everywhere: worth little
+        "elsewhere": {"tests/test_x.py": 9},  # only in tests: not counted
+    }
+    scores, weights = fm.symbol_scores(counts, sources, {"escaped": 3.0, "mapping": 3.0},
+                                       quoted={"escaped": {"pkg/m0.py": 1}})
+    assert max(scores, key=scores.get) == "pkg/m0.py"
+    assert weights["escaped"] > weights["undefined"] and "elsewhere" not in weights
+    plain, _ = fm.symbol_scores(counts, sources, {"escaped": 3.0, "mapping": 3.0})
+    assert scores["pkg/m0.py"] > plain["pkg/m0.py"]  # the registry bonus
+    assert scores["pkg/m1.py"] < scores["pkg/m0.py"] / 2
+
+
+def test_a_template_registry_and_the_undefined_class_rank_above_incidental_api() -> None:
+    """The shape of pallets/jinja#2244: the test imports Environment and ChainableUndefined, the
+    issue is about `is escaped`. tests.py registers "escaped"; runtime.py defines the class."""
+    sources = ["src/jinja2/tests.py", "src/jinja2/runtime.py", "src/jinja2/environment.py",
+               "src/jinja2/filters.py", "src/jinja2/utils.py", "src/jinja2/compiler.py",
+               "src/jinja2/nodes.py", "src/jinja2/ext.py", "tests/test_api.py"]
+    terms = fm.distinctive_terms(ISSUE_2244, TEST_2244)
+    j = "src/jinja2/"
+    counts = {  # the real counts at 5ef70112 (git grep -c -w), for the files listed
+        "escaped": {j + "filters.py": 2, j + "tests.py": 2, j + "utils.py": 1},
+        "safe": {j + "compiler.py": 1, j + "ext.py": 1, j + "filters.py": 6, j + "nodes.py": 3,
+                 j + "runtime.py": 3, j + "utils.py": 4},
+        "mapping": {j + "environment.py": 1, j + "filters.py": 4, j + "runtime.py": 2,
+                    j + "tests.py": 2},
+        "undefined": {j + "compiler.py": 10, j + "environment.py": 13, j + "ext.py": 1,
+                      j + "filters.py": 11, j + "nodes.py": 1, j + "runtime.py": 24,
+                      j + "tests.py": 2, j + "utils.py": 2},
+        "ChainableUndefined": {j + "filters.py": 1, j + "runtime.py": 4},
+    }
+    quoted = {"escaped": {j + "tests.py": 1}, "mapping": {j + "tests.py": 1},
+              "safe": {j + "filters.py": 1}}
+    ranked = fm.rank_files(
+        tracked=sources, frames=[], issue_files=[], names=fm.test_names(TEST_2244),
+        issue_names=[t for t, w in terms.items() if w >= 2],
+        definitions=[("src/jinja2/environment.py", 300, "class Environment:"),
+                     ("src/jinja2/runtime.py", 970, "class ChainableUndefined(Undefined):")],
+        counts=counts, term_weights=terms, quoted=quoted,
+    )
+    top_two = {c.path for c in ranked[:2]}
+    assert top_two == {"src/jinja2/tests.py", "src/jinja2/runtime.py"}
+    tests_py = next(c for c in ranked if c.path == "src/jinja2/tests.py")
+    assert "escaped" in tests_py.terms and "mentions the issue's names" in tests_py.reasons
+
+
+def test_a_module_named_tests_inside_the_package_is_source() -> None:
+    tracked = {"src/jinja2/tests.py", "src/jinja2/runtime.py", "tests/test_api.py"}
+    assert fm.path_problem("src/jinja2/tests.py", tracked) is None
+    assert fm.is_test_path("src/jinja2/tests.py") is False
+    assert fm.source_files(sorted(tracked)) == ["src/jinja2/runtime.py", "src/jinja2/tests.py"]
+    files = {"src/jinja2/tests.py": 'def test_escaped(value):\n    return hasattr(value, "x")\n'}
+    out = fm.apply_edits([FileEdit(path="src/jinja2/tests.py",
+                                   old='    return hasattr(value, "x")\n',
+                                   new='    return hasattr(value, "y")\n')], files, tracked)
+    assert out.ok
+    assert fm.regression_test_path(sorted(tracked), 2244) == "tests/test_issue_2244.py"
+
+
+def test_the_survey_counts_terms_and_their_quoted_uses() -> None:
+    script = fm.survey_script([], ["escaped", "bad name"], ["escaped"])
+    assert "grep -c -w -I -F -e escaped -- '*.py'" in script
+    assert "__CNT__=escaped" in script and "bad name" not in script
+    assert "grep -c -I -E '[\"'\"'\"'\"']escaped[\"'\"'\"'\"']'" in script or \
+        "__QCNT__=escaped" in script
+    out = ExecResult(exit_code=0, stdout=(
+        "__LS__=src/jinja2/tests.py\n__CNT__=escaped\tsrc/jinja2/tests.py:2\n"
+        "__CNT__=escaped\tsrc/a:b.py:1\n__QCNT__=escaped\tsrc/jinja2/tests.py:1\n"
+        "__CNT__=bad\tgarbage\n"
+    ))
+    survey = fm.parse_survey(out)
+    assert survey.counts == {"escaped": {"src/jinja2/tests.py": 2, "src/a:b.py": 1}}
+    assert survey.quoted == {"escaped": {"src/jinja2/tests.py": 1}}
+
+
+def test_term_anchors_point_at_the_rarest_terms_first() -> None:
+    content = "a = 1\nTESTS = {'escaped': test_escaped}\nb = undefined\nescaped = 2\n"
+    anchors = fm.term_anchors(content, {"escaped": 3.0, "undefined": 1.0})
+    assert list(anchors)[:2] == [2, 4] and anchors[3] < anchors[2]
+
+
+# -- what the model is shown after a miss, and the format reminder ---------------------------
+
+EXTRA = "def helper(x):\n    return x + 1\n\n\ndef other():\n    return 2\n"
+
+
+async def test_a_file_the_model_edited_without_seeing_it_is_shown_next_time() -> None:
+    world = World(files={**FILES, "widgets/extra.py": EXTRA})
+    guess = GOOD.replace("FILE: widgets/core.py", "FILE: widgets/extra.py").replace(
+        "    return text.split(',')[:-1]\n=", "    return x - 1\n=")
+    result, _, llm = await run_fix([guess, GOOD], world)
+    assert result.status is FixStatus.VERIFIED
+    assert result.attempts[0].outcome == "invalid_edits"
+    feedback = llm.prompts[1][-1]["content"]
+    assert '<data kind="file" path="widgets/extra.py" lines="whole">' in feedback
+    assert "as it really is" in feedback and "    return x + 1" in feedback
+    assert "widgets/extra.py" in result.context_files
+
+
+async def test_a_missed_block_in_a_big_file_shows_the_lines_it_aimed_at() -> None:
+    body = "".join(f"def f{i}(x):\n    y = x + {i}\n    return y\n\n\n" for i in range(900))
+    world = World(files={**FILES, "widgets/big.py": body})
+    guess = (
+        "SUMMARY: x\nFILE: widgets/big.py\n<<<<<<< SEARCH\ndef f700(x):\n    y = x + 701\n"
+        "=======\ndef f700(x):\n    y = x + 0\n>>>>>>> REPLACE\n"
+    )
+    result, _, llm = await run_fix([guess, GOOD], world)
+    feedback = llm.prompts[1][-1]["content"]
+    shown = feedback.split('<data kind="file" path="widgets/big.py"')[1]
+    assert "def f700(x):" in shown and "    y = x + 700" in shown
+    assert "not shown" in shown  # windows, not the whole file
+    assert result.status is FixStatus.VERIFIED
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "".join(f"FILE: widgets/core.py\n<<<<<<< SEARCH\nx{i}\n=======\ny\n>>>>>>> REPLACE\n"
+                for i in range(fm.MAX_EDITS + 5)),
+        "I think the bug is in parse, it should keep the last item.",
+    ],
+    ids=["too-many-edits", "no-edit-block"],
+)
+async def test_too_many_edits_or_none_get_the_format_the_cap_and_the_smallest_change(
+    answer: str,
+) -> None:
+    result, _, llm = await run_fix([answer, GOOD])
+    assert result.status is FixStatus.VERIFIED
+    feedback = llm.prompts[1][-1]["content"]
+    assert f"at most {fm.MAX_EDITS} edits and {fm.MAX_CHANGED_LINES} changed lines" in feedback
+    assert "the smallest change that fixes the root cause" in feedback
+    assert "<<<<<<< SEARCH" in feedback and ">>>>>>> REPLACE" in feedback
+    assert result.attempts[0].answer.startswith(answer[:40])
+
+
+async def test_the_one_request_for_code_may_come_after_a_failed_attempt() -> None:
+    world = World(files={**FILES, "widgets/extra.py": EXTRA})
+    result, _, llm = await run_fix([WRONG, "NEED: widgets/extra.py helper", GOOD], world)
+    assert [a.outcome for a in result.attempts] == ["repro_still_fails", "verified"]
+    assert '<data kind="file" path="widgets/extra.py"' in llm.prompts[2][-1]["content"]

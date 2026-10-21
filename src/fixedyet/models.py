@@ -235,6 +235,7 @@ class FixAttempt(BaseModel):
     suite_after: SuiteRun | None = None
     newly_failing: list[str] = Field(default_factory=list)
     cost_usd: float = 0.0  # model cost of this answer
+    answer: str = ""  # the start of the model's answer, for reading what went wrong
 
 
 class FixResult(BaseModel):
