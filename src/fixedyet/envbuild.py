@@ -10,10 +10,14 @@ Shell scripts are built by small pure functions so tests can assert on the exact
 
 from __future__ import annotations
 
+import ast
+import base64
+import binascii
 import inspect
 import logging
 import re
 import shlex
+import sys
 import time
 import urllib.parse
 from collections.abc import Iterable, Sequence
@@ -883,3 +887,463 @@ async def run_test_on_side(
         result = result.model_copy(update={"stdout": setup_log + runs_out})
     return build_side_run(result, ref=label, image=image, runs=runs)
 
+
+# --------------------------------------------------------------------------- bisect
+
+MAX_BISECT_STEPS = 12
+"""Bisection steps a search may need: up to 2**12 - 1 commits between the two sides."""
+BISECT_SKIP_ALLOWANCE = 3  # extra test runs for steps that cannot be tested (`git bisect skip`)
+BISECT_STEP_TIMEOUT_S = 120
+BISECT_TIMEOUT_S = 600
+BISECT_PREFETCH_TIMEOUT_S = 600
+_BISECT_STEP_PATH = "/tmp/ir_bisect_step.sh"  # noqa: S108 - inside the sandbox
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+_BISECT_MARK = {
+    name: re.compile(rf"^__{name}__=(.*)$", re.MULTILINE)
+    for name in ("BISECT_RANGE", "MISSING", "PREFETCHED", "PREFETCH_FAILED", "BISECT_FAILED",
+                 "BISECT_RC", "BISECT_FIRST", "BISECT_CANDIDATE", "BISECT_STEP", "BISECT_MERGE",
+                 "BISECT_PARENT", "BISECT_SUBJECT_B64", "BISECT_TAGS_B64", "VERIFY_FIRST",
+                 "VERIFY_PARENT", "SETUP_FAILED", "OTHER_SIDE_B64")
+}
+_RELEASE_TAG_RE = re.compile(r"^(?:[A-Za-z][\w.-]*?[-_/])?v?(\d+(?:\.\d+){0,3})$")
+
+
+def _check_sha(commit: str | None) -> str:
+    if not commit or not _SHA40_RE.match(commit):
+        raise EnvBuildError(f"invalid commit {commit!r}; a bisect needs full commit hashes")
+    return commit
+
+
+def bisect_prefetch_script(old: str, new: str, max_steps: int = MAX_BISECT_STEPS) -> str:
+    """With network: make sure both commits are present, count the commits between them, and
+    fetch every file version the bisection could check out.
+
+    The baseline clone is blobless (`--filter=blob:none`): a checkout fetches the files it lacks
+    from GitHub, which an offline sandbox cannot do. `git rev-list --objects --missing=print
+    --no-walk` over every commit in ``old..new``, their parents (git shows the answer as a diff,
+    and the check runs the test at its parent) and the merge bases (which a bisection of two
+    branches tests first) lists the files of each of those trees that are not here yet, and one
+    `git fetch --stdin` of exactly those makes the range complete. Each tree is listed whole: a
+    commit on main can hold a file version that only an older commit of the release line had
+    (pallets/werkzeug between 3.1.9 and main: 900 files, where ``old..new`` alone found 712 and
+    the bisection stopped at its first checkout). Nothing from the project runs in this step.
+    """
+    old, new = _check_sha(old), _check_sha(new)
+    limit = 2**max_steps - 1
+    prefix = _PREFIX_LINES
+    return "\n".join(
+        [
+            "set -u",
+            "export GIT_TERMINAL_PROMPT=0",
+            f"cd {REPO_DIR} || {{ echo __SETUP_FAILED__=cd; exit 20; }}",
+            f"for c in {old} {new}; do",
+            '  git cat-file -e "$c^{commit}" 2>/dev/null || git fetch --quiet origin "$c" '
+            "|| { echo __SETUP_FAILED__=fetch; exit 21; }",
+            "done",
+            # the commits a bisection judges: those after the reported commit, when main has it
+            f"if git merge-base --is-ancestor {old} {new}; then ancestry=--ancestry-path; "
+            "else ancestry=; fi",
+            f"count=$(git rev-list --count $ancestry {old}..{new}) "
+            "|| { echo __SETUP_FAILED__=range; exit 22; }",
+            'echo "__BISECT_RANGE__=$count"',
+            f'if [ "$count" -eq 0 ] || [ "$count" -gt {limit} ]; then exit 0; fi',
+            f"ir_missing() {{ {{ git rev-list --parents {old}..{new} | tr ' ' '\\n'; "
+            f"git merge-base --all {old} {new}; }} | sort -u "
+            "| git rev-list --objects --missing=print --no-walk --stdin 2>/dev/null "
+            "| sed -n 's/^?//p' | sort -u; }",
+            "ir_missing > /tmp/ir_missing",
+            'echo "__MISSING__=$(wc -l < /tmp/ir_missing)"',
+            "if [ -s /tmp/ir_missing ]; then",
+            "  git -c fetch.negotiationAlgorithm=noop fetch --quiet --no-tags "
+            "--no-write-fetch-head --filter=blob:none --stdin origin < /tmp/ir_missing "
+            "> /tmp/ir_prefetch.log 2>&1 "
+            f"|| {{ echo __PREFETCH_FAILED__=1; tail -n 20 /tmp/ir_prefetch.log | {prefix}; }}",
+            '  left=$(ir_missing | wc -l)',
+            '  if [ "$left" -gt 0 ]; then echo "__PREFETCH_FAILED__=$left"; exit 0; fi',
+            "fi",
+            "echo __PREFETCHED__=1",
+            "exit 0",
+            "",
+        ]
+    )
+
+
+def _pytest_once(path: str, timeout_s: int, log: str) -> list[str]:
+    """Shell lines: run the test once as the test user; ``rc`` is pytest's exit code, or
+    `NO_SUMMARY_EXIT_CODE` when pytest exited 1 without running anything."""
+    return [
+        f"ir_as_tester timeout -k 5 {timeout_s} python -m pytest -x -q -p no:cacheprovider "
+        f"{path} > {log} 2>&1",
+        "rc=$?",
+        f'if [ "$rc" -eq 1 ] && ! grep -qE "{PYTEST_SUMMARY_PATTERN}" {log}; '
+        f"then rc={NO_SUMMARY_EXIT_CODE}; fi",
+    ]
+
+
+def bisect_step_script(test_path: str, *, max_runs: int, step_timeout_s: int) -> str:
+    """The script `git bisect run` calls at each step: the reproduction test, once.
+
+    A failing test is the old state ("broken", exit 0), a passing one the new ("fixed", exit 1),
+    anything else cannot be judged and is skipped (125: the step's code does not import, its
+    conftest needs something else). After ``max_runs`` test runs it exits 128, which stops the
+    bisection. The project is not reinstalled at a step: the editable install of the fix side
+    imports whatever is checked out, and a step that needs more is skipped.
+
+    When the reported commit is an ancestor of the fix side (`bisect_script` writes it to
+    ``/tmp/ir_bisect_old`` then), a commit that does not descend from it counts as "broken"
+    without a run (recorded with the code -1): a regression that a release branch brought in
+    is absent from main's own older commits, whose passing test says nothing about a fix
+    (pallets/werkzeug#3312 otherwise ends at "start version 3.2.0", before 3.1.9 was merged).
+    """
+    path = shlex.quote(_check_test_path(test_path))
+    return "\n".join(
+        [
+            "#!/bin/bash",
+            TESTER_FUNCTIONS,
+            "head=$(git rev-parse HEAD)",
+            'if [ -s /tmp/ir_bisect_old ] && '
+            '! git merge-base --is-ancestor "$(cat /tmp/ir_bisect_old)" "$head"; then',
+            '  echo "$head -1" >> /tmp/ir_bisect_steps; exit 0',
+            "fi",
+            'n=$(( $(cat /tmp/ir_bisect_n 2>/dev/null || echo 0) + 1 ))',
+            'echo "$n" > /tmp/ir_bisect_n',
+            f'if [ "$n" -gt {int(max_runs)} ]; then exit 128; fi',
+            f'mkdir -p "$(dirname {path})" && cp {_TEST_FILE_STAGING} {path} '
+            '|| { echo "$head 24" >> /tmp/ir_bisect_steps; exit 125; }',
+            "ir_own",
+            *_pytest_once(path, step_timeout_s, "/tmp/ir_step.log"),
+            'echo "$head $rc" >> /tmp/ir_bisect_steps',
+            # a test that wrote into tracked files must not block the next checkout
+            "git reset --quiet --hard HEAD > /dev/null 2>&1",
+            'case "$rc" in 0) exit 1 ;; 1) exit 0 ;; *) exit 125 ;; esac',
+            "",
+        ]
+    )
+
+
+def imported_module_paths(test_code: str, limit: int = 6) -> list[str]:
+    """Git pathspecs for the project modules a test imports: ``from werkzeug.sansio.utils import
+    host_is_trusted`` gives ``**/werkzeug/sansio/utils.py`` (and the package form). The standard
+    library and pytest are left out. Pure: the test is parsed with `ast`, never run."""
+    try:
+        tree = ast.parse(test_code)
+    except (SyntaxError, ValueError):
+        return []
+    modules: list[str] = []
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names = [node.module, *(f"{node.module}.{a.name}" for a in node.names if a.name != "*")]
+        elif isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        for name in names:
+            top = name.split(".")[0]
+            if top in sys.stdlib_module_names or top in ("pytest", "_pytest") or name in modules:
+                continue
+            if re.fullmatch(r"[A-Za-z_][\w.]*", name):
+                modules.append(name)
+    specs: list[str] = []
+    for module in modules[:limit]:
+        path = module.replace(".", "/")
+        specs += [f":(glob)**/{path}.py", f":(glob)**/{path}/__init__.py"]
+    return specs
+
+
+def imported_functions(test_code: str, limit: int = 6) -> list[tuple[str, str]]:
+    """``(pathspec, name)`` for each name a test imports from a project module: ``from
+    werkzeug.sansio.utils import host_is_trusted`` gives ``("**/werkzeug/sansio/utils.py",
+    "host_is_trusted")``, for `git log -L :name:file`. Pure, like `imported_module_paths`."""
+    try:
+        tree = ast.parse(test_code)
+    except (SyntaxError, ValueError):
+        return []
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.module and not node.level):
+            continue
+        top = node.module.split(".")[0]
+        if top in sys.stdlib_module_names or top in ("pytest", "_pytest"):
+            continue
+        for alias in node.names:
+            pair = (f":(glob)**/{node.module.replace('.', '/')}.py", alias.name)
+            if re.fullmatch(r"[A-Za-z_]\w*", alias.name) and pair not in found:
+                found.append(pair)
+    return found[:limit]
+
+
+def bisect_script(
+    old: str, new: str, test_path: str, *, step_timeout_s: int = BISECT_STEP_TIMEOUT_S,
+    timeout_s: int = BISECT_TIMEOUT_S, module_paths: Sequence[str] = (),
+    functions: Sequence[tuple[str, str]] = (),
+) -> str:
+    """Without network: `git bisect run` the step script between ``old`` (the reported side's
+    commit, where the test fails) and ``new`` (the fix side's, where it passes), then check the
+    answer by running the test at the commit found and at its parent (the first parent that
+    descends from ``old``, for a merge).
+
+    When the answer is a merge, the passing code came in from its other side: the commits there
+    that changed the functions the test imports (``functions``, `git log -L`), then those that
+    changed ``module_paths`` (`imported_module_paths`, the modules it imports) are listed,
+    newest first, as candidates (pallets/werkzeug#3312: the merge of 3.1.9 into main, and on
+    main's side `use match to remove port`, the commit a maintainer named).
+
+    Markers on their own lines are the result; git's and pytest's text is prefixed with ``| ``
+    (a commit message can never start a line with a marker or with a bare hash: git indents it).
+    """
+    old, new = _check_sha(old), _check_sha(new)
+    path = shlex.quote(_check_test_path(test_path))
+    prefix = _PREFIX_LINES
+    specs = " ".join(shlex.quote(spec) for spec in module_paths) or "."
+    by_function = [
+        f'    for f in $(git ls-files -- {shlex.quote(spec)}); do git log --no-merges '
+        f'--format="%H %s" -L ":{name}:$f" "$parent..$p" 2>/dev/null '
+        "| grep -E '^[0-9a-f]{40} ' | cut -c1-200 >> /tmp/ir_other_side; done"
+        for spec, name in functions
+    ]
+    verify: list[str] = []
+    for which, ref in (("FIRST", '"$first"'), ("PARENT", '"$parent"')):
+        verify += [
+            f"  git checkout --quiet --force {ref} > /dev/null 2>&1 && "
+            f"mkdir -p \"$(dirname {path})\" && cp {_TEST_FILE_STAGING} {path} && ir_own",
+            *(f"  {line}" for line in _pytest_once(path, step_timeout_s, "/tmp/ir_verify.log")),
+            f'  echo "__VERIFY_{which}__=$rc"',
+        ]
+    return "\n".join(
+        [
+            "set -u",
+            "export GIT_TERMINAL_PROMPT=0",
+            TESTER_FUNCTIONS,
+            f"cd {REPO_DIR} || {{ echo __SETUP_FAILED__=cd; exit 20; }}",
+            f"chmod 755 {_BISECT_STEP_PATH}",
+            "rm -f /tmp/ir_bisect_n /tmp/ir_bisect_steps /tmp/ir_bisect_old /tmp/ir_other_side",
+            f"if git merge-base --is-ancestor {old} {new}; then echo {old} > /tmp/ir_bisect_old; "
+            "fi",
+            "git bisect reset > /dev/null 2>&1",
+            # the install may have touched tracked files; the sandbox is a throwaway fork
+            "git reset --quiet --hard HEAD > /dev/null 2>&1",
+            f"git bisect start --term-old=broken --term-new=fixed {new} {old} "
+            "> /tmp/ir_bisect.log 2>&1 "
+            f"|| {{ echo __BISECT_FAILED__=start; tail -n 20 /tmp/ir_bisect.log | {prefix}; "
+            "exit 0; }",
+            f"timeout -k 10 {int(timeout_s)} git bisect run {_BISECT_STEP_PATH} "
+            ">> /tmp/ir_bisect.log 2>&1",
+            'echo "__BISECT_RC__=$?"',
+            f"tail -c 6000 /tmp/ir_bisect.log | {prefix}",
+            # git's own record of the bisection; it says "first fixed commit" even when showing
+            # that commit fails
+            "git bisect log > /tmp/ir_bisect_record 2>/dev/null",
+            "first=$(sed -n 's/^# first fixed commit: \\[\\([0-9a-f]\\{40\\}\\)\\].*/\\1/p' "
+            "/tmp/ir_bisect_record | tail -n 1)",
+            "sed -n 's/^# possible first fixed commit: \\[\\([0-9a-f]\\{40\\}\\)\\].*/"
+            "__BISECT_CANDIDATE__=\\1/p' /tmp/ir_bisect_record | head -n 20",
+            "[ -f /tmp/ir_bisect_steps ] && awk '{ print \"__BISECT_STEP__=\" $1 \":\" $2 }' "
+            "/tmp/ir_bisect_steps",
+            "git bisect reset > /dev/null 2>&1",
+            'if [ -n "$first" ]; then',
+            '  echo "__BISECT_FIRST__=$first"',
+            '  if [ "$(git rev-list --parents -n 1 "$first" | wc -w)" -gt 2 ]; then '
+            "echo __BISECT_MERGE__=1; fi",
+            '  parent=$(git rev-parse "$first^1")',
+            '  for p in $(git rev-list --parents -n 1 "$first" | cut -d" " -f2-); do',
+            f'    if git merge-base --is-ancestor {old} "$p"; then parent=$p; break; fi',
+            "  done",
+            '  echo "__BISECT_PARENT__=$parent"',
+            '  echo "__BISECT_SUBJECT_B64__=$(git log -1 --format=%s "$first" | head -c 300 '
+            "| base64 | tr -d '\\n')\"",
+            '  echo "__BISECT_TAGS_B64__=$(git tag --contains "$first" 2>/dev/null '
+            "| head -n 400 | base64 | tr -d '\\n')\"",
+            *verify,
+            '  for p in $(git rev-list --parents -n 1 "$first" | cut -d" " -f3-); do',
+            '    [ "$p" = "$parent" ] && p=$(git rev-parse "$first^1")',
+            *by_function,
+            f'    git log --no-merges --format="%H %s" -n 5 "$parent..$p" -- {specs} '
+            "2>/dev/null | cut -c1-200 >> /tmp/ir_other_side",
+            "  done",
+            '  [ -s /tmp/ir_other_side ] && echo "__OTHER_SIDE_B64__=$(awk \'!seen[$1]++\' '
+            "/tmp/ir_other_side | head -n 5 | base64 | tr -d '\\n')\"",
+            "fi",
+            "exit 0",
+            "",
+        ]
+    )
+
+
+@dataclass
+class BisectResult:
+    """What a bisection found. ``status``: found (the test fails at the commit's first parent and
+    passes at the commit), unverified (git named a commit the check did not confirm), ambiguous
+    (skipped steps leave several candidates), not_found, too_many (more commits than
+    `MAX_BISECT_STEPS` can search), error."""
+
+    status: str
+    reason: str
+    commit: str | None = None
+    parent: str | None = None
+    merge: bool = False
+    subject: str = ""
+    candidates: list[str] = field(default_factory=list)
+    steps: list[tuple[str, int]] = field(default_factory=list)
+    range_count: int | None = None
+    tags: list[str] = field(default_factory=list)
+    log: str = ""
+    other_side: list[tuple[str, str]] = field(default_factory=list)  # (sha, subject), a merge's
+
+    @property
+    def release(self) -> str | None:
+        """The earliest final release tag that contains the commit (`git tag --contains`)."""
+        return earliest_release(self.tags)
+
+
+def earliest_release(tags: Iterable[str]) -> str | None:
+    """The lowest version among plain release tags (`3.1.10`, `v2.4.0`, `pkg-1.2`); pre-releases
+    (`3.2.0rc1`) and other tags are ignored."""
+    best: tuple[tuple[int, ...], str] | None = None
+    for tag in tags:
+        match = _RELEASE_TAG_RE.match(tag.strip())
+        if match:
+            key = tuple(int(part) for part in match.group(1).split("."))
+            if best is None or key < best[0]:
+                best = (key, tag.strip())
+    return best[1] if best else None
+
+
+def _marks(name: str, stdout: str) -> list[str]:
+    return [value.strip() for value in _BISECT_MARK[name].findall(stdout)]
+
+
+def _b64_text(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return base64.b64decode(value, validate=False).decode("utf-8", errors="replace")
+    except (binascii.Error, ValueError):
+        return ""
+
+
+def parse_bisect(result: ExecResult, range_count: int | None = None) -> BisectResult:
+    """`bisect_script`'s output as a `BisectResult`."""
+    out = result.stdout
+    log = clean_log("\n".join(re.findall(r"^\| ?.*$", out, re.MULTILINE)))[-LOG_EXCERPT_CHARS:]
+    steps: list[tuple[str, int]] = []
+    for value in _marks("BISECT_STEP", out):
+        sha, _, code = value.partition(":")
+        if _SHA40_RE.match(sha) and re.fullmatch(r"-?\d+", code):
+            steps.append((sha, int(code)))
+    runs = sum(1 for _, code in steps if code != -1)  # -1: not after the reported commit
+    base = BisectResult(status="not_found", reason="", steps=steps, range_count=range_count,
+                        log=log)
+    if failed := (_marks("SETUP_FAILED", out) or _marks("BISECT_FAILED", out)):
+        base.status, base.reason = "error", f"the bisection could not start ({failed[-1]})"
+        return base
+    if result.timed_out:
+        base.status, base.reason = "error", "the bisection ran out of time"
+        return base
+    first = next((v for v in reversed(_marks("BISECT_FIRST", out)) if _SHA40_RE.match(v)), None)
+    if first is None:
+        candidates = [c for c in _marks("BISECT_CANDIDATE", out) if _SHA40_RE.match(c)]
+        rc = _marks("BISECT_RC", out)
+        tested = runs
+        if candidates:
+            base.status, base.candidates = "ambiguous", candidates
+            base.reason = (f"steps that could not be tested leave {len(candidates)} candidate "
+                           "commits")
+        elif rc and rc[-1] in ("124", "137"):
+            base.status, base.reason = "error", f"the bisection ran out of time after {tested} " \
+                "test runs"
+        else:
+            base.reason = (f"git bisect named no commit after {tested} test runs (the test may "
+                           "behave differently between the two sides' environments)")
+        return base
+    base.commit = first
+    parents = [p for p in _marks("BISECT_PARENT", out) if _SHA40_RE.match(p)]
+    base.parent = parents[-1] if parents else None
+    base.merge = "1" in _marks("BISECT_MERGE", out)
+    subjects = _marks("BISECT_SUBJECT_B64", out)
+    base.subject = _b64_text(subjects[-1] if subjects else None).strip()[:200]
+    tags = _marks("BISECT_TAGS_B64", out)
+    base.tags = [t for t in _b64_text(tags[-1] if tags else None).split() if t][:400]
+    other = _marks("OTHER_SIDE_B64", out)
+    for line in _b64_text(other[-1] if other else None).splitlines():
+        sha, _, subject = line.partition(" ")
+        if _SHA40_RE.match(sha) and sha not in {c for c, _ in base.other_side}:
+            base.other_side.append((sha, subject.strip()[:160]))
+    at_first, at_parent = _marks("VERIFY_FIRST", out), _marks("VERIFY_PARENT", out)
+    if at_first[-1:] == ["0"] and at_parent[-1:] == ["1"]:
+        base.status = "found"
+        base.reason = (f"the reproduction test fails at {base.parent[:10] if base.parent else '?'}"
+                       f" and passes at {first[:10]} ({runs} test runs in the bisection)")
+    else:
+        base.status = "unverified"
+        base.reason = (f"git bisect named {first[:10]}, but rerunning the test there and at its "
+                       f"parent gave exit codes {at_first[-1:] or ['-']} and "
+                       f"{at_parent[-1:] or ['-']} instead of 0 and 1")
+    return base
+
+
+async def bisect_fix(
+    sb: Sandbox,
+    image: str,
+    *,
+    old: str,
+    new: str,
+    test_path: str,
+    test_code: str,
+    max_steps: int = MAX_BISECT_STEPS,
+    step_timeout_s: int = BISECT_STEP_TIMEOUT_S,
+    timeout_s: int = BISECT_TIMEOUT_S,
+    progress: ProgressCallback | None = None,
+) -> BisectResult:
+    """Find the first commit between ``old`` and ``new`` where the reproduction test passes.
+
+    ``image`` should be the fix side's prepared image (the newer code installed). Two sandbox
+    runs: `bisect_prefetch_script` with network, kept, then `bisect_script` from that image
+    without network. Never raises for what a repository can do; a broken sandbox
+    (`SandboxError`) propagates.
+    """
+    try:
+        script = bisect_prefetch_script(old, new, max_steps)
+        step = bisect_step_script(
+            test_path, max_runs=max_steps + BISECT_SKIP_ALLOWANCE, step_timeout_s=step_timeout_s
+        )
+        main = bisect_script(old, new, test_path, step_timeout_s=step_timeout_s,
+                             timeout_s=timeout_s, module_paths=imported_module_paths(test_code),
+                             functions=imported_functions(test_code))
+    except EnvBuildError as exc:
+        return BisectResult(status="error", reason=str(exc))
+    prefetch = await sb.run(
+        image, script, workdir=REPO_DIR, timeout_s=BISECT_PREFETCH_TIMEOUT_S, keep=True,
+        network=True,
+    )
+    counts = _marks("BISECT_RANGE", prefetch.stdout)
+    count = int(counts[-1]) if counts and counts[-1].isdigit() else None
+    if failed := _marks("SETUP_FAILED", prefetch.stdout):
+        return BisectResult(status="error", reason=f"the commits could not be fetched "
+                            f"({failed[-1]})", range_count=count)
+    if count == 0:
+        return BisectResult(status="not_found", range_count=0, reason="there are no commits "
+                            "between the two sides")
+    if count is not None and count > 2**max_steps - 1:
+        return BisectResult(status="too_many", range_count=count, reason=f"{count} commits lie "
+                            f"between the two sides, more than {max_steps} bisection steps can "
+                            "search")
+    if (count is None or "__PREFETCHED__=1" not in prefetch.stdout or prefetch.timed_out
+            or not prefetch.image or _marks("PREFETCH_FAILED", prefetch.stdout)):
+        return BisectResult(status="error", range_count=count,
+                            reason="the commits between the two sides could not be fetched")
+    await _emit_bisect(progress, f"Bisecting {count} commits between {old[:10]} and {new[:10]}")
+    result = await sb.run(
+        prefetch.image, main, files={_BISECT_STEP_PATH: step, _TEST_FILE_STAGING: test_code},
+        workdir=REPO_DIR, timeout_s=timeout_s + 2 * step_timeout_s + 120, network=False,
+    )
+    return parse_bisect(result, count)
+
+
+async def _emit_bisect(progress: ProgressCallback | None, message: str) -> None:
+    if progress is None:
+        return
+    try:
+        outcome = progress(ProgressEvent(stage="evidence", message=message))
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:  # a broken progress sink must never abort a run
+        logger.warning("progress callback raised", exc_info=True)

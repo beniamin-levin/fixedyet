@@ -29,6 +29,7 @@ from fixedyet.models import (
     SweBenchInstance,
     Verdict,
 )
+from fixedyet.report import render_markdown
 from fixedyet.verdict import RULES_VERSION
 
 GOOD_TEST = (
@@ -167,6 +168,7 @@ async def test_fixed_on_main(world) -> None:
     assert a.not_reproduced_reason is None
     kinds = [e.kind for e in a.evidence]
     assert {"upstream", "log"} <= set(kinds)
+    assert rep.fixing_commit_source == "pull_request"
     # "#17 same" names nothing of the issue: GitHub's search hit is not evidence
     assert not any(e.url and e.url.endswith("/issues/17") for e in a.evidence)
     assert a.model == world.settings.model
@@ -808,3 +810,94 @@ async def test_an_exception_the_thread_never_names_lowers_an_open_bug(world) -> 
     assert (a.verdict, a.confidence) == (Verdict.OPEN_BUG, Confidence.LOW)
     assert any("TypeError on both sides and the issue never names it" in line
                for line in a.confidence_basis)
+
+
+# -- bisecting for the fixing commit ---------------------------------------------------------------
+
+OLD_SHA, NEW_SHA, FIX_SHA = "a" * 40, "f" * 40, "b" * 40
+
+
+@pytest.fixture
+def bisects(world, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """No pull request names the fix; the sides know their commits; `bisect_fix` is scripted."""
+    from fixedyet import envbuild
+
+    world.github.fix = None
+    world.env.commits = {"reported": OLD_SHA, "fix": NEW_SHA}
+    calls: list[dict[str, Any]] = []
+    world.bisect_result = envbuild.BisectResult(
+        status="found", reason="the reproduction test fails at 9999999999 and passes at "
+        "bbbbbbbbbb (8 bisection steps)", commit=FIX_SHA, parent="9" * 40,
+        subject="use match to remove port", tags=["1.4.0", "1.3.0"],
+    )
+
+    async def fake_bisect(sb: Any, image: str, **kwargs: Any) -> envbuild.BisectResult:
+        calls.append({"image": image, **kwargs})
+        if isinstance(world.bisect_result, Exception):
+            raise world.bisect_result
+        return world.bisect_result
+
+    monkeypatch.setattr(envbuild, "bisect_fix", fake_bisect)
+    return calls
+
+
+async def test_a_fix_no_pull_request_names_is_found_by_bisecting(world, bisects) -> None:
+    happy_script(world.llm)
+    a = await world.run()
+    assert a.verdict is Verdict.FIXED_ON_MAIN
+    (call,) = bisects
+    assert call["image"] == "baseline-image+main"  # the fix side's prepared image
+    assert (call["old"], call["new"]) == (OLD_SHA, NEW_SHA)
+    assert call["test_path"] == "tests/test_fixedyet_repro.py" and call["test_code"] == GOOD_TEST
+    rep = a.reproduction
+    assert (rep.fixing_commit, rep.fixing_commit_source) == (FIX_SHA, "bisect")
+    assert rep.fixed_in_release == "1.3.0"  # the earliest release tag that contains it
+    found = next(e for e in a.evidence if e.title.startswith("Fixing commit found by bisecting"))
+    assert found.url == f"https://github.com/acme/widgets/commit/{FIX_SHA}"
+    assert "use match to remove port" in found.title and "1.3.0" in found.why
+    released = next(e for e in a.evidence if e.kind == "changelog")
+    assert released.url == "https://github.com/acme/widgets/releases/tag/1.3.0"
+    assert "(found by bisecting)" in render_markdown(a)
+    assert any("bisecting for the fixing commit" in e.message for e in world.events)
+
+
+async def test_no_bisect_when_a_pull_request_names_the_fix(world, bisects) -> None:
+    world.github.fix = ("abc123def456", "https://github.com/acme/widgets/pull/48")
+    happy_script(world.llm)
+    a = await world.run()
+    assert bisects == [] and a.reproduction.fixing_commit_source == "pull_request"
+
+
+async def test_no_bisect_without_both_commits_or_for_another_verdict(world, bisects) -> None:
+    world.env.commits = {"fix": NEW_SHA}  # an older report: the reported side's commit unknown
+    happy_script(world.llm)
+    a = await world.run()
+    assert bisects == [] and a.reproduction.fixing_commit is None
+    world.env.commits = {"reported": OLD_SHA, "fix": NEW_SHA}
+    world.env.fix = [Outcome.FAIL, Outcome.FAIL]
+    happy_script(world.llm)
+    assert (await world.run()).verdict is Verdict.OPEN_BUG and bisects == []
+
+
+async def test_a_bisect_answer_the_check_did_not_confirm_is_reported_not_recorded(
+    world, bisects
+) -> None:
+    from fixedyet import envbuild
+
+    world.bisect_result = envbuild.BisectResult(
+        status="unverified", commit=FIX_SHA, reason="git bisect named bbbbbbbbbb, but rerunning "
+        "the test there and at its parent gave exit codes ['0'] and ['0'] instead of 0 and 1",
+    )
+    happy_script(world.llm)
+    a = await world.run()
+    assert a.reproduction.fixing_commit is None and a.reproduction.fixing_commit_source is None
+    note = next(e for e in a.evidence if e.title == "Bisect did not settle on a fixing commit")
+    assert FIX_SHA in (note.url or "") and "instead of 0 and 1" in note.why
+    assert any("Bisect: unverified" in e.message for e in world.events)
+
+
+async def test_a_bisect_that_breaks_does_not_lose_the_verdict(world, bisects) -> None:
+    world.bisect_result = RuntimeError("docker went away")
+    happy_script(world.llm)
+    a = await world.run()
+    assert a.verdict is Verdict.FIXED_ON_MAIN and a.reproduction.fixing_commit is None

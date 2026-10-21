@@ -214,7 +214,8 @@ def render_markdown(a: Assessment) -> str:
         out += ["", "## Results", "", table]
     facts = []
     if rep.fixing_commit:
-        facts.append(f"- Fixing commit: `{_cell(rep.fixing_commit)}`")
+        how = " (found by bisecting)" if rep.fixing_commit_source == "bisect" else ""
+        facts.append(f"- Fixing commit: `{_cell(rep.fixing_commit)}`{how}")
     if rep.fixed_in_release:
         facts.append(f"- Fixed in release: `{_cell(rep.fixed_in_release)}`")
     facts += _issue_state_facts(a)

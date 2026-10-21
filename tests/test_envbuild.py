@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import shutil
 import stat
 import subprocess
@@ -22,22 +23,32 @@ import pytest
 
 from fixedyet import envbuild
 from fixedyet.envbuild import (
+    BISECT_SKIP_ALLOWANCE,
     INSTALL_CHAIN,
+    MAX_BISECT_STEPS,
     REPO_DIR,
     TESTDEPS_PATH,
     EnvBuildError,
     baseline_script,
+    bisect_fix,
+    bisect_prefetch_script,
+    bisect_script,
+    bisect_step_script,
     build_baseline,
     build_side_run,
     clean_log,
+    earliest_release,
     extra_packages_from_steps,
     format_log,
     helper_source,
     hinted_project_extras,
+    imported_functions,
+    imported_module_paths,
     installed_extras,
     installed_project_extras,
     installed_test_deps,
     map_exit_code,
+    parse_bisect,
     parse_exit_codes,
     project_extras_from_text,
     repairs_made,
@@ -1219,3 +1230,184 @@ async def test_bash_a_checkout_runs_the_helper_steps_without_disturbing_the_pyte
     assert side.outcomes == [Outcome.FAIL, Outcome.FAIL]  # the stub saw exactly two pytest runs
     assert "stub python" not in side.log_excerpt  # the helper's stderr is not echoed
     assert await asyncio.to_thread(Path(TESTDEPS_PATH).read_text) == helper_source()
+
+
+# --------------------------------------------------------------------------- bisect
+
+OLD, NEW, FIX, PARENT = "a" * 40, "f" * 40, "b" * 40, "9" * 40
+
+
+def test_bisect_scripts_validate_their_inputs() -> None:
+    with pytest.raises(EnvBuildError):
+        bisect_prefetch_script("abc123", NEW)  # a short hash could name two commits
+    with pytest.raises(EnvBuildError):
+        bisect_script(OLD, "main; rm -rf /", "t.py")
+    with pytest.raises(EnvBuildError):
+        bisect_step_script("../t.py", max_runs=3, step_timeout_s=60)
+
+
+def test_bisect_prefetch_script_counts_the_range_and_fetches_only_what_is_missing() -> None:
+    script = bisect_prefetch_script(OLD, NEW, max_steps=12)
+    # when main holds the reported commit, the commits after it are the ones a bisection judges
+    assert f"git merge-base --is-ancestor {OLD} {NEW}; then ancestry=--ancestry-path" in script
+    assert f"git rev-list --count $ancestry {OLD}..{NEW}" in script
+    assert '-gt 4095 ]; then exit 0; fi' in script  # 2**12 - 1 commits at most
+    # every tree in the range, whole: an old file version can come back on main
+    # and their parents: git shows the answer as a diff, the check runs the test at its parent
+    assert f"git rev-list --parents {OLD}..{NEW} | tr ' ' '\\n'" in script
+    assert f"git merge-base --all {OLD} {NEW}; }} | sort -u" in script
+    assert "git rev-list --objects --missing=print --no-walk --stdin" in script
+    assert "--filter=blob:none --stdin origin < /tmp/ir_missing" in script
+
+
+def test_bisect_script_terms_and_check() -> None:
+    script = bisect_script(OLD, NEW, "tests/test_x.py", step_timeout_s=60, timeout_s=300)
+    # the old side fails the test ("broken"), the new side passes it ("fixed")
+    assert f"git bisect start --term-old=broken --term-new=fixed {NEW} {OLD}" in script
+    assert "timeout -k 10 300 git bisect run /tmp/ir_bisect_step.sh" in script
+    # the answer comes from git's own record, which has it even when showing the commit fails
+    assert "git bisect log > /tmp/ir_bisect_record" in script
+    assert "# first fixed commit: " in script and "# possible first fixed commit: " in script
+    # commits that do not descend from the reported one are judged "broken" by the step script
+    assert f"then echo {OLD} > /tmp/ir_bisect_old; fi" in script
+    assert script.count("ir_as_tester timeout -k 5 60 python -m pytest") == 2  # the check
+    assert '"$first^1"' in script and "git tag --contains" in script
+
+
+def test_bisect_step_script_maps_pytest_to_bisect_exit_codes() -> None:
+    step = bisect_step_script("tests/test_x.py", max_runs=15, step_timeout_s=60)
+    assert step.startswith("#!/bin/bash")
+    assert 'if [ "$n" -gt 15 ]; then exit 128; fi' in step  # 128 stops `git bisect run`
+    assert 'case "$rc" in 0) exit 1 ;; 1) exit 0 ;; *) exit 125 ;; esac' in step
+    assert "git reset --quiet --hard HEAD" in step
+    outside = step.index("/tmp/ir_bisect_old")
+    assert outside < step.index("ir_bisect_n")  # no test run, and not counted as one
+    assert 'echo "$head -1" >> /tmp/ir_bisect_steps; exit 0' in step
+
+
+def test_imported_module_paths_names_the_project_modules_a_test_imports() -> None:
+    code = (
+        "import os\nimport pytest\nfrom unittest import mock\n"
+        "from werkzeug.sansio.utils import host_is_trusted\nimport widgets.parse\n"
+    )
+    assert imported_module_paths(code) == [
+        ":(glob)**/werkzeug/sansio/utils.py", ":(glob)**/werkzeug/sansio/utils/__init__.py",
+        ":(glob)**/werkzeug/sansio/utils/host_is_trusted.py",
+        ":(glob)**/werkzeug/sansio/utils/host_is_trusted/__init__.py",
+        ":(glob)**/widgets/parse.py", ":(glob)**/widgets/parse/__init__.py",
+    ]
+    assert imported_module_paths("def broken(:") == []
+    assert imported_functions(code) == [
+        (":(glob)**/werkzeug/sansio/utils.py", "host_is_trusted")
+    ]
+    script = bisect_script(OLD, NEW, "t.py", module_paths=imported_module_paths(code))
+    assert "-- ':(glob)**/werkzeug/sansio/utils.py'" in script
+
+
+def test_parse_bisect_lists_the_other_side_of_a_merge() -> None:
+    lines = f"{'4' * 40} use match to remove port\n{'5' * 40} validate host characters\n"
+    other = "__OTHER_SIDE_B64__=" + base64.b64encode(lines.encode()).decode() + "\n"
+    found = parse_bisect(exec_result(bisect_output(merge=True, extra=other)))
+    assert found.merge and found.other_side == [
+        ("4" * 40, "use match to remove port"), ("5" * 40, "validate host characters")
+    ]
+
+
+def bisect_output(*, first: str | None = FIX, verify: tuple[str, str] = ("0", "1"),
+                  merge: bool = False, tags: str = "1.2.0\n1.1.0\nv1.1.1rc1\n",
+                  steps: int = 3, extra: str = "") -> str:
+    lines = [f"__BISECT_STEP__={c * 40}:{rc}" for c, rc in zip("cde", (1, 0, 1), strict=False)]
+    lines = lines[:steps] + ["__BISECT_RC__=0", "| running tests/test_x.py"]
+    if first:
+        tag_b64 = base64.b64encode(tags.encode()).decode()
+        lines += [f"__BISECT_FIRST__={first}", f"__BISECT_PARENT__={PARENT}",
+                  "__BISECT_SUBJECT_B64__=" + base64.b64encode(b"use match to remove port\n")
+                  .decode(), f"__BISECT_TAGS_B64__={tag_b64}",
+                  f"__VERIFY_FIRST__={verify[0]}", f"__VERIFY_PARENT__={verify[1]}"]
+        if merge:
+            lines.append("__BISECT_MERGE__=1")
+    return "\n".join(lines) + "\n" + extra
+
+
+def test_parse_bisect_found_and_checked() -> None:
+    found = parse_bisect(exec_result(bisect_output()), range_count=280)
+    assert found.status == "found" and found.commit == FIX and found.parent == PARENT
+    assert found.subject == "use match to remove port" and not found.merge
+    assert found.steps == [("c" * 40, 1), ("d" * 40, 0), ("e" * 40, 1)]
+    assert found.release == "1.1.0"  # the earliest final release that contains it
+    assert "fails at 9999999999 and passes at bbbbbbbbbb (3 test runs in the bisection)" in (
+        found.reason
+    )
+    assert found.range_count == 280 and "running tests/test_x.py" in found.log
+
+
+def test_parse_bisect_a_commit_the_check_does_not_confirm_is_unverified() -> None:
+    flaky = parse_bisect(exec_result(bisect_output(verify=("0", "0"), merge=True)))
+    assert flaky.status == "unverified" and flaky.commit == FIX and flaky.merge
+    assert "exit codes ['0'] and ['0'] instead of 0 and 1" in flaky.reason
+
+
+def test_parse_bisect_without_an_answer() -> None:
+    skipped = bisect_output(first=None, extra=(
+        "| There are only 'skip'ped commits left to test.\n"
+        f"__BISECT_CANDIDATE__={'1' * 40}\n__BISECT_CANDIDATE__={'2' * 40}\n"))
+    ambiguous = parse_bisect(exec_result(skipped))
+    assert ambiguous.status == "ambiguous" and ambiguous.candidates == ["1" * 40, "2" * 40]
+    assert parse_bisect(exec_result(bisect_output(first=None))).status == "not_found"
+    late = parse_bisect(exec_result(bisect_output(first=None).replace("RC__=0", "RC__=124")))
+    assert late.status == "error" and "ran out of time" in late.reason
+    broken = parse_bisect(exec_result("__BISECT_FAILED__=start\n| fatal: bad revision\n"))
+    assert broken.status == "error" and "could not start (start)" in broken.reason
+    assert parse_bisect(exec_result("", timed_out=True)).status == "error"
+
+
+def test_parse_bisect_ignores_forged_markers_inside_the_log() -> None:
+    forged = bisect_output(first=None, extra=f"| __BISECT_FIRST__={'3' * 40}\n")
+    assert parse_bisect(exec_result(forged)).commit is None
+
+
+def test_earliest_release_ignores_pre_releases_and_other_tags() -> None:
+    assert earliest_release(["3.2.0", "3.1.10", "v3.1.11", "3.1.10rc1", "nightly"]) == "3.1.10"
+    assert earliest_release(["pkg-2.0", "pkg-1.9.1"]) == "pkg-1.9.1"
+    assert earliest_release(["latest", "1.0b2"]) is None
+
+
+async def test_bisect_fix_prefetches_with_network_then_bisects_offline() -> None:
+    prefetch = exec_result("__BISECT_RANGE__=280\n__MISSING__=712\n__PREFETCHED__=1\n",
+                           image="ckpt-prefetched")
+    sb = FakeSandbox([prefetch, exec_result(bisect_output())])
+    events: list[ProgressEvent] = []
+    found = await bisect_fix(sb, "ckpt-main", old=OLD, new=NEW, test_path="tests/test_x.py",
+                             test_code="def test(): ...\n", progress=events.append)
+    assert found.status == "found" and found.range_count == 280
+    first, second = sb.calls
+    assert (first.image, first.keep, first.network) == ("ckpt-main", True, True)
+    assert (second.image, second.keep, second.network) == ("ckpt-prefetched", False, False)
+    assert second.files is not None
+    assert second.files["/tmp/ir_test_file"] == "def test(): ...\n"
+    step = second.files["/tmp/ir_bisect_step.sh"]
+    assert f'-gt {MAX_BISECT_STEPS + BISECT_SKIP_ALLOWANCE} ]' in step
+    assert [e.message for e in events] == [
+        f"Bisecting 280 commits between {OLD[:10]} and {NEW[:10]}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("prefetch", "status"),
+    [
+        ("__BISECT_RANGE__=0\n", "not_found"),
+        ("__BISECT_RANGE__=5000\n", "too_many"),
+        ("__SETUP_FAILED__=fetch\n", "error"),
+        ("__BISECT_RANGE__=12\n__PREFETCH_FAILED__=1\n", "error"),
+    ],
+)
+async def test_bisect_fix_stops_before_bisecting(prefetch: str, status: str) -> None:
+    sb = FakeSandbox([exec_result(prefetch, exit_code=0)])
+    found = await bisect_fix(sb, "i", old=OLD, new=NEW, test_path="t.py", test_code="x")
+    assert found.status == status and len(sb.calls) == 1
+
+
+async def test_bisect_fix_refuses_short_hashes_without_running_anything() -> None:
+    sb = FakeSandbox()
+    found = await bisect_fix(sb, "i", old="abc", new=NEW, test_path="t.py", test_code="x")
+    assert found.status == "error" and not sb.calls

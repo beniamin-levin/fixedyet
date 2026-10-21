@@ -305,6 +305,7 @@ class FakeEnvBuild:
     tags: dict[str, str] = field(default_factory=lambda: {"1.2.0": "v1.2.0"})
     build_calls: list[dict[str, Any]] = field(default_factory=list)
     side_calls: list[dict[str, Any]] = field(default_factory=list)
+    commits: dict[str, str] = field(default_factory=dict)  # "reported" / "fix": `git rev-parse`
     resolve_calls: list[tuple[str, str]] = field(default_factory=list)
 
     async def build_baseline(self, sb: Any, *, repo: str, ref: str, python_version: str | None,
@@ -335,7 +336,8 @@ class FakeEnvBuild:
             log = override
         return SideRun(
             ref=ref or checkout or "HEAD", outcomes=list(outcomes),
-            checkpoint_image=image, log_excerpt=log,
+            checkpoint_image=f"{image}+{checkout}" if fix_side else image, log_excerpt=log,
+            commit=self.commits.get("fix" if fix_side else "reported"),
         )
 
     async def resolve_ref_for_version(self, repo: str, version: str, **_: Any) -> str | None:

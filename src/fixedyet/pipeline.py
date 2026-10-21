@@ -1,8 +1,9 @@
 """The end-to-end flow: issue in, `Assessment` out.
 
     intake -> contract -> reported ref -> baseline checkpoint -> agent writes the test
-           -> run it on both sides (concurrently) -> rule-based verdict
-           -> evidence -> one LLM call for root cause and next actions -> report on disk
+           -> run it on both sides (concurrently, offline) -> rule-based verdict
+           -> evidence (fixed but no fixing commit known: bisect for it in the sandbox)
+           -> one LLM call for root cause and next actions -> report on disk
 
 The verdict comes from `verdict.decide` and nothing else. Every failure that can be anticipated
 (run or total budget, environment, sandbox, model API, GitHub) still produces an `Assessment`, so
@@ -491,6 +492,13 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
             evidence = await _collect_evidence(ctx, issue, verdict)
         except Exception:  # evidence is best effort by design; the verdict does not depend on it
             log.exception("evidence gathering failed")
+        if evidence.fixing_commit:
+            ctx.reproduction.fixing_commit_source = "pull_request"
+        elif verdict is Verdict.FIXED_ON_MAIN:
+            try:
+                await _bisect_for_fix(ctx, issue, evidence)
+            except Exception:  # best effort, like the rest of the evidence
+                log.exception("bisect for the fixing commit failed")
         try:
             root_cause, next_actions, reason = await _write_analysis(
                 ctx, issue, verdict, confidence, basis, evidence, next_actions
@@ -573,6 +581,74 @@ async def _collect_evidence(ctx: _Context, issue: Issue, verdict: Verdict) -> Ev
         reported_version=(contract.reported_version if contract else None)
         or (reported.ref if reported else None),
     )
+
+
+async def _bisect_for_fix(ctx: _Context, issue: Issue, evidence: EvidenceResult) -> None:
+    """Fixed on the fix side, and no pull request names the fix: `git bisect run` the
+    reproduction test between the two sides' commits, in the sandbox (`envbuild.bisect_fix`).
+
+    Only a commit the check confirms (the test fails at its first parent and passes at it) is
+    recorded, with ``fixing_commit_source="bisect"``, which makes a backport possible. The
+    earliest release tag that contains it names the release when the changelog did not.
+    """
+    rep = ctx.reproduction
+    reported, fix = rep.reported_side, rep.fix_side
+    if (
+        ctx.patch or ctx.metered is None or not ctx.with_evidence
+        or reported is None or fix is None or not reported.commit or not fix.commit
+        or not fix.checkpoint_image or not rep.repro_test_path or not rep.repro_test_code
+        or reported.commit == fix.commit
+    ):
+        return
+    await ctx.say("evidence", "No pull request names the fix: bisecting for the fixing commit "
+                  f"between {reported.commit[:10]} and {fix.commit[:10]}")
+    found = await envbuild.bisect_fix(
+        ctx.metered, fix.checkpoint_image, old=reported.commit, new=fix.commit,
+        test_path=rep.repro_test_path, test_code=rep.repro_test_code, progress=ctx.progress,
+    )
+    commit_url = f"https://github.com/{issue.owner}/{issue.repo}/commit/"
+    if found.status != "found" or not found.commit:
+        await ctx.say("evidence", f"Bisect: {found.status}, {found.reason}")
+        if found.status in ("unverified", "ambiguous"):
+            named = found.commit or ", ".join(c[:10] for c in found.candidates[:5])
+            evidence.evidence.append(Evidence(
+                kind="upstream", title="Bisect did not settle on a fixing commit",
+                url=f"{commit_url}{found.commit}" if found.commit else None,
+                why=f"{found.reason}. Candidates: {named}."[:400],
+            ))
+        return
+    evidence.fixing_commit = found.commit
+    rep.fixing_commit_source = "bisect"
+    subject = f": {found.subject}" if found.subject else ""
+    merge = " (a merge commit)" if found.merge else ""
+    release = found.release
+    shipped = f" The earliest release that contains it is {release}." if release else (
+        " No release tag contains it yet." if not evidence.fixed_in_release else ""
+    )
+    evidence.evidence.append(Evidence(
+        kind="upstream",
+        title=f"Fixing commit found by bisecting: {found.commit[:10]}{subject}"[:160],
+        url=f"{commit_url}{found.commit}",
+        why=f"git bisect run in the sandbox{merge}: {found.reason}.{shipped}"[:400],
+    ))
+    if found.merge and found.other_side:
+        listed = "; ".join(f"{sha[:10]} {subject}" for sha, subject in found.other_side)
+        evidence.evidence.append(Evidence(
+            kind="upstream",
+            title="The passing code came in through the merge: candidate commits on its other side",
+            url=f"{commit_url}{found.other_side[0][0]}",
+            why=f"Not checked by a test run. Commits on the merge's other side that changed "
+                f"what the test imports (the function first, then its module), newest first: "
+                f"{listed}"[:400],
+        ))
+    if release and not evidence.fixed_in_release:
+        evidence.fixed_in_release = release
+        evidence.evidence.append(Evidence(
+            kind="changelog", title=f"Released in {release}",
+            url=f"https://github.com/{issue.owner}/{issue.repo}/releases/tag/{release}",
+            why="The earliest release tag that contains the fixing commit (git tag --contains).",
+        ))
+    await ctx.say("evidence", f"Bisect found {found.commit[:10]}{subject}"[:200])
 
 
 ANALYSIS_SYSTEM = """\

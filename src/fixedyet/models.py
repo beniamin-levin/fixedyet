@@ -130,6 +130,9 @@ class Reproduction(BaseModel):
     reported_side: SideRun | None = None
     fix_side: SideRun | None = None
     fixing_commit: str | None = None
+    # How the fixing commit was found: the merged pull request that references the issue, or a
+    # `git bisect run` of the reproduction test in the sandbox. None in older reports.
+    fixing_commit_source: Literal["pull_request", "bisect"] | None = None
     fixed_in_release: str | None = None
 
 
