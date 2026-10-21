@@ -1,0 +1,297 @@
+"""GitHub REST API access: fetch an issue, find duplicates, find the pull request that fixed it.
+
+Only public data is read, with an optional token for the higher rate limit. Everything that is
+"nice to have" (duplicate search, fix lookup) swallows API errors and returns nothing, because a
+rate limit must never fail a reproduction run. Fetching the issue itself raises.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+
+from fixedyet.models import Evidence, Issue
+
+log = logging.getLogger(__name__)
+
+API_ROOT = "https://api.github.com"
+MAX_COMMENTS = 30
+MAX_RATE_LIMIT_WAIT_S = 15  # sleep and retry once if GitHub says "try again in <= 15 s"
+
+_ISSUE_PATH = re.compile(r"^/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/issues/(?P<number>\d+)/?$")
+
+
+class GitHubError(RuntimeError):
+    """Any failure talking to the GitHub API."""
+
+
+class GitHubNotFound(GitHubError):
+    """404: the issue does not exist, or it is in a private repository."""
+
+
+class GitHubRateLimited(GitHubError):
+    """The rate limit is exhausted and the reset is too far away to wait for."""
+
+
+def parse_issue_url(url: str) -> tuple[str, str, int]:
+    """'https://github.com/psf/requests/issues/6710' -> ('psf', 'requests', 6710)."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("http", "https") or parsed.netloc.lower() not in (
+        "github.com",
+        "www.github.com",
+    ):
+        raise ValueError(f"not a github.com issue URL: {url!r}")
+    match = _ISSUE_PATH.match(parsed.path)
+    if match is None:
+        raise ValueError(f"expected https://github.com/<owner>/<repo>/issues/<number>, got {url!r}")
+    return match["owner"], match["repo"], int(match["number"])
+
+
+_STOPWORDS = frozenset(
+    "a an the and or not of in on at to for with without when while is are was were be been it "
+    "its this that these those does do doesn don can cannot could should would will from by as "
+    "into than then how why what which who has have had but if so no nor".split()
+)
+
+
+def _search_terms(text: str, limit: int = 200, max_terms: int | None = None) -> str:
+    """Reduce free text to plain words so it cannot inject GitHub search qualifiers.
+
+    GitHub search ANDs every word, so a whole title matches nothing but the issue itself. With
+    ``max_terms`` only the first words that carry meaning are kept: a title puts its topic first.
+    """
+    words = [w.lstrip("-") for w in re.sub(r"[^\w.\-\s]", " ", text).split()]
+    words = [w for w in words if w and w.upper() not in {"AND", "OR", "NOT"}]
+    if max_terms is not None:
+        seen: set[str] = set()
+        words = [
+            w for w in words
+            if w.lower() not in _STOPWORDS and not (w.lower() in seen or seen.add(w.lower()))
+        ][:max_terms]
+    return " ".join(words)[:limit]
+
+
+class GitHubClient:
+    """Async wrapper over the endpoints we need: `async with GitHubClient(token) as gh`."""
+
+    def __init__(
+        self,
+        token: str | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+        base_url: str = API_ROOT,
+    ) -> None:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "fixedyet",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            base_url=base_url, headers=headers, timeout=20.0, follow_redirects=True
+        )
+
+    async def __aenter__(self) -> GitHubClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    # -- low level -------------------------------------------------------------------------
+
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET with one polite retry on a short rate-limit window. Returns decoded JSON."""
+        for attempt in (1, 2):
+            try:
+                response = await self._client.get(path, params=params)
+            except httpx.HTTPError as exc:
+                raise GitHubError(f"GitHub request failed: {exc}") from exc
+            if response.status_code == 404:
+                raise GitHubNotFound(f"GitHub returned 404 for {path}")
+            wait = self._rate_limit_wait(response)
+            if wait is not None:
+                if attempt == 1 and wait <= MAX_RATE_LIMIT_WAIT_S:
+                    log.info("GitHub rate limit; waiting %.0f s", wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise GitHubRateLimited(
+                    f"GitHub API rate limit reached (resets in about {wait:.0f} s). "
+                    "Set GITHUB_TOKEN for a higher limit."
+                )
+            if response.status_code >= 400:
+                raise GitHubError(f"GitHub returned {response.status_code} for {path}")
+            return response.json()
+        raise GitHubError(f"GitHub request kept failing for {path}")  # pragma: no cover
+
+    @staticmethod
+    def _rate_limit_wait(response: httpx.Response) -> float | None:
+        """Seconds to wait if this response is a rate-limit refusal, else None."""
+        if response.status_code not in (403, 429):
+            return None
+        retry_after = response.headers.get("retry-after")
+        if retry_after and retry_after.isdigit():
+            return float(retry_after)
+        if response.headers.get("x-ratelimit-remaining") == "0":
+            reset = response.headers.get("x-ratelimit-reset", "")
+            return max(0.0, float(reset) - time.time()) if reset.isdigit() else 60.0
+        if response.status_code == 429 or "rate limit" in response.text.lower():
+            return 60.0  # secondary rate limit without headers
+        return None
+
+    # -- issue ---------------------------------------------------------------------------
+
+    async def fetch_issue(self, url: str) -> Issue:
+        """Issue, up to 30 comments, and the repository's default branch."""
+        owner, repo, number = parse_issue_url(url)
+        base = f"/repos/{owner}/{repo}"
+        data, comments, repo_info = await asyncio.gather(
+            self._get(f"{base}/issues/{number}"),
+            self._get(f"{base}/issues/{number}/comments", {"per_page": MAX_COMMENTS}),
+            self._get(base),
+        )
+        return Issue(
+            url=f"https://github.com/{owner}/{repo}/issues/{number}",
+            owner=owner,
+            repo=repo,
+            number=number,
+            title=data.get("title") or "",
+            body=data.get("body") or "",
+            comments=[
+                f"@{(c.get('user') or {}).get('login', 'unknown')}: {c.get('body') or ''}"
+                for c in comments[:MAX_COMMENTS]
+            ],
+            labels=[label["name"] for label in data.get("labels", []) if isinstance(label, dict)],
+            state=data.get("state") or "open",
+            created_at=data.get("created_at"),
+            default_branch=repo_info.get("default_branch") or "main",
+        )
+
+    # -- duplicates ------------------------------------------------------------------------
+
+    async def search_related_issues(
+        self, issue: Issue, query: str, limit: int = 5
+    ) -> list[Evidence]:
+        """Other issues in the same repository that look like this one. Best effort, free."""
+        # Most specific query first, then a looser one: every extra word narrows a GitHub search.
+        queries: list[str] = []
+        for max_terms in (5, 3):
+            terms = _search_terms(query, max_terms=max_terms)
+            if terms and terms not in queries:
+                queries.append(terms)
+        data: dict[str, Any] = {}
+        for terms in queries:
+            q = f"{terms} repo:{issue.owner}/{issue.repo} is:issue"
+            try:
+                data = await self._get("/search/issues", {"q": q, "per_page": limit + 1})
+            except GitHubError as exc:
+                log.warning("duplicate search skipped: %s", exc)
+                return []
+            if any(item.get("number") != issue.number for item in data.get("items", [])):
+                break
+        found: list[Evidence] = []
+        for item in data.get("items", []):
+            if item.get("number") == issue.number:
+                continue
+            state = item.get("state", "open")
+            found.append(
+                Evidence(
+                    kind="duplicate",
+                    title=f"#{item['number']} {item.get('title', '')}".strip(),
+                    url=item.get("html_url"),
+                    why=f"Similar issue in the same repository ({state}, "
+                    f"{item.get('comments', 0)} comments).",
+                )
+            )
+        return found[:limit]
+
+    # -- fix ------------------------------------------------------------------------------
+
+    async def find_fix_pr(self, issue: Issue) -> tuple[str, str] | None:
+        """(merge commit sha, pull request URL) of a merged PR that references the issue."""
+        try:
+            return await self._find_fix_pr(issue)
+        except GitHubError as exc:
+            log.warning("fix lookup skipped: %s", exc)
+            return None
+
+    async def _find_fix_pr(self, issue: Issue) -> tuple[str, str] | None:
+        repo_path = f"/repos/{issue.owner}/{issue.repo}"
+        full_name = f"{issue.owner}/{issue.repo}".lower()
+        candidates: list[dict[str, Any]] = []
+
+        # 1. The issue timeline lists every pull request that mentioned it.
+        timeline = await self._get(f"{repo_path}/issues/{issue.number}/timeline", {"per_page": 100})
+        for event in timeline:
+            source = (event.get("source") or {}).get("issue") or {}
+            repo_of_source = (source.get("repository") or {}).get("full_name", "").lower()
+            if (
+                event.get("event") == "cross-referenced"
+                and source.get("pull_request")
+                and source["pull_request"].get("merged_at")
+                and repo_of_source == full_name
+            ):
+                candidates.append(source)
+
+        # 2. Fallback: search merged PRs, then keep only those that really name the issue.
+        if not candidates:
+            data = await self._get(
+                "/search/issues",
+                {"q": f"repo:{full_name} is:pr is:merged {issue.number}", "per_page": 10},
+            )
+            mention = re.compile(rf"(?<![\w/]){re.escape(f'#{issue.number}')}(?!\d)")
+            for item in data.get("items", []):
+                text = f"{item.get('title', '')}\n{item.get('body') or ''}"
+                if item.get("pull_request", {}).get("merged_at") and mention.search(text):
+                    candidates.append(item)
+
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda pr: (_closes(pr, issue.number), _merged_at(pr)))
+        pr = await self._get(f"{repo_path}/pulls/{best['number']}")
+        sha = pr.get("merge_commit_sha")
+        if not pr.get("merged") or not sha:
+            return None
+        return sha, pr.get("html_url") or best.get("html_url", "")
+
+
+def _closes(pr: dict[str, Any], number: int) -> bool:
+    """Does the PR text use a closing keyword for this issue ('fixes #12')?"""
+    text = f"{pr.get('title', '')}\n{pr.get('body') or ''}"
+    pattern = rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{number}(?!\d)"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+def _merged_at(pr: dict[str, Any]) -> str:
+    return (pr.get("pull_request") or {}).get("merged_at") or ""
+
+
+# -- one-shot helpers for callers that make a single request ----------------------------------
+
+
+async def fetch_issue(url: str, *, token: str | None = None) -> Issue:
+    async with GitHubClient(token) as gh:
+        return await gh.fetch_issue(url)
+
+
+async def search_related_issues(
+    issue: Issue, query: str, *, token: str | None = None
+) -> list[Evidence]:
+    async with GitHubClient(token) as gh:
+        return await gh.search_related_issues(issue, query)
+
+
+async def find_fix_pr(issue: Issue, *, token: str | None = None) -> tuple[str, str] | None:
+    async with GitHubClient(token) as gh:
+        return await gh.find_fix_pr(issue)

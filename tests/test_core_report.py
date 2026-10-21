@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import pytest
+
+from fixedyet.models import (
+    Assessment,
+    Confidence,
+    Evidence,
+    NotReproducedReason,
+    Outcome,
+    Reproduction,
+    SideRun,
+    Usage,
+    Verdict,
+)
+from fixedyet.report import HEADLINES, render_markdown
+
+
+def assessment(**overrides) -> Assessment:
+    base = dict(
+        issue_url="https://github.com/acme/widgets/issues/42",
+        title="parse() drops the last item",
+        verdict=Verdict.FIXED_ON_MAIN,
+        confidence=Confidence.HIGH,
+        confidence_basis=["both runs agree: fail on the reported side", "both runs agree: pass"],
+        reproduction=Reproduction(
+            repro_test_path="tests/test_fixedyet_repro.py",
+            repro_test_code="def test_x():\n    assert parse('a,b') == ['a', 'b']\n",
+            reported_side=SideRun(ref="v1.2.0", outcomes=[Outcome.FAIL, Outcome.FAIL],
+                                  checkpoint_image="img-reported",
+                                  log_excerpt="E   AssertionError: boom"),
+            fix_side=SideRun(ref="main", outcomes=[Outcome.PASS, Outcome.PASS],
+                             checkpoint_image="img-fix"),
+            fixing_commit="abc123", fixed_in_release="1.3.1",
+        ),
+        root_cause="parse() slices off the last element.",
+        evidence=[Evidence(kind="duplicate", title="#17 same bug",
+                           url="https://github.com/acme/widgets/issues/17", why="closed")],
+        next_actions=["Close the issue.", "Ask the reporter to upgrade."],
+        usage=Usage(llm_calls=12, input_tokens=40_000, output_tokens=5_000, cost_usd=0.0234,
+                    sandbox_runs=7, search_credits=2, wall_seconds=211.4),
+        model="nvidia/nemotron-3-super-120b-a12b",
+    )
+    base.update(overrides)
+    return Assessment(**base)
+
+
+def test_full_report_has_every_section_in_order() -> None:
+    md = render_markdown(assessment())
+    headings = [line for line in md.splitlines() if line.startswith("#")]
+    assert headings == [
+        "# Fixed on main: fails at the reported version, passes on the fix side",
+        "## Results",
+        "## Reproduction test (`tests/test_fixedyet_repro.py`)",
+        "## Output at the reported version (end of the log)",
+        "## Evidence",
+        "## Root cause",
+        "## Next actions",
+        "## Usage",
+        "## Rerun this yourself",
+    ]
+    assert "**Confidence:** high" in md and "- both runs agree: fail on the reported side" in md
+    assert md.endswith("\n") and not md.endswith("\n\n")
+
+
+def test_results_table_is_two_sides_by_two_runs() -> None:
+    md = render_markdown(assessment())
+    assert "| Side | Run 1 | Run 2 |" in md
+    assert "| Reported version (`v1.2.0`) | FAIL | FAIL |" in md
+    assert "| Fix side (`main`) | PASS | PASS |" in md
+
+
+def test_commit_release_usage_and_rerun_block() -> None:
+    md = render_markdown(assessment())
+    assert "Fixing commit: `abc123`" in md and "Fixed in release: `1.3.1`" in md
+    assert (
+        "12 LLM calls, 45,000 tokens (40,000 in, 5,000 out), $0.0234, 7 sandbox runs, "
+        "2 search credits, 211 s wall time, model nvidia/nemotron-3-super-120b-a12b"
+    ) in md
+    assert "`img-reported`" in md and "`img-fix`" in md
+    assert "python -m pytest -x -q tests/test_fixedyet_repro.py" in md
+    assert "fixedyet run https://github.com/acme/widgets/issues/42" in md
+
+
+def test_test_code_is_in_a_python_block() -> None:
+    md = render_markdown(assessment())
+    assert "```python\ndef test_x():\n    assert parse('a,b') == ['a', 'b']\n```" in md
+
+
+def test_a_fence_inside_the_code_cannot_close_the_block_early() -> None:
+    code = 'def test_x():\n    s = """\n```\nnot markdown\n```\n"""\n'
+    a = assessment()
+    a.reproduction.repro_test_code = code
+    md = render_markdown(a)
+    assert "````python\n" in md and md.count("````") == 2
+
+
+def test_untrusted_text_cannot_break_out_of_lists_or_tables() -> None:
+    a = assessment(
+        title="x\n# injected heading",
+        evidence=[Evidence(kind="upstream", title="a](http://evil)[b", url="javascript:alert(1)",
+                           why="line one\n## fake section")],
+        confidence_basis=["ok\n- sneaky bullet"],
+        next_actions=["do it\n\n# not a heading"],
+    )
+    a.reproduction.reported_side.ref = "v|1"
+    md = render_markdown(a)
+    assert "\n# injected heading" not in md and "\n## fake section" not in md
+    assert "\n# not a heading" not in md and "\n- sneaky bullet" not in md
+    assert "javascript:" not in md  # non-http URLs are never turned into links
+    assert "v\\|1" in md
+
+
+def test_needs_info_report_is_short_and_has_no_empty_sections() -> None:
+    a = Assessment(
+        issue_url="https://github.com/acme/widgets/issues/1", title="How do I?",
+        verdict=Verdict.NEEDS_INFO, confidence=Confidence.LOW,
+        confidence_basis=["no runnable reproduction"], next_actions=["Ask for a snippet."],
+    )
+    md = render_markdown(a)
+    assert md.startswith("# Needs info")
+    for absent in ("## Results", "## Reproduction test", "## Evidence", "## Root cause",
+                   "## Rerun this yourself"):
+        assert absent not in md
+    assert "## Next actions" in md and "## Usage" in md
+
+
+def test_not_reproduced_reason_is_shown() -> None:
+    md = render_markdown(
+        assessment(
+            verdict=Verdict.NOT_REPRODUCED,
+            not_reproduced_reason=NotReproducedReason.ENVIRONMENT,
+        )
+    )
+    assert "`environment`" in md
+
+
+def test_non_http_issue_url_is_not_linked() -> None:
+    md = render_markdown(assessment(issue_url="swe-bench:psf__requests-2317"))
+    assert "](swe-bench" not in md and "swe-bench:psf__requests-2317" in md
+
+
+@pytest.mark.parametrize("verdict", list(Verdict))
+def test_every_verdict_has_a_headline_and_renders(verdict: Verdict) -> None:
+    assert verdict in HEADLINES
+    md = render_markdown(assessment(verdict=verdict))
+    assert md.startswith(f"# {HEADLINES[verdict]}") and f"`{verdict.value}`" in md
+
+
+def test_three_runs_make_three_columns() -> None:
+    a = assessment()
+    a.reproduction.reported_side.outcomes = [Outcome.FAIL, Outcome.PASS, Outcome.ERROR]
+    md = render_markdown(a)
+    assert "| Side | Run 1 | Run 2 | Run 3 |" in md and "| FAIL | PASS | ERROR |" in md
+    assert "| PASS | PASS | - |" in md  # the shorter side is padded
+
+
+def test_fix_side_output_is_shown_when_the_fix_side_failed() -> None:
+    fix = SideRun(ref="main", outcomes=[Outcome.FAIL, Outcome.FAIL],
+                  log_excerpt="E   TypeError: unexpected keyword argument 'mix_stderr'")
+    for verdict in (Verdict.OPEN_BUG, Verdict.INCONSISTENT):
+        a = assessment(verdict=verdict)
+        a.reproduction.fix_side = fix
+        md = render_markdown(a)
+        assert "## Output on the fix side (end of the log)" in md
+        assert "TypeError: unexpected keyword argument 'mix_stderr'" in md
+    a = assessment()  # fixed_on_main: the fix side passed, there is nothing to show
+    a.reproduction.fix_side = fix
+    assert "Output on the fix side" not in render_markdown(a)
+
+
+def test_a_long_log_is_cut_on_a_line_boundary() -> None:
+    lines = [f"line {i:03d} " + "x" * 30 for i in range(100)]
+    a = assessment()
+    a.reproduction.reported_side.log_excerpt = "\n".join(lines)
+    block = render_markdown(a).split("## Output at the reported version (end of the log)")[1]
+    body = block.split("```")[1].strip("\n").splitlines()
+    assert body[-1] == lines[-1]
+    assert body[0] in lines  # a whole line, not the tail end of one
+    assert len("\n".join(body)) <= 1_500
+
+
+def test_the_root_cause_says_it_is_the_models_unverified_analysis() -> None:
+    md = render_markdown(assessment())
+    assert "## Root cause\n\nparse() slices off the last element.\n\n_Written by the model" in md
+    assert "did not check it._" in md
+    assert "Written by the model" not in render_markdown(assessment(root_cause=""))
