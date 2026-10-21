@@ -204,6 +204,10 @@ def test_type_notes_are_collected_once_each() -> None:
         ("TypeError: __init__() got an unexpected keyword argument", OWN_LINE_CRASH, []),
         ("the last item is missing from the result", OWN_LINE_CRASH, []),
         ("", OWN_LINE_CRASH, []),
+        # a plain assert is printed without the word AssertionError (pytest-10051 in run C)
+        ("AssertionError: [<LogRecord: ...>] == []", "E       assert [<LogRecord: x>] == []\n",
+         []),
+        ("raises AssertionError", "E       assert [1] == []\n1 failed in 0.1s\n", []),
     ],
 )
 def test_missing_symptoms(observed: str, output: str, missing: list[str]) -> None:

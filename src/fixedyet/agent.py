@@ -411,8 +411,10 @@ _EXCEPTION_NAME = re.compile(
     r"(?<![\w.])([A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning|Exit|Interrupt))\b"
 )
 _EXCEPTION_MESSAGE = re.compile(
-    r"(?<![\w.])[A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning):[ \t]*(?P<message>[^\n`]{8,})"
+    r"(?<![\w.])(?P<name>[A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning)):[ \t]*"
+    r"(?P<message>[^\n`]{8,})"
 )
+_FAILED_ASSERT = re.compile(r"^E\s+assert\b", re.MULTILINE)
 _QUOTES = str.maketrans("", "", "'\"`")
 _MESSAGE_PREFIX = 32  # at most this many characters (whole words) of a quoted message are sought
 
@@ -483,16 +485,22 @@ def missing_symptoms(observed: str, output: str) -> list[str]:
     """Exceptions and messages the observed behaviour quotes that a failed run's output lacks.
 
     An exception is looked for by name; a message (the text after ``SomeError:``) by its first
-    characters, quotes and spacing ignored.
+    words, quotes and spacing ignored. A failed plain ``assert`` counts as an AssertionError, and
+    the text after ``AssertionError:`` is not sought: it is an assertion, worded by whoever wrote
+    it.
     """
     if not observed.strip():
         return []
     flat_output = _flat(output)
     missing: list[str] = []
     for name in dict.fromkeys(_EXCEPTION_NAME.findall(observed)):
+        if name == "AssertionError" and _FAILED_ASSERT.search(output):
+            continue  # pytest prints a failed plain assert as "E   assert ...", without the name
         if not re.search(rf"(?<![\w]){re.escape(name)}(?!\w)", output):
             missing.append(name)
     for match in _EXCEPTION_MESSAGE.finditer(observed):
+        if match.group("name") == "AssertionError":
+            continue  # its text is the reporter's own assertion, not a message of the project
         words: list[str] = []
         for word in _flat(match.group("message")).split():
             if words and len(" ".join([*words, word])) > _MESSAGE_PREFIX:
