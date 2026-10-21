@@ -1057,7 +1057,8 @@ def select_callers(
     limit: int = MAX_CALLERS,
 ) -> tuple[list[CallSite], int]:
     """The uses of each name in the project's source outside its own definitions: no tests, no
-    def/class/import lines, no comments, nothing inside the function itself (``own``: name to
+    def/class/import lines (nor a name alone on a line, an entry of a multi-line import), no
+    comments, nothing inside the function itself (``own``: name to
     ``(path, first line, last line)``). Returns up to ``limit`` of them, the names in turn, and
     how many there were in all."""
     allowed = set(sources)
@@ -1068,6 +1069,8 @@ def select_callers(
         for path, line, is_match, text in entries:
             if not is_match or path not in allowed or is_test_path(path) or _NOT_A_USE.match(text):
                 continue
+            if re.fullmatch(rf"\s*{re.escape(name)}\s*,?\s*(?:#.*)?", text):
+                continue  # a name alone on its line: one entry of a multi-line import
             if any(p == path and start <= line <= end for p, start, end in own.get(name, [])):
                 continue
             code = "\n".join(f"{n:>5}  {text_at[(path, n)]}"

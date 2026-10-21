@@ -390,7 +390,7 @@
     facts.push(fact('Change', `${(result.files_changed || []).length} file(s), +${result.lines_added || 0} −${result.lines_removed || 0}`));
     facts.push(fact('Suite without', suiteText(result.suite_before)), fact('Suite with', suiteText(result.suite_after)));
     facts.push(fact('Regression test', result.regression_test_path
-      || `none (${result.regression_test_note || 'the repository has no tests'})`));
+      || `none: ${result.regression_test_note || 'the repository has no tests'}`));
     const parts = [el('dl', { class: 'facts' }, facts)];
     if (result.summary) parts.push(el('p', { class: 'fix-summary' }, el('strong', { text: result.summary })));
     if (result.explanation) {

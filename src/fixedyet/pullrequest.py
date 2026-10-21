@@ -778,7 +778,7 @@ def fix_pr_body(result: FixResult, *, login: str) -> str:
         why = _line(result.regression_test_note or "the repository has no tests")
         lines.append(
             "The test was written by FixedYet (by the model) from the issue. It is **not** part "
-            f"of this pull request ({why}); it is below for reviewers."
+            f"of this pull request: {why.rstrip('.')}. It is below for reviewers."
         )
     if result.repro_test_code:
         lines += [

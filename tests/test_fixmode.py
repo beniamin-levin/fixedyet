@@ -215,6 +215,7 @@ __CALL__=_val\tpkg/aggregates.py:11:        best = _val(value)
 __CALL__=_val\tpkg/aggregates.py-12-        return best
 __CALL__=_val\t--
 __CALL__=_val\tpkg/aggregates.py:30:from pkg.eval import _val
+__CALL__=_val\tpkg/evaluate.py:43:    _val,
 __CALL__=_val\tpkg/aggregates.py:31:    # _val is the value
 __CALL__=_val\ttests/test_eval.py:5:    assert _val(1) == 1
 __CALL__=_val\tdocs/example.py:2:print(_val(3))
@@ -224,7 +225,7 @@ __CALL__=other\tpkg/x-y.py:9:    other()
 
 def test_other_callers_leave_out_tests_definitions_imports_and_the_function_itself() -> None:
     found = fm.parse_callers(ExecResult(exit_code=0, stdout=GREP))
-    sources = ["pkg/eval.py", "pkg/aggregates.py", "pkg/x-y.py"]
+    sources = ["pkg/eval.py", "pkg/aggregates.py", "pkg/x-y.py", "pkg/evaluate.py"]
     sites, total = fm.select_callers(found, sources, {"_val": [("pkg/eval.py", 2, 3)]})
     assert [(s.symbol, s.path, s.line) for s in sites] == [
         ("_val", "pkg/eval.py", 6), ("other", "pkg/x-y.py", 9), ("_val", "pkg/aggregates.py", 11),

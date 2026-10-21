@@ -99,7 +99,7 @@ def test_a_test_that_passes_where_it_would_ship_is_left_out_with_the_reason() ->
             "pass) although it fails at tests/test_fixedyet_repro.py")
     result = verified(regression_test_path=None, regression_test_note=note)
     body = pr.fix_pr_body(result, login="alice")
-    assert f"**not** part of this pull request ({note})" in body
+    assert f"**not** part of this pull request: {note}. It is below for reviewers." in body
     assert "new file mode" not in pr.fix_pr_preview(result, login="alice")
 
 

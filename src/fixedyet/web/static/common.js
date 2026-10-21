@@ -712,7 +712,7 @@
     if ((f.files_changed || []).length) facts.push(fact('Change', `${f.files_changed.length} file${f.files_changed.length === 1 ? '' : 's'}, +${f.lines_added} −${f.lines_removed}`));
     if ((f.context_files || []).length) facts.push(fact('Code shown to the model', f.context_files.join(', ')));
     if (f.regression_test_path) facts.push(fact('Regression test in the PR', f.regression_test_path));
-    else if (f.status === 'verified') facts.push(fact('Regression test in the PR', `none (${f.regression_test_note || 'the repository has no tests'})`));
+    else if (f.status === 'verified') facts.push(fact('Regression test in the PR', `none: ${f.regression_test_note || 'the repository has no tests'}`));
     if (facts.length) root.append(section('The fix', el('dl', { class: 'facts' }, facts)));
 
     if (f.summary || f.explanation) {
