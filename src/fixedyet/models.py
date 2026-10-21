@@ -104,8 +104,11 @@ class SideRun(BaseModel):
 
     ref: str  # tag, commit, branch, or "gold_patch"
     outcomes: list[Outcome] = Field(default_factory=list)
+    # The image the runs forked from. Both sides of an assessment fork the same baseline (the
+    # fix side checks out its ref inside the fork), and old images are pruned: not a way to rerun.
     checkpoint_image: str | None = None
     log_excerpt: str = ""
+    commit: str | None = None  # `git rev-parse HEAD` where the test ran; None in older reports
 
     @property
     def stable_outcome(self) -> Outcome | None:

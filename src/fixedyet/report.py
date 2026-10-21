@@ -124,6 +124,54 @@ def _usage_line(a: Assessment) -> str:
     return ", ".join(parts)
 
 
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+@-]*$")
+
+
+def _repo_of(url: str) -> str | None:
+    match = re.match(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/\d+$", url)
+    return match.group(1) if match and _REPO_RE.match(match.group(1)) else None
+
+
+def _rerun_section(a: Assessment) -> list[str]:
+    """Commands that repeat each side from scratch: a clone at the commit the side ran on.
+
+    Checkpoint images are not offered: both sides fork the same baseline (the fix side checks out
+    its ref inside the fork), and old images are pruned within minutes when runs overlap.
+    """
+    rep = a.reproduction
+    repo = _repo_of(a.issue_url)
+    sides = [(label, side) for label, side in (("Reported version", rep.reported_side),
+                                               ("Fix side", rep.fix_side)) if side]
+    if not repo or not sides or not rep.repro_test_code:
+        return []
+    test_path = rep.repro_test_path or "tests/test_fixedyet_repro.py"
+    out = ["", "## Rerun this yourself", "",
+           "Each side is a fresh clone at the commit it ran on, installed in editable mode with "
+           f"pytest, with the reproduction test above saved as `{_cell(test_path)}`."]
+    for label, side in sides:
+        commit = side.commit if side.commit and re.fullmatch(r"[0-9a-f]{40}", side.commit) else None
+        ref = side.ref if (_GIT_REF_RE.match(side.ref or "") and ".." not in side.ref
+                           and "gold_patch" not in side.ref) else None
+        target = commit or ref
+        if target is None:  # "gold_patch" and the like: nothing a checkout can repeat
+            out += ["", f"{label} (`{_cell(side.ref)}`): not a git ref, so no command is given."]
+            continue
+        what = f"`{_cell(side.ref)}` at `{commit[:12]}`" if commit and ref and ref != commit \
+            else f"`{_cell(target)}`"
+        note = "" if commit else " The commit was not recorded, so this is the ref as it is now."
+        out += ["", f"{label} ({what}):{note}", "", _fence("\n".join([
+            f"git clone https://github.com/{repo}.git fixedyet-rerun && cd fixedyet-rerun",
+            f"git checkout {target}",
+            "python -m pip install -e '.[test]' || python -m pip install -e .",
+            "python -m pip install pytest",
+            f"# save the reproduction test as {test_path}, then:",
+            f"python -m pytest -x -q -p no:cacheprovider {test_path}",
+        ]), "sh")]
+    out += ["", f"Or repeat the whole assessment: `fixedyet run {_cell(a.issue_url)}`"]
+    return out
+
+
 def render_markdown(a: Assessment) -> str:
     rep = a.reproduction
     out: list[str] = [f"# {HEADLINES[a.verdict]}", ""]
@@ -178,23 +226,7 @@ def render_markdown(a: Assessment) -> str:
 
     out += ["", "## Usage", "", _usage_line(a)]
 
-    images = [
-        (label, side)
-        for label, side in (("Reported version", rep.reported_side), ("Fix side", rep.fix_side))
-        if side and side.checkpoint_image
-    ]
-    if images:
-        out += ["", "## Rerun this yourself", "", "Checkpoint images (runs fork from them):", ""]
-        for label, side in images:
-            out.append(f"- {label} (`{_cell(side.ref)}`): `{_cell(side.checkpoint_image or '')}`")
-        out += [
-            "",
-            "Start a sandbox from either image and run:",
-            "",
-            _fence(f"cd /work/repo && python -m pytest -x -q {rep.repro_test_path or '.'}", "sh"),
-            "",
-            f"Or repeat the whole assessment: `fixedyet run {_cell(a.issue_url)}`",
-        ]
+    out += _rerun_section(a)
     return "\n".join(out).rstrip() + "\n"
 
 

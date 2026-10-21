@@ -172,6 +172,7 @@ async def test_checkout_moves_to_another_commit_and_reinstalls(built) -> None:
     assert at_head.outcomes == [Outcome.PASS, Outcome.PASS]
     assert at_old.outcomes == [Outcome.PASS, Outcome.PASS]
     assert at_old.ref == OLD_SHA
+    assert (at_head.commit, at_old.commit) == (HEAD_SHA, OLD_SHA)  # what each side ran on
     assert wrong.outcomes == [Outcome.FAIL, Outcome.FAIL]
 
 

@@ -52,6 +52,8 @@ _RC_RE = re.compile(r"^__RC__=(-?\d+)$", re.MULTILINE)
 _SETUP_FAILED_RE = re.compile(r"^__SETUP_FAILED__=(\w+)$", re.MULTILINE)
 _LINE_PREFIX_RE = re.compile(r"^\| ?", re.MULTILINE)
 _RUN_START_RE = re.compile(r"^__RUN_START__=\d+$", re.MULTILINE)
+_HEAD_RE = re.compile(r"^__HEAD__=([0-9a-f]{40})$", re.MULTILINE)
+_HEAD_LINE_RE = re.compile(r"^__HEAD__=.*\n?", re.MULTILINE)
 _EXTRA_OK_RE = re.compile(r"^__EXTRA_OK__=(\S+)$", re.MULTILINE)
 _EXTRA_FAILED_RE = re.compile(r"^__EXTRA_FAILED__=(\S+)$", re.MULTILINE)
 _PROJECT_EXTRA_RE = {
@@ -636,6 +638,7 @@ def side_script(
         lines.append(
             f"python {TESTDEPS_PATH} extras {repo_dir} {extras_arg} 2>&1 | {_HELPER_LOG_ONLY}"
         )
+    lines.append('echo "__HEAD__=$(git rev-parse HEAD 2>/dev/null)"')  # the commit it runs on
     lines.append(
         f'mkdir -p "$(dirname {path})" && cp {_TEST_FILE_STAGING} {path} '
         "|| { echo __SETUP_FAILED__=write_test; exit 24; }"
@@ -689,7 +692,7 @@ def clean_log(text: str) -> str:
 
 def _run_sections(stdout: str) -> tuple[str, list[tuple[int | None, str]]]:
     """Split the raw script output into the setup text and one ``(exit code, text)`` per run."""
-    chunks = _RUN_START_RE.split(stdout)
+    chunks = _RUN_START_RE.split(_HEAD_LINE_RE.sub("", stdout, count=1))
     sections: list[tuple[int | None, str]] = []
     for chunk in chunks[1:]:
         codes = _RC_RE.findall(chunk)
@@ -747,11 +750,13 @@ def build_side_run(result: ExecResult, *, ref: str, image: str, runs: int) -> Si
         text = f"{text}\n--- stderr ---\n{result.stderr}"
     if result.timed_out:
         text = f"{text}\n[sandbox run timed out]"
+    head = _HEAD_RE.search(result.stdout.split("__RUN_START__=", 1)[0])
     return SideRun(
         ref=ref,
         outcomes=outcomes,
         checkpoint_image=image,
         log_excerpt=text[-LOG_EXCERPT_CHARS:],
+        commit=head.group(1) if head else None,
     )
 
 

@@ -749,6 +749,28 @@ def test_build_side_run_pass_pass_and_fail_fail() -> None:
     assert failed.outcomes == [Outcome.FAIL, Outcome.FAIL]
 
 
+def test_build_side_run_records_the_commit_the_test_ran_on() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    forged = "fedcba9876543210fedcba9876543210fedcba98"
+    out = f"| reinstall log\n__HEAD__={sha}\n" + run_output(1, 1, body=f"__HEAD__={forged}")
+    side = build_side_run(exec_result(out), ref="main", image="i", runs=2)
+    assert side.commit == sha
+    assert "__HEAD__" not in side.log_excerpt.replace(f"__HEAD__={forged}", "")
+    # a test that prints the marker itself only gets a prefixed log line, never the commit
+    only_forged = build_side_run(
+        exec_result(run_output(1, body=f"__HEAD__={forged}")), ref="main", image="i", runs=1
+    )
+    assert only_forged.commit is None
+
+
+def test_side_script_prints_the_commit_after_any_checkout_and_before_the_runs() -> None:
+    script = side_script(test_path="t.py", checkout="main", patch=True, runs=2,
+                         per_run_timeout_s=60)
+    head = script.index('echo "__HEAD__=$(git rev-parse HEAD 2>/dev/null)"')
+    assert script.index("git checkout --quiet --force FETCH_HEAD") < head
+    assert head < script.index("for i in $(seq 1 2)")
+
+
 def test_build_side_run_flaky_and_error_codes() -> None:
     flaky = build_side_run(exec_result(run_output(0, 1)), ref="r", image="i", runs=2)
     assert flaky.outcomes == [Outcome.PASS, Outcome.FAIL]

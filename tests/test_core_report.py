@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from fixedyet.models import (
@@ -28,10 +30,10 @@ def assessment(**overrides) -> Assessment:
             repro_test_path="tests/test_fixedyet_repro.py",
             repro_test_code="def test_x():\n    assert parse('a,b') == ['a', 'b']\n",
             reported_side=SideRun(ref="v1.2.0", outcomes=[Outcome.FAIL, Outcome.FAIL],
-                                  checkpoint_image="img-reported",
+                                  checkpoint_image="img-baseline", commit="a" * 40,
                                   log_excerpt="E   AssertionError: boom"),
             fix_side=SideRun(ref="main", outcomes=[Outcome.PASS, Outcome.PASS],
-                             checkpoint_image="img-fix"),
+                             checkpoint_image="img-baseline", commit="f" * 40),
             fixing_commit="abc123", fixed_in_release="1.3.1",
         ),
         root_cause="parse() slices off the last element.",
@@ -48,7 +50,8 @@ def assessment(**overrides) -> Assessment:
 
 def test_full_report_has_every_section_in_order() -> None:
     md = render_markdown(assessment())
-    headings = [line for line in md.splitlines() if line.startswith("#")]
+    prose = re.sub(r"^```.*?^```$", "", md, flags=re.MULTILINE | re.DOTALL)  # not shell comments
+    headings = [line for line in prose.splitlines() if line.startswith("#")]
     assert headings == [
         "# Fixed on main: fails at the reported version, passes on the fix side",
         "## Results",
@@ -78,9 +81,32 @@ def test_commit_release_usage_and_rerun_block() -> None:
         "12 LLM calls, 45,000 tokens (40,000 in, 5,000 out), $0.0234, 7 sandbox runs, "
         "2 search credits, 211 s wall time, model nvidia/nemotron-3-super-120b-a12b"
     ) in md
-    assert "`img-reported`" in md and "`img-fix`" in md
-    assert "python -m pytest -x -q tests/test_fixedyet_repro.py" in md
-    assert "fixedyet run https://github.com/acme/widgets/issues/42" in md
+    assert "img-baseline" not in md  # checkpoint images are pruned: never offered for a rerun
+    rerun = md[md.index("## Rerun this yourself"):]
+    assert "Reported version (`v1.2.0` at `aaaaaaaaaaaa`):" in rerun
+    assert "Fix side (`main` at `ffffffffffff`):" in rerun
+    assert rerun.count("git clone https://github.com/acme/widgets.git fixedyet-rerun") == 2
+    assert f"git checkout {'a' * 40}\n" in rerun and f"git checkout {'f' * 40}\n" in rerun
+    assert "python -m pytest -x -q -p no:cacheprovider tests/test_fixedyet_repro.py" in rerun
+    assert "fixedyet run https://github.com/acme/widgets/issues/42" in rerun
+
+
+def test_rerun_without_a_recorded_commit_names_the_ref_and_says_so() -> None:
+    a = assessment()
+    a.reproduction.fix_side.commit = None  # a report from before commits were recorded
+    rerun = render_markdown(a)
+    rerun = rerun[rerun.index("## Rerun this yourself"):]
+    assert "Fix side (`main`): The commit was not recorded" in rerun
+    assert "git checkout main\n" in rerun and f"git checkout {'a' * 40}\n" in rerun
+
+
+def test_rerun_gives_no_checkout_for_a_side_that_is_not_a_git_ref() -> None:
+    a = assessment()
+    a.reproduction.fix_side = SideRun(ref="v1.2.0+gold_patch", outcomes=[Outcome.PASS])
+    a.reproduction.fix_side.commit = None
+    md = render_markdown(a)
+    assert "Fix side (`v1.2.0+gold_patch`): not a git ref, so no command is given." in md
+    assert "git checkout v1.2.0+gold_patch" not in md
 
 
 def test_test_code_is_in_a_python_block() -> None:
@@ -138,7 +164,8 @@ def test_not_reproduced_reason_is_shown() -> None:
 
 def test_non_http_issue_url_is_not_linked() -> None:
     md = render_markdown(assessment(issue_url="swe-bench:psf__requests-2317"))
-    assert "](swe-bench" not in md and "swe-bench:psf__requests-2317" in md
+    assert "](swe-bench" not in md
+    assert "## Rerun this yourself" not in md  # no repository to clone
 
 
 @pytest.mark.parametrize("verdict", list(Verdict))
