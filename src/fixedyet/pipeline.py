@@ -632,7 +632,7 @@ async def _bisect_for_fix(ctx: _Context, issue: Issue, evidence: EvidenceResult)
         why=f"git bisect run in the sandbox{merge}: {found.reason}.{shipped}"[:400],
     ))
     if found.merge and found.other_side:
-        listed = "; ".join(f"{sha[:10]} {subject}" for sha, subject in found.other_side)
+        listed = "; ".join(f"{sha[:10]} {title}" for sha, title in found.other_side)
         evidence.evidence.append(Evidence(
             kind="upstream",
             title="The passing code came in through the merge: candidate commits on its other side",

@@ -104,7 +104,7 @@ async def bisect_fix(sb: Sandbox, image: str, *, old: str, new: str, test_path: 
     # 2. bisect_script, NO network, from that image: git bisect run bisect_step_script (the test
     #    once as the test user, no reinstall; fail -> broken (0), pass -> fixed (1), else skip
     #    (125); a commit that does not descend from old -> broken without a run; > 15 runs -> 128,
-    #    stop), 600 s; the answer from `git bisect log`; then the test at the answer and at its
+    #    stop), 60 s a step, 180 s in all; the answer from `git bisect log`; then the test at the answer and at its
     #    parent (the one on old's line); git tag --contains; for a merge, git log -L of the
     #    functions the test imports on the other side (imported_functions) and of their modules
     # parse_bisect -> BisectResult(status found | unverified | ambiguous | not_found | too_many

@@ -893,9 +893,11 @@ async def run_test_on_side(
 MAX_BISECT_STEPS = 12
 """Bisection steps a search may need: up to 2**12 - 1 commits between the two sides."""
 BISECT_SKIP_ALLOWANCE = 3  # extra test runs for steps that cannot be tested (`git bisect skip`)
-BISECT_STEP_TIMEOUT_S = 120
-BISECT_TIMEOUT_S = 600
-BISECT_PREFETCH_TIMEOUT_S = 600
+# A bisection runs inside a live run, which the web demo stops after 25 minutes: these keep its
+# worst case near 7 minutes (a few seconds is usual).
+BISECT_STEP_TIMEOUT_S = 60
+BISECT_TIMEOUT_S = 180
+BISECT_PREFETCH_TIMEOUT_S = 120
 _BISECT_STEP_PATH = "/tmp/ir_bisect_step.sh"  # noqa: S108 - inside the sandbox
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _BISECT_MARK = {

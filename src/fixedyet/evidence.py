@@ -430,7 +430,7 @@ def judge(
         kind = "changelog"
     else:
         kind = "related"
-    cite = [f"#{re.findall(r'\d+', citation.group(0))[-1]}"] if citation else []
+    cite = ["#" + re.findall(r"\d+", citation.group(0))[-1]] if citation else []
     named = cite + strong + weak
     why = f"{host}: names {', '.join(named[:4])}" if named else host
     snippet = _snippet(text, ([citation.group(0)] if citation else []) + strong + weak)
