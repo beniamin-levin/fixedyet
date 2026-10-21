@@ -18,6 +18,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from fixedyet.models import Evidence, Issue
+from fixedyet.untrusted import strip_hidden, strip_hidden_comment
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,16 @@ class GitHubNotFound(GitHubError):
 
 class GitHubRateLimited(GitHubError):
     """The rate limit is exhausted and the reset is too far away to wait for."""
+
+
+def _comment(data: dict[str, Any]) -> str:
+    """``@login: body`` with the hidden parts of the body removed. A bot account's login is
+    written ``name[bot]`` (GitHub's own form), so the bot's folded blocks go too."""
+    user = data.get("user") or {}
+    login = str(user.get("login") or "unknown")
+    if user.get("type") == "Bot" and not login.endswith("[bot]"):
+        login += "[bot]"
+    return strip_hidden_comment(f"@{login}: {data.get('body') or ''}")
 
 
 def parse_issue_url(url: str) -> tuple[str, str, int]:
@@ -231,17 +242,16 @@ class GitHubClient:
             self._get(f"{base}/issues/{number}/comments", {"per_page": MAX_COMMENTS}),
             self._get(base),
         )
+        # What a reader of the thread cannot see (HTML comments, invisible characters, a bot's
+        # folded blocks) is where instructions for AI agents hide: it never reaches the model.
         return Issue(
             url=f"https://github.com/{owner}/{repo}/issues/{number}",
             owner=owner,
             repo=repo,
             number=number,
-            title=data.get("title") or "",
-            body=data.get("body") or "",
-            comments=[
-                f"@{(c.get('user') or {}).get('login', 'unknown')}: {c.get('body') or ''}"
-                for c in comments[:MAX_COMMENTS]
-            ],
+            title=strip_hidden(data.get("title") or ""),
+            body=strip_hidden(data.get("body") or ""),
+            comments=[_comment(c) for c in comments[:MAX_COMMENTS]],
             labels=[label["name"] for label in data.get("labels", []) if isinstance(label, dict)],
             state=data.get("state") or "open",
             created_at=data.get("created_at"),
