@@ -1,8 +1,8 @@
 # FixedYet
 
-*Is this bug fixed yet?* **Reproduce before you answer.** Give it a public GitHub issue. An agent writes a pytest test that should fail while the bug is present, runs it in a microVM sandbox at the version the reporter used, runs the same test again on `main`, and returns a verdict with evidence. The sandbox decides the verdict, not the model.
+*Is this bug fixed yet?* **Reproduce before you answer.** Give it a public GitHub issue. An agent writes a pytest test that should fail while the bug is present, runs it in a sandbox at the version the reporter used, runs the same test again on `main`, and returns a verdict with evidence. The sandbox decides the verdict, not the model.
 
-Live demo: **https://benlevin.fyi/fixedyet/** (one run at a time, with a daily limit, because every run costs real compute)
+Live demo: **https://benlevin.fyi/fixedyet/** (one run at a time, with a daily limit, because every run costs real compute). It runs on the Docker sandbox backend on a free 1 GB Oracle Cloud VM, so a run takes about 1.5 to 5 minutes.
 
 Built for the Nebius x NVIDIA Global AI Hackathon 2026. MIT licensed.
 
@@ -64,7 +64,7 @@ flowchart LR
 | **Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) on Nebius Token Factory | the test-writing loop and the root-cause analysis. Its long context holds the issue thread plus the source files the agent reads |
 | **Nemotron 3 Nano** (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`) on Nebius Token Factory | the first pass of intake. A cheap model for a structured extraction, with Super as the fallback |
 | **Nebius Token Factory** | OpenAI-compatible inference for both models, through the `openai` client with a per-run budget guard |
-| **Nebius Sandboxes** | the core primitive. A baseline **checkpoint** is built once per repository and version, and every test attempt and both verdict runs are **forks** of it, since each run starts from an image |
+| **Nebius Sandboxes** | the intended core primitive. A baseline **checkpoint** is built once per repository and version, and every test attempt and both verdict runs are **forks** of it, since each run starts from an image. The backend is implemented (`sandbox/nebius.py`, on `contree-sdk`) but has **not yet run against the live service**: Sandboxes is in private beta and access was still pending on 2026-10-21. Every result in this README came from the Docker backend, which implements the same checkpoint-and-fork interface (a checkpoint is a committed image) |
 | **Tavily** | search for duplicates and upstream reports, and extract for changelogs. This is information the model has never seen |
 
 ## Quickstart
@@ -247,7 +247,7 @@ The reports in [`examples/`](examples) are saved output of real runs on real Git
 
 The claim "reproduce before you answer" is only worth something if it is measured. The evaluation uses SWE-bench Verified: the base commit plays the reported version, the base commit plus the gold patch plays `main`, and the agent never sees the patch or SWE-bench's own tests. An instance counts as reproduced when the agent's own test fails at the base commit and passes with the patch, in every run.
 
-**Measured on 2026-10-21: 12 of 15 instances reproduced in one full run and 10 of 15 in the other** (80% and 67%; 95% intervals 55-93% and 42-85%). The 15 instances (`eval/instances.txt`) come from light pure-Python projects (requests, pytest, pylint, Flask) whose fixing pull requests date from 2014 to 2023. Both runs used the same code (commit `348a63f`), Nemotron 3 Super with Nemotron 3 Nano for intake, and a **local Docker sandbox** (Colima on an Apple-silicon Mac), not the Nebius microVMs the live demo runs on.
+**Measured on 2026-10-21: 12 of 15 instances reproduced in one full run and 10 of 15 in the other** (80% and 67%; 95% intervals 55-93% and 42-85%). The 15 instances (`eval/instances.txt`) come from light pure-Python projects (requests, pytest, pylint, Flask) whose fixing pull requests date from 2014 to 2023. Both runs used the same code (commit `348a63f`), Nemotron 3 Super with Nemotron 3 Nano for intake, and a **local Docker sandbox** (Colima on an Apple-silicon Mac). The live demo uses the same Docker backend on a 1 GB Oracle Cloud VM.
 
 | Metric | Run A | Run B |
 |---|---|---|
