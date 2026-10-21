@@ -245,25 +245,36 @@ The reports in [`examples/`](examples) are saved output of real runs on real Git
 
 The claim "reproduce before you answer" is only worth something if it is measured. The evaluation uses SWE-bench Verified: the base commit plays the reported version, the base commit plus the gold patch plays `main`, and the agent never sees the patch or SWE-bench's own tests. An instance counts as reproduced when the agent's own test fails at the base commit and passes with the patch, in every run.
 
-**Results pending.** Nothing has been measured yet, so no numbers are published here.
+**Measured on 2026-10-21: 12 of 15 instances reproduced in one full run and 10 of 15 in the other** (80% and 67%; 95% intervals 55-93% and 42-85%). The 15 instances (`eval/instances.txt`) come from light pure-Python projects (requests, pytest, pylint, Flask) whose fixing pull requests date from 2014 to 2023. Both runs used the same code (commit `348a63f`), Nemotron 3 Super with Nemotron 3 Nano for intake, and a **local Docker sandbox** (Colima on an Apple-silicon Mac), not the Nebius microVMs the live demo runs on.
 
-| Metric | Result |
-|---|---|
-| Instances run | pending |
-| Reproduction rate (`fixed_on_main`) | pending |
-| Wrong open-bug rate | pending |
-| Not reproduced rate | pending |
-| Setup failure rate | pending |
-| Cost per issue | pending |
-| Wall time per issue | pending |
+| Metric | Run A | Run B |
+|---|---|---|
+| Reproduction rate (`fixed_on_main`) | 12/15 (80.0%) | 10/15 (66.7%) |
+| Wrong open-bug rate (`open_bug`) | 3/15 (20.0%) | 4/15 (26.7%) |
+| Not reproduced rate | 0/15 (0.0%) | 0/15 (0.0%) |
+| Inconsistent rate | 0/15 (0.0%) | 0/15 (0.0%) |
+| Setup failure rate (`unsupported`) | 0/15 (0.0%) | 1/15 (6.7%) |
+| Needs-info rate | 0/15 (0.0%) | 0/15 (0.0%) |
+| Mean cost per issue | $0.031 | $0.031 |
+| Median cost per issue | $0.025 | $0.022 |
+| Mean wall time per issue | 1m24s | 1m33s |
+| Total cost of the run | $0.47 | $0.46 |
 
-How the instances were chosen, the exact metric definitions, how to rerun them and the per-instance failures are in [`docs/evaluation.md`](docs/evaluation.md).
+What went wrong, plainly: **the misses are the model's tests, not the environment.** In 3 instances (pytest-7432, pylint-4970, pylint-6528) the test fails on both sides in both runs, so FixedYet would have called a fixed bug still open (the "wrong open-bug" rate); requests-2317 and pylint-4604 each missed once. Each time the test asked for more than the fix delivers, had a wrong expectation or called an API that does not exist. The one "setup failure" in run B is that last kind: a test naming a class that does not exist. All 15 environments built in both runs, after the harness fixes the development runs found (listed in the evaluation page).
+
+What the numbers do not say:
+
+- **Contamination.** Nemotron may have seen these public issues and their fixes during training, and several reproduced tests are the issue's own snippet. The score partly measures recall. The live check on open issues, which have no public fix, is **not done yet**.
+- **Small sample, noisy model.** One instance is 6.7 points, and the two runs differ by two instances.
+- **`fixed_on_main` is necessary, not sufficient.** I read all 22 reproduced tests against their issues; that audit was done by an AI (Claude), not a person, and found a few weaknesses (one test calls a live server). A person has not audited them.
+
+The per-instance verdicts, costs and failure causes, the metric definitions, the audit and how to rerun are in [`docs/evaluation.md`](docs/evaluation.md). The raw results are in `eval/results/`.
 
 ## Cost per issue
 
-This is an **estimate** from list prices and the turn cap, to be replaced by the measured figure from the evaluation.
+Measured: **$0.031 on average and $0.024 at the median** per issue at Token Factory list prices (30 instance runs on SWE-bench, most expensive $0.076), and no Tavily credits because eval mode skips web evidence. A live run on a GitHub issue adds the evidence step, so expect a few Tavily credits on top. That is three to ten times below the earlier estimate of $0.10 to $0.30, which assumed up to 20 agent turns over a growing context; the real runs averaged 15 model calls.
 
-Nemotron 3 Super costs $0.30 per million input tokens and $0.90 per million output tokens, and Nano costs $0.06 and $0.24. A run is input-heavy: up to 20 agent turns over a growing context. That works out to roughly $0.10 to $0.30 per issue, plus a few Tavily credits. A hard cap stops any run that goes past `FIXEDYET_RUN_BUDGET_USD` (default $0.60), and the run then ends without a verdict rather than guessing.
+Nemotron 3 Super costs $0.30 per million input tokens and $0.90 per million output tokens, and Nano costs $0.06 and $0.24. A run is input-heavy: on average about 90,000 input and 5,000 output tokens. A hard cap stops any run that goes past `FIXEDYET_RUN_BUDGET_USD` (default $0.60), and the run then ends without a verdict rather than guessing.
 
 Token Factory has no spending limit and charges the card when the balance goes negative, so a second cap lives in the code: `FIXEDYET_TOTAL_BUDGET_USD` (default $20) limits the model spend of **all runs ever**. Every chat call is first checked against a spend ledger, `runs/spend-ledger.json`: if the total so far plus the worst-case cost of the call would pass the cap, the call is refused before it is sent and the run ends as `unsupported` with "total budget reached" in its basis. The web demo answers 429 once less than one run's budget is left, and `fixedyet doctor` prints the total and what remains. To raise the cap, raise the variable; to start counting again, delete the ledger file only after checking the real balance.
 
