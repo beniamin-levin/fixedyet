@@ -13,7 +13,7 @@ Most bug reports get answered from memory, from the docs, or from a model that n
 1. Does the bug exist at the version the reporter used?
 2. Is it already fixed on `main`?
 
-FixedYet answers both by running code, and it hands you the sandbox checkpoint so you can see for yourself.
+FixedYet answers both by running code, and it hands you the commands that rerun each side at the commit it ran on, so you can see for yourself.
 
 Two design decisions carry the project:
 
@@ -33,16 +33,16 @@ flowchart LR
     F1 --> V["Decision rules<br/>verdict.py, no model"]
     F2 --> V
     V --> W["Evidence<br/>Tavily search and extract"]
-    W --> R["Report<br/>markdown, JSON,<br/>checkpoint image IDs"]
+    W --> R["Report<br/>markdown, JSON,<br/>rerun commands per side"]
 ```
 
 1. **Intake.** Fetch the issue and its comments through the GitHub API. Nemotron 3 Nano extracts a repro contract: version, setup, snippet, expected and observed behaviour. Nemotron 3 Super is the fallback if Nano returns an invalid contract. No runnable snippet means the run stops with `needs_info`.
 2. **Baseline checkpoint.** A sandbox clones the repository, checks out the reported version, installs it, installs the project's own test dependencies (see below), adds the packages the issue asks for with a plain `pip install <name>` (names and version pins only, never URLs or options), and is saved as an image. The test-writing sandbox has no network, so this is the only place a dependency can come from.
 3. **Write the test.** A hand-written tool-calling loop (no agent framework) lets Nemotron 3 Super read files, search the code, write a test and run pytest. Each attempt starts from the checkpoint, so failed attempts leave nothing behind.
-4. **Run both sides.** Two forks of the checkpoint run the same test, one at the reported version and one on the fix side, twice each.
+4. **Run both sides.** Two forks of the checkpoint run the same test, one at the reported version and one on the fix side, twice each. Setup (clone, checkout, `pip`) runs as root; the tests run as an unprivileged user that the baseline creates, as they would on a developer's machine (as root, a file made read-only can still be written, and a project's own permission tests fail).
 5. **Decide.** The matrix below gives the verdict. Confidence is high only when every run on both sides agrees and neither side errored.
 6. **Evidence.** Tavily searches for duplicates and upstream reports and extracts changelogs to name the release that holds the fix.
-7. **Report.** Markdown and JSON, with the checkpoint image IDs needed to rerun every step.
+7. **Report.** Markdown and JSON. Each side records the commit it ran on (`git rev-parse HEAD` in the sandbox), and the report's "Rerun this yourself" section gives, per side, the clone, checkout, install and pytest commands for that commit. Checkpoint images are not offered for reruns: both sides fork the same baseline, and old images are pruned (see below).
 
 ### Decision matrix
 
@@ -92,6 +92,7 @@ Keys in `.env` (never committed):
 | `FIXEDYET_SANDBOX` | `nebius` (default) or `docker` for a local Docker daemon |
 | `FIXEDYET_KEEP_CHECKPOINTS` | Docker backend only: how many of the newest checkpoint images to keep (default 6) |
 | `FIXEDYET_FIX_BUDGET_USD` | [fix mode](#fix-mode-open-bugs-to-verified-draft-prs): the model cost cap of one fix, every attempt included (default 0.25) |
+| `FIXEDYET_LEDGER_PATH` | the [spend ledger](#cost-per-issue) that `FIXEDYET_TOTAL_BUDGET_USD` is checked against (default `~/.local/state/fixedyet/spend-ledger.json`, the same whatever `FIXEDYET_RUNS_DIR` is) |
 
 Sandboxes is a beta product, so access may need to be requested from Nebius. The Docker backend runs the same flow on a local daemon.
 
@@ -126,7 +127,7 @@ fixedyet gc --keep 2      # keep two
 fixedyet gc --dry-run     # list what would be removed, remove nothing
 ```
 
-A backport makes two checkpoints (the branch as it was, and with the fix applied) and prunes the same way when it ends. A report's checkpoint image IDs stop resolving once pruning has removed them. Raise `FIXEDYET_KEEP_CHECKPOINTS` if you want to keep more of them.
+A backport makes two checkpoints (the branch as it was, and with the fix applied) and prunes the same way when it ends, and so does a fix. Checkpoints are working storage: with runs in parallel an image can be gone within minutes, so reports never point to one; their rerun commands start from a clean clone at the recorded commit. Raise `FIXEDYET_KEEP_CHECKPOINTS` if you want to keep more images around.
 
 Useful options:
 
@@ -203,7 +204,7 @@ Each gate runs in the sandbox, from a fresh checkout of the head of the target b
 3. **`git cherry-pick -x <fixing commit>`**, with `-m 1` for a merge commit. A fix whose commit is unknown (a squashed pull request that could not be traced) is reported as such.
 4. **Conflicts stop it.** The pick is aborted and the conflicting files are listed (`conflicts`). The model never resolves conflicts: a resolved conflict is new code that nobody has reviewed.
 5. **Reinstall, and the reproduction test must pass.** If it still fails, the fix depends on other changes the branch does not have (`error`).
-6. **The project's own test suite, before and after** (pytest, every test, no `-x`, 900 s each, no network). A test that fails after the cherry-pick and did not fail before is a `regression`. Tests that already failed on the branch are the baseline and are not blamed on the patch. If the suite cannot run (timeout, collection crash) the backport cannot be called verified (`error`), and the patch is attached unverified.
+6. **The project's own test suite, before and after** (pytest, every test, no `-x`, 900 s each, no network, as the unprivileged user). The counts and the ids of failing tests come from a small pytest plugin that FixedYet ships into the sandbox (`suite_plugin.py`, a JSON report), so they do not depend on what the terminal shows: a project's `addopts = "-q"` plus FixedYet's own `-q` hides pytest's "N passed" line (nedbat/cog), and plugins such as pytest-sugar rewrite it. The summary line is the fallback. A test that fails after the cherry-pick and did not fail before is a `regression`. Tests that already failed on the branch are the baseline and are not blamed on the patch. If the suite cannot run (timeout, collection crash) the backport cannot be called verified (`error`), and the patch is attached unverified.
 7. **`git format-patch`** of the cherry-pick is the result's `patch`.
 
 | Status | Meaning |
@@ -261,21 +262,23 @@ fixedyet fix --from-assessment a.json --open-pr --pr-target upstream   # ... on 
 ```
 
 1. **Base.** The head of the project's default branch, found with `git ls-remote`, is built in the sandbox and pinned by commit.
-2. **The test must fail there, twice.** It runs at the path the pull request will add it (`tests/test_issue_<n>.py`, or the repository's `test/` or `testing/` directory), so what is verified is what would ship. A test that passes means `already_fixed`; one that errors or flips means `error`.
-3. **Localize.** The model sees at most 4 of the project's source files and about 60 KB: the project's own frames in the failing traceback first, then files the issue names, then the files that mention the issue's distinctive names most and the files that define what the test imports. The distinctive names are the tests and filters a template applies after `is` or `|`, words in the issue's code spans, CamelCase, CONSTANT_CASE and snake_case names, and quoted words, never the test's own variables. `git grep` in the sandbox counts them in every source file; rare names, many different names and registry entries such as `"escaped": test_escaped` weigh most. A module called `tests.py` inside the package is source like any other; the top-level `tests/` directory is not. A big file is sent as windows (the functions around those lines) with an outline. The model may ask once, at any point, for up to 3 more files, and a file it edits without having seen it, or where its SEARCH block matches nothing, is shown to it in the next round.
-4. **Edits, not diffs.** The answer is search/replace blocks: a file, an exact old block, a new block. On the host, as text, each old block must occur exactly once (a block that only differs by a uniform re-indentation still counts once); only existing `.py` source files may change, never a test, CI, packaging or configuration file, and never a new file; at most 80 changed lines; the file must still parse. Anything else is refused with the reason, and with the closest lines when a block matches nowhere.
-5. **Verify in the sandbox.** The edited files are written over the checkout, `git diff` makes the patch, and the test must pass twice. Then the project's own suite runs without the change (once) and with it, 900 s each, no network: nothing may newly fail. The model's code never runs on the host.
-6. **Iterate.** Up to 3 attempts. A failed one goes back to the model: the rejected edits and why (with the format, the caps and "the smallest change that fixes the root cause" restated), or the diff with the test output, or the newly failing tests with the end of the suite log. Every attempt starts from the original code. The model may also answer that the test itself is wrong (`CANNOT_FIX`), which ends the fix with nothing changed. `FIXEDYET_FIX_BUDGET_USD` (default $0.25) caps the model cost of the whole fix.
+2. **The test must fail there, twice, the way the assessment ran it.** It runs first at the assessment's own path, so the same `conftest.py` and package `__init__.py` are around it (the assessment's own two runs are reused when they ran at this very commit). A pass there is `already_fixed` only when the branch has moved since the assessment saw it fail; at the commit where the assessment saw it fail it is an `error` that says the two runs contradict each other (a flaky test, or one that depends on import order or the environment). A test that errors or flips means `error`.
+3. **Where the pull request adds it.** The regression test goes where the project keeps its tests: the test modules (`test_*.py`, `*_test.py`) under the pytest `testpaths` when the config sets them, in the directory with the most of them, which is the package itself for a project like nedbat/cog (`cogapp/test_issue_<n>.py`), and a subdirectory for issue tests (`test/issues/`, `test/test_issues/`) when there is one. The test must fail there before the change too. If it does not (RDFLib/pySHACL#332: its `test/__init__.py` imports the package before the test can set the environment variable the package reads at import time, so the test passed trivially), the fix is verified at the assessment's path and the pull request carries no test, with the reason in the result and the body.
+4. **Localize.** The model sees at most 4 of the project's source files and about 60 KB: the project's own frames in the failing traceback first, then files the issue names, then the files that mention the issue's distinctive names most and the files that define what the test imports. The distinctive names are the tests and filters a template applies after `is` or `|`, words in the issue's code spans, CamelCase, CONSTANT_CASE and snake_case names, and quoted words, never the test's own variables. `git grep` in the sandbox counts them in every source file; rare names, many different names and registry entries such as `"escaped": test_escaped` weigh most. A module called `tests.py` inside the package is source like any other; the top-level `tests/` directory is not. A big file is sent as windows (the functions around those lines) with an outline. The model may ask once, at any point, for up to 3 more files, and a file it edits without having seen it, or where its SEARCH block matches nothing, is shown to it in the next round. It also sees, by name, up to 10 other callers of the functions around the strongest anchors (`git grep` in the sandbox), with the rule that a change must keep their behaviour and should otherwise change the caller specific to the issue.
+5. **Edits, not diffs.** The answer is search/replace blocks: a file, an exact old block, a new block. On the host, as text, each old block must occur exactly once (a block that only differs by a uniform re-indentation still counts once); only existing `.py` source files may change, never a test, CI, packaging or configuration file, and never a new file; at most 80 changed lines; the file must still parse. Anything else is refused with the reason, and with the closest lines when a block matches nowhere.
+6. **Verify in the sandbox.** The edited files are written over the checkout, `git diff` makes the patch, and the test must pass twice. Then the project's own suite runs without the change (once) and with it, 900 s each, no network, as the unprivileged user: nothing may newly fail. The model's code never runs on the host.
+7. **Other callers.** "Verified" covers what the test and the suite run, nothing else. For a verified change, FixedYet finds the functions the edit touches and lists their other uses in the project's source (a whole-word `git grep`, no tests, no definitions or imports; up to 10, with the total), in the result, the report, the web card and the pull request body under "Other callers of the changed code, not covered by the reproduction", linked at the verified commit.
+8. **Iterate.** Up to 3 attempts. A failed one goes back to the model: the rejected edits and why (with the format, the caps and "the smallest change that fixes the root cause" restated), or the diff with the test output, or the newly failing tests with the end of the suite log. Every attempt starts from the original code. The model may also answer that the test itself is wrong (`CANNOT_FIX`), which ends the fix with nothing changed. `FIXEDYET_FIX_BUDGET_USD` (default $0.25) caps the model cost of the whole fix.
 
 | Status | Meaning |
 |---|---|
 | `verified` | the test fails twice without the change and passes twice with it; the suite has no newly failing test |
 | `not_fixed` | no attempt passed; every attempt and its reason are in the result |
-| `already_fixed` | the test passes on the default branch now |
+| `already_fixed` | the test passes on the default branch, which has moved since the assessment saw it fail |
 | `not_applicable` | not an open bug, no reproduction test, or not a GitHub issue |
-| `error` | a step could not run (the build, the suite on the default branch); the reason says which |
+| `error` | a step could not run (the build, the suite on the default branch), or the test passes at the very commit where the assessment saw it fail; the reason says which |
 
-The result (`FixResult`) holds the attempts, the verified diff, the test and suite tables before and after, the model's one-line summary and its explanation (marked as unchecked text), cost and time. `--open-pr` works only on `verified` and uses the backport's machinery: the branch `fixedyet/fix-<issue>` is pushed to your fork with the change and the regression test, authored by you, and a **draft** pull request is opened against the default branch (your fork's copy by default, the upstream project only after you type its name). The body starts with `Fixes #<n>`, says plainly that the change was written by an AI model and verified by machine, gives the tables, the patch summary and the regression test, and ends with the same disclosure line as a backport. When the repository has no `tests/`, `test/` or `testing/` directory the test is left out of the pull request and the body says so.
+The result (`FixResult`) holds the attempts, the verified diff, the test and suite tables before and after, the model's one-line summary and its explanation (marked as unchecked text), cost and time. `--open-pr` works only on `verified` and uses the backport's machinery: the branch `fixedyet/fix-<issue>` is pushed to your fork with the change and the regression test, authored by you, and a **draft** pull request is opened against the default branch (your fork's copy by default, the upstream project only after you type its name). The body starts with `Fixes #<n>`, says plainly that the change was written by an AI model and verified by machine, gives the tables, the patch summary and the regression test, and ends with the same disclosure line as a backport. When the repository has no tests, or the test does not fail where it would be added, it is left out of the pull request and the body says why.
 
 ### Live results
 
@@ -293,10 +296,19 @@ Read these as a maintainer would. The marshmallow change is exactly the fix the 
 
 After the deploy, the same jinja#2244 fix failed on the demo server (`not_fixed`, $0.02): the model never asked for `tests.py`, guessed its lines, and sent 62 edits in one answer. That run is why localization is now symbol-based, why a file the model aims at without having seen it is shown to it, and why the format and the caps are restated after a bad answer. Two local runs after those changes (Docker backend) showed the model `runtime.py`, `tests.py` (whole), `environment.py` and `filters.py` from the start, and both were **verified on the first attempt** ($0.006 and $0.008, 25 s and 47 s, 911 passed before and after). Both changed `test_escaped` in `src/jinja2/tests.py` so that an `Undefined` value is never "escaped", the same approach as the open upstream pull request; the second run's change is that pull request's one-line change. The fix was then deployed (`af45ba0`) and rerun on the demo server from the live report: **verified on the first attempt** in 140 s (one model call; 911 passed before and after), with the same one-line change. No pull request was opened, because the open upstream one already makes it and the jinja maintainer has reviewed it.
 
+Three more live runs on 21 October 2026, after the changes in steps 2, 3 and 7 and the suite plugin (local Docker backend, from saved assessments, no pull request opened):
+
+| Issue | Result | Before these changes | Now |
+|---|---|---|---|
+| [nedbat/cog#94](https://github.com/nedbat/cog/issues/94) | **verified**, 1 attempt, $0.008, 164 s | `error`: the suite "did not run" (`-qq` hid the summary line) and 4 `WritabilityTests` failed as root; no regression test (the tests live in `cogapp/`) | 185 passed without and with the change; the regression test goes to `cogapp/test_issue_94.py`; 3 other callers of `process_file` listed |
+| [RDFLib/rdflib#3602](https://github.com/RDFLib/rdflib/issues/3602) | **verified**, 2 attempts, $0.018, 301 s | verified, with a change to `_val` that SPARQL MIN and MAX also use, and nothing said about it | the same kind of change to `_val`, but the result now lists its other callers: `min(..., key=_val)` and `max(..., key=_val)` in `aggregates.py` and the `ORDER BY` sort in `evaluate.py`. The model had been shown them and still changed `_val`: the list is for the reviewer, who decides |
+| [RDFLib/pySHACL#332](https://github.com/RDFLib/pySHACL/issues/332) | **verified**, 2 attempts, $0.019, 142 s | `already_fixed`, wrongly | fails at the assessment's path as the assessment saw; passes trivially at `test/issues/test_issue_332.py`, so the pull request would carry no test and says why; fixed in `mix_in_ontology` (380 passed, 15 failed before and after) |
+
 ### Limits
 
 - A verified fix is a fix that the model's own test accepts and the project's suite does not reject. That is evidence, not a review: the test can be too narrow and the suite can miss things. Read the diff as you would a stranger's pull request.
 - The model sees a few files, not the whole project. A fix that needs a change in code it was not shown can only be reached through its one request for more files.
+- The other-callers list is a search by name: it can miss a call through another name (an alias, `getattr`, a callback registered elsewhere) and can list a different function with the same name. It shows the reviewer where to look; it proves nothing.
 - An open bug often has a pull request already. Look at the issue's linked pull requests before you open another.
 
 ## Web demo
@@ -344,9 +356,9 @@ Measured: **$0.031 on average and $0.024 at the median** per issue at Token Fact
 
 Nemotron 3 Super costs $0.30 per million input tokens and $0.90 per million output tokens, and Nano costs $0.06 and $0.24. A run is input-heavy: on average about 90,000 input and 5,000 output tokens. A hard cap stops any run that goes past `FIXEDYET_RUN_BUDGET_USD` (default $0.60), and the run then ends without a verdict rather than guessing.
 
-Token Factory has no spending limit and charges the card when the balance goes negative, so a second cap lives in the code: `FIXEDYET_TOTAL_BUDGET_USD` (default $20) limits the model spend of **all runs ever**. Every chat call is first checked against a spend ledger, `runs/spend-ledger.json`: if the total so far plus the worst-case cost of the call would pass the cap, the call is refused before it is sent and the run ends as `unsupported` with "total budget reached" in its basis. The web demo answers 429 once less than one run's budget is left, and `fixedyet doctor` prints the total and what remains. To raise the cap, raise the variable; to start counting again, delete the ledger file only after checking the real balance.
+Token Factory has no spending limit and charges the card when the balance goes negative, so a second cap lives in the code: `FIXEDYET_TOTAL_BUDGET_USD` (default $20) limits the model spend of **all runs ever**. Every chat call is first checked against a spend ledger, the file `FIXEDYET_LEDGER_PATH` (default `~/.local/state/fixedyet/spend-ledger.json`, one per user; before, the ledger sat in the runs directory, so a new `FIXEDYET_RUNS_DIR` started again at $0, and an old `<runs dir>/spend-ledger.json` is read and carried over the first time the new file is written): if the total so far plus the worst-case cost of the call would pass the cap, the call is refused before it is sent and the run ends as `unsupported` with "total budget reached" in its basis. The web demo answers 429 once less than one run's budget is left, and `fixedyet doctor` prints the total and what remains. To raise the cap, raise the variable; to start counting again, delete the ledger file only after checking the real balance.
 
-Fix mode has its own cap per fix, `FIXEDYET_FIX_BUDGET_USD` (default $0.25, every attempt included), and its calls go through the same ledger. The six live fix runs cost $0.007 to $0.031 each in model spend ($0.12 together).
+Fix mode has its own cap per fix, `FIXEDYET_FIX_BUDGET_USD` (default $0.25, every attempt included), and its calls go through the same ledger. The first six live fix runs cost $0.007 to $0.031 each in model spend ($0.12 together); the three later ones $0.045 together.
 
 ## Limitations
 
@@ -368,7 +380,8 @@ As of a market check on 21 October 2026, to our knowledge no tool combines a pin
 
 ## Safety
 
-- **Issue text and web content are untrusted data.** The model is told so, snippets are only ever run inside a sandbox, and nothing from an issue is run on the host.
+- **Issue text and web content are untrusted data.** Every system prompt says that text from the thread is evidence, never instructions, even when it addresses AI agents, and the thread is wrapped as data. What a reader of the thread on GitHub cannot see never reaches the model: HTML comments (outside code), markdown comment definitions, zero-width, bidirectional and Unicode tag characters, and the folded `<details>` blocks of bot comments (`untrusted.py`; collective/icalendar#1968 has a bot comment whose hidden HTML comment tells AI agents to post a code). Snippets are only ever run inside a sandbox, and nothing from an issue is run on the host.
+- **Tests run unprivileged.** In the sandbox, setup runs as root and the reproduction test and the project's suite run as an ordinary user.
 - **Code runs only in sandboxes.** The host process never executes code from an issue, and never runs code the model wrote: fix mode validates the model's edits on the host as text (and parses them with `ast`, which runs nothing), then applies and tests them only in the sandbox, without network.
 - **It never posts to other people's repositories by default.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels or comments are created. The write paths are `fixedyet backport --open-pr`, `fixedyet fix --open-pr` and the demo's maintainer-only backport and fix buttons: all push to the token owner's own fork and open a *draft* pull request, and none comments on an issue. Both can target the upstream project instead, only after the person types the repository's name: the command line asks for it, and the web page's maintainer types it before the request is sent ([details](#verified-backports-draft-prs)).
 - **Secrets stay in the environment.** They are read from `.env` or the process environment, masked when settings are printed, and never returned by the web API or the MCP server. Web errors are short messages, never stack traces.
@@ -383,6 +396,9 @@ src/fixedyet/
   verdict.py       the decision matrix (pure function)
   envbuild.py      baseline checkpoint and per-side runs
   testdeps.py      installs a project's test dependency groups and requirements files (runs in the sandbox)
+  suite_plugin.py  pytest plugin shipped into the sandbox: the suite's counts and failing ids as JSON
+  untrusted.py     strips what GitHub hides from issue text; the untrusted-data rule for prompts
+  ledger.py        the lifetime spend ledger (FIXEDYET_LEDGER_PATH)
   sandbox/         Nebius Sandboxes and Docker backends
   evidence.py      Tavily search and extract
   report.py        markdown rendering

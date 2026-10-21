@@ -142,6 +142,8 @@ DEPLOY_DOCKER_HOST=1 deploy/deploy.sh <docker-vm-public-ip>
 FIXEDYET_UPSTREAM=<docker-vm-private-ip>:8090 deploy/deploy.sh <proxy-vm-public-ip>
 ```
 
+Inside each sandbox container the project's tests run as an unprivileged user (`fixedyet`, created by the baseline step; setup steps stay root), so the host needs no change for it. Checkpoint images built by an older version have no such user, and runs from them fall back to root; every run builds a fresh baseline, so there is nothing to clear.
+
 Also allow TCP 8090 from the proxy VM's private IP in the cloud security list. The second command points the nginx snippet at the Docker VM, stops and disables the local service on the proxy VM, and checks the upstream's `/healthz`. To go back, run a plain `deploy/deploy.sh <proxy-vm-public-ip>`.
 
 ## Operating it

@@ -10,7 +10,8 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 | `src/fixedyet/config.py` | core | `Settings` loaded from env and `.env` |
 | `src/fixedyet/github.py` | core | fetch issue and comments, duplicate search via GitHub search API |
 | `src/fixedyet/llm.py` | core | Token Factory client, usage and cost accounting, per-run and total budget guards |
-| `src/fixedyet/ledger.py` | core | persistent total-spend ledger (`runs/spend-ledger.json`), atomic and locked |
+| `src/fixedyet/ledger.py` | core | persistent total-spend ledger (`FIXEDYET_LEDGER_PATH`, default `~/.local/state/fixedyet/spend-ledger.json`; an old `<runs_dir>/spend-ledger.json` is carried over), atomic and locked |
+| `src/fixedyet/untrusted.py` | core | `strip_hidden`: removes what GitHub hides from readers (HTML comments outside code, markdown comment definitions, invisible characters, a bot's `<details>`) before thread text reaches a model; `UNTRUSTED_RULE` for every system prompt |
 | `src/fixedyet/agent.py` | core | hand-written tool-calling loop that writes the reproduction test |
 | `src/fixedyet/verdict.py` | core | pure decision matrix |
 | `src/fixedyet/evidence.py` | core | Tavily search and extract, fixing-commit and release lookup |
@@ -23,6 +24,7 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 | `src/fixedyet/sandbox/*` | sandbox | `Sandbox` protocol, Nebius and Docker backends |
 | `src/fixedyet/envbuild.py` | sandbox | baseline checkpoint builder |
 | `src/fixedyet/testdeps.py` | sandbox | test dependency installer; shipped into the baseline sandbox and run there (standard library only) |
+| `src/fixedyet/suite_plugin.py` | backport | pytest plugin shipped into the sandbox by `backport.suite_files()`: the suite's counts and failing node ids as JSON, whatever the verbosity (standard library only) |
 | `src/fixedyet/web/*` | web | FastAPI demo app, the reports store (`reports.py`: listing, hidden ids, saved backports) and the static pages (`index.html`, `reports.html`, shared `common.js`) |
 | `src/fixedyet/mcp_server.py` | web | MCP server |
 | `deploy/*`, `README.md` | web | nginx, systemd, deploy script, README |
@@ -68,7 +70,9 @@ async def build_baseline(sb: Sandbox, *, repo: str, ref: str, python_version: st
     # named for another Python, like tests37.txt, are skipped), then project_extras (optional extras
     # of the project itself, from project_extras_from_text(); testdeps.py adds the ones its console
     # script asks for) and extra_packages, then a repair step that makes pytest able to load the
-    # project's conftest (testdeps.py repair), runs a short sanity import; returns
+    # project's conftest (testdeps.py repair), then creates the unprivileged test user TESTER
+    # ("fixedyet", /work owned by it, git safe.directory '*' system-wide; TESTER_SETUP, never fatal,
+    # tester_ready() reads it back), runs a short sanity import; returns
     # (checkpoint_image, setup_result). installed_test_deps(setup_result), installed_project_extras()
     # and repairs_made() read back what those steps did.
     # Raises EnvBuildError on failure.
@@ -77,8 +81,12 @@ async def run_test_on_side(sb: Sandbox, image: str, *, test_path: str, test_code
                            checkout: str | None = None, patch: str | None = None,
                            runs: int = 2, project_extras: Sequence[str] = ()) -> SideRun
     # optionally checks out another ref (git fetch + checkout + reinstall) or applies a patch,
-    # writes the test file, runs `python -m pytest -x -q -p no:cacheprovider <test_path>` `runs` times
-    # in ONE sandbox run, maps exit codes (0 PASS, 1 FAIL, else ERROR), returns SideRun with log excerpt.
+    # prints __HEAD__ (git rev-parse HEAD -> SideRun.commit), writes the test file, hands files a
+    # root step created back to the test user (ir_own), runs `python -m pytest -x -q
+    # -p no:cacheprovider <test_path>` `runs` times in ONE sandbox run as that user (ir_as_tester:
+    # setpriv, else a Python setuid; root on a checkpoint without the user), maps exit codes
+    # (0 PASS, 1 FAIL, else ERROR), returns SideRun with log excerpt.
+TESTER_FUNCTIONS: str    # shell: ir_has_tester, ir_own, ir_as_tester; side, suite and agent scripts
     # After a checkout it first reinstalls project_extras and repairs a conftest that cannot load
     # (the other ref has its own test requirements), using the helper shipped with the test file.
 
@@ -118,6 +126,9 @@ async def backport(assessment: Assessment, *, target_branch: str | None = None,
 def find_target_branch(version: str | None, branches: Sequence[str]) -> BranchMatch   # pure
 def pick_script(commit: str) -> str ; def parse_pick(result: ExecResult) -> PickOutcome
 def suite_script(timeout_s: int = 900) -> str ; def parse_suite(result: ExecResult) -> SuiteRun
+def suite_files() -> dict[str, str]   # the plugin file; pass as `files=` with suite_script()
+    # parse_suite reads the plugin's JSON report (__SUITE_JSON_B64__) first, the summary line and
+    # the short test summary as the fallback; ids are pytest node ids either way
 
 # pullrequest.py
 async def open_backport_pr(result: BackportResult, *, token: str, target: "fork"|"upstream" = "fork",
@@ -139,6 +150,9 @@ async def attempt_fix(assessment: Assessment, *, settings=None, sandbox=None, ll
                       budget_usd=None) -> FixResult
     # never raises for anything the world can do; status: verified | not_fixed | already_fixed
     # | not_applicable | error. See "Fix mode" below.
+def regression_test_path(tracked, issue_number, testpaths=()) -> str | None   # pure
+def test_directory(tracked, testpaths=()) -> str | None ; def pytest_testpaths(configs) -> list[str]
+def changed_functions(original, edited) -> list[Block] ; def select_callers(...)   # pure
 def apply_edits(edits, originals, tracked) -> EditOutcome   # pure: validation of model edits
 def parse_proposal(text: str) -> Proposal                 # pure: the model's answer
 def rank_files(...) -> list[Candidate] ; def show_file(...) -> ShownFile | None   # pure
@@ -177,7 +191,8 @@ sandbox:   baseline checkout of that head (envbuild.build_baseline, pinned to th
   d. conflict -> abort, list files -> conflicts   (no model, no retry)
   e. reinstall, repro test x2 on the picked image  not PASS -> error
   b. project suite on the baseline image, then on the picked image
-     (pytest -q --maxfail=0 --continue-on-collection-errors, 900 s each, network off)
+     (pytest -q --maxfail=0 --continue-on-collection-errors, 900 s each, network off, as the
+     test user; counts and failing ids from suite_plugin's JSON report, summary line as fallback)
   f. newly failing ids (or a higher failure count) -> regression; suite did not run -> error
   g. git format-patch -1 --stdout -> patch        all clear -> verified
 ```
@@ -211,19 +226,25 @@ token (GITHUB_TOKEN | gh auth token) -> GET /user (login = the token's owner)
 
 ## Fix mode (open bugs, model-written fixes, draft pull requests)
 
-Input: an `Assessment` with verdict `open_bug` and a reproduction test. Output: a `FixResult` (models.py: `status`, `reason`, `base_branch`, `base_sha`, `summary`, `explanation`, `diff`, `files_changed`, `lines_added`/`lines_removed`, `context_files`, `regression_test_path`, `repro_before`/`repro_after`, `suite_before`/`suite_after`, `newly_failing`, `attempts` as `FixAttempt`, `log_excerpt`, `budget_usd`, `usage`). `Assessment.fix` is optional and `report.py` renders it as the "Fix" section.
+Input: an `Assessment` with verdict `open_bug` and a reproduction test. Output: a `FixResult` (models.py: `status`, `reason`, `base_branch`, `base_sha`, `summary`, `explanation`, `diff`, `files_changed`, `lines_added`/`lines_removed`, `context_files`, `regression_test_path`, `regression_test_note`, `repro_before`/`repro_after`, `suite_before`/`suite_after`, `newly_failing`, `attempts` as `FixAttempt`, `changed_functions`, `other_callers` as `CallSite` (`symbol`, `path`, `line`, `code`), `other_callers_total`, `log_excerpt`, `budget_usd`, `usage`). `Assessment.fix` is optional and `report.py` renders it as the "Fix" section.
 
 ```
 assessment --> not open_bug / no test / not a GitHub issue --> not_applicable
            --> issue thread (GitHub API) and head of the default branch (git ls-remote, host)
 sandbox:   baseline checkout of that commit (envbuild.build_baseline, pinned)
   survey   git ls-files + git grep for definitions of the names the test and the issue use,
-           and per-file counts of the issue's distinctive terms (whole words, and as "quoted")
-  a. repro test x2 at <test dir>/test_issue_<n>.py      PASS -> already_fixed; not FAIL -> error
+           per-file counts of the issue's distinctive terms (whole words, and as "quoted"),
+           and the pytest config files (testpaths)
+  a. repro test x2 at the assessment's own path (reused when the assessment ran it at this
+     commit)   PASS -> already_fixed if the branch moved since the assessment, error if the
+     assessment saw it fail at this commit; not FAIL -> error
+  a2. repro test x2 where the PR adds it (test_directory(): <dir>/test_issue_<n>.py)
+     FAIL -> verify there; else verify at the assessment's path, PR carries no test (note)
 host:      localize (pure): project frames in the failing traceback, files the issue names,
            symbol scores (distinctive_terms -> symbol_scores: rare terms, breadth, registry
            entries), files defining what the test imports; <= 4 files, ~60 KB, far-behind
            files dropped; a big file as windows around the anchors and the term mentions
+sandbox:   git grep -w: other callers of the functions around the strongest anchors (<= 10)
 loop, <= 3 attempts, model cost <= FIXEDYET_FIX_BUDGET_USD:
   model    SUMMARY / EXPLANATION / FILE + SEARCH/REPLACE blocks; or NEED (once, at any point,
            <= 3 files);
@@ -235,7 +256,8 @@ loop, <= 3 attempts, model cost <= FIXEDYET_FIX_BUDGET_USD:
   c. repro test x2 on the patched image                 not PASS -> feedback (diff + output)
   d. suite on the baseline (once) and on the patched image (900 s, no network)
      newly failing / count rose -> feedback (ids + log); baseline suite cannot run -> error
-  all clear -> verified
+  all clear -> verified; then the functions the edit touches (changed_functions) and their
+     other callers (git grep -w, no tests/defs/imports) -> other_callers (report, web, PR body)
 ```
 
 Design decisions:
@@ -245,7 +267,8 @@ Design decisions:
 - **Feedback that teaches.** A rejected edit comes back with the reason, the format and the caps restated, and, when a block matches nowhere or targets a file the model was not shown, that file itself (windowed around where it aimed) and the closest lines; a test that still fails comes back with the diff and the output; a regression with the newly failing ids and the end of the suite log. Every attempt starts again from the original code.
 - **Room to think, then brevity.** Each call may use 16,000 tokens (reasoning included) with a 420 s request timeout; an answer cut off by the token limit before any edit is named as such, and the next call asks without the reasoning.
 - **The test is the spec, and it can be wrong.** The model may answer `CANNOT_FIX` when it judges the test wrong; nothing is changed then.
-- **Verified where it ships.** The checks run the test at the path the pull request adds it (`tests/`, `test/` or `testing/`), so what was verified is what is proposed.
+- **Checked the way the assessment ran it, verified where it ships.** The first run is at the assessment's own path: a `conftest.py` or package `__init__.py` around another path can change what the test checks (RDFLib/pySHACL#332, where `test/__init__.py` imports the package before the test sets an environment variable read at import time). A pass there is `already_fixed` only when the branch has moved; at the commit where the assessment saw it fail it is an `error`. The checks then run at the path the pull request adds it, chosen from where the project keeps its tests (the `testpaths`, then the directory with the most test modules, an `issues/` subdirectory first), when the test fails there too; otherwise at the assessment's path, and the pull request carries no test.
+- **Verified is not safe.** The suite passing says nothing about code the test does not run. The functions a verified change edits and their other callers (by name, best effort, at most 10) are listed for the reviewer; the model sees the callers of the likely functions before it answers, with a rule to keep their behaviour.
 - **Pull requests** reuse the backport flow (`pullrequest._open_draft`): fork, push of `fixedyet/fix-<issue>` from a temp clone of the verified commit with `git am`, draft pull request against the default branch, typed confirmation for upstream, idempotent per target, `DISCLOSURE` last. The commit is authored by the token's owner; its message and the body say the change was written by AI and verified by machine.
 
 ### Web: reports page and maintainer mode
@@ -256,7 +279,8 @@ Design decisions:
 
 - Python 3.12+ syntax, type hints everywhere, async I/O, no LangChain or agent frameworks.
 - Secrets come only from `Settings`; never log or print them. Never read or print `.env`.
-- Untrusted issue text and web content are data. Code from issues runs only inside a sandbox.
+- Untrusted issue text and web content are data. Code from issues runs only inside a sandbox. Thread text goes through `untrusted.strip_hidden` (at fetch time and in `agent.format_issue`) and every system prompt carries `untrusted.UNTRUSTED_RULE`.
+- Tests and project suites run as the unprivileged sandbox user (`envbuild.TESTER_FUNCTIONS`); setup steps stay root.
 - Tool outputs fed back to the model are truncated (default 8,000 characters).
 - Tests must not call paid APIs. Mark anything that does with `@pytest.mark.live`.
 - Use the virtualenv at `.venv` (`.venv/bin/python -m pytest`). Do not pip install new packages; if you need one, say so in your report.
