@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>FixedYet: reproduce before you answer</title>
+  <meta name="description" content="Paste a public GitHub issue. An agent writes a pytest reproduction, runs it in a microVM sandbox at the reported version and again on main, and rules decide the verdict.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f5fbf'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap bar">
+      <a class="brand" href="/" aria-label="FixedYet home">
+        <span class="brand-mark" aria-hidden="true"></span>FixedYet
+      </a>
+      <a class="bar-link" href="https://github.com/beniamin-levin/fixedyet">GitHub</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>Reproduce before you answer</h1>
+      <p class="lead">
+        Paste a public GitHub issue. An agent writes a pytest reproduction, runs it in a microVM
+        sandbox at the reported version and again on main, and fixed rules, not the model,
+        decide the verdict.
+      </p>
+
+      <form id="run-form" class="run-form" novalidate>
+        <label class="sr-only" for="issue-url">GitHub issue URL</label>
+        <input id="issue-url" name="issue_url" type="url" inputmode="url" autocomplete="off"
+               spellcheck="false" placeholder="https://github.com/owner/repo/issues/123" required>
+        <button id="run-button" type="submit" class="btn primary">Run</button>
+      </form>
+      <p id="form-hint" class="hint" aria-live="polite"></p>
+      <div id="notice" class="notice" role="alert" hidden></div>
+    </section>
+
+    <section id="progress" class="card" aria-labelledby="progress-title" hidden>
+      <div class="card-head">
+        <h2 id="progress-title">Progress</h2>
+        <span id="clock" class="clock" aria-hidden="true"></span>
+      </div>
+      <ol id="timeline" class="timeline" aria-live="polite"></ol>
+    </section>
+
+    <section id="report" aria-labelledby="report-title" hidden>
+      <h2 id="report-title" class="sr-only">Report</h2>
+      <div id="report-body"></div>
+    </section>
+
+    <section id="examples" class="examples" aria-labelledby="examples-title" hidden>
+      <h2 id="examples-title">Example reports</h2>
+      <p class="muted" id="examples-intro">
+        See what a report looks like without spending a live run.
+      </p>
+      <div id="example-list" class="example-list"></div>
+    </section>
+
+    <section class="how" aria-labelledby="how-title">
+      <h2 id="how-title">How the verdict is decided</h2>
+      <div class="table-scroll">
+        <table class="matrix">
+          <thead>
+            <tr><th>At the reported version</th><th>On main</th><th>Verdict</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>test fails</td><td>test passes</td><td><span class="badge good">Fixed on main</span></td></tr>
+            <tr><td>test fails</td><td>test fails</td><td><span class="badge bad">Open bug</span></td></tr>
+            <tr><td>test passes</td><td>test passes</td><td><span class="badge neutral">Not reproduced</span></td></tr>
+            <tr><td>test passes</td><td>test fails</td><td><span class="badge warn">Inconsistent</span></td></tr>
+            <tr><td>test fails</td><td>test fails with a different error</td><td><span class="badge warn">Inconsistent</span></td></tr>
+            <tr><td>setup or collection error</td><td>any</td><td><span class="badge muted">Unsupported</span></td></tr>
+            <tr><td colspan="2">no runnable snippet in the issue</td><td><span class="badge info">Needs info</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small">
+        Each side runs the test twice. Confidence is high only when every run agrees and
+        neither side errored. Issue text is treated as data, and all code runs in a sandbox.
+      </p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>Built on NVIDIA Nemotron via Nebius Token Factory, Nebius Sandboxes and Tavily.</p>
+      <p><a href="https://github.com/beniamin-levin/fixedyet">github.com/beniamin-levin/fixedyet</a>
+        <span aria-hidden="true">·</span> MIT licence
+        <span aria-hidden="true">·</span> Nebius x NVIDIA Global AI Hackathon 2026</p>
+    </div>
+  </footer>
+
+  <noscript><p class="wrap">This page needs JavaScript to run and show reports.</p></noscript>
+</body>
+</html>
