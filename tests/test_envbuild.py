@@ -928,6 +928,11 @@ fi
 echo "stub python: $*" >&2
 exit 0
 """
+STUB_REFUSE = """#!/bin/bash
+echo "$(basename "$0") $*" >> "$FAKE_STATE/commands.log"
+exit 1
+"""
+
 STUB_GIT = """#!/bin/bash
 echo "git $*" >> "$FAKE_STATE/commands.log"
 if [ "${FAKE_GIT_FAIL:-}" = "$1" ]; then echo "fatal: git $1 failed" >&2; exit 1; fi
@@ -1008,7 +1013,9 @@ def local_bash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalEnv:
     bindir, state, repo = tmp_path / "bin", tmp_path / "state", tmp_path / "repo"
     for directory in (bindir, state, repo):
         directory.mkdir()
-    stubs = {"python": STUB_PYTHON, "git": STUB_GIT, "pip": STUB_PIP, "timeout": STUB_TIMEOUT}
+    stubs = {"python": STUB_PYTHON, "git": STUB_GIT, "pip": STUB_PIP, "timeout": STUB_TIMEOUT,
+             # the host must never get a user or a chown from the baseline's tester step
+             "useradd": STUB_REFUSE, "adduser": STUB_REFUSE, "chown": STUB_REFUSE}
     for name, body in stubs.items():
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755 | stat.S_IEXEC)
@@ -1102,9 +1109,11 @@ async def test_bash_baseline_script_runs_through_all_steps(local_bash: LocalEnv)
         "__STEP__=testdeps",
         "__STEP__=project_extras",
         "__STEP__=repair",
+        "__STEP__=tester",
         "__STEP__=sanity",
         "__STEP__=done",
     ]
+    assert "__TESTER_FAILED__=setup" in result.stdout  # not fatal: tests then run as root
     commands = (local_bash.state / "commands.log").read_text().splitlines()
     assert commands[0].startswith("git clone --filter=blob:none https://github.com/psf/requests ")
     assert "git checkout --quiet v2.31.0" in commands

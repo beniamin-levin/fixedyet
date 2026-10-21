@@ -40,6 +40,31 @@ def test_head():
     out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd="/work/repo", text=True)
     assert out.strip() == "{sha}"
 """
+# As root, chmod 0o444 does not stop a write: projects that test their read-only handling
+# (nedbat/cog's WritabilityTests) fail at baseline. The tests run as an unprivileged user.
+UNPRIVILEGED = """import os
+
+
+def test_not_root():
+    assert os.getuid() != 0
+
+
+def test_a_read_only_file_cannot_be_written(tmp_path):
+    path = tmp_path / "ro.txt"
+    path.write_text("x")
+    path.chmod(0o444)
+    try:
+        open(path, "w")
+    except PermissionError:
+        return
+    raise AssertionError("the read-only file was writable")
+
+
+def test_the_checkout_is_writable_next_to_the_test():
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "ir_written.txt"), "w") as handle:
+        handle.write("ok")
+"""
 MARKER_TEST = """def test_marker():
     with open("/work/repo/ir_marker.txt") as handle:
         assert handle.read() == "patched\\n"
@@ -363,3 +388,27 @@ async def test_the_requirements_file_of_another_python_does_not_replace_the_righ
     assert result.exit_code == 0, result.stderr
     assert "six==1.16.0" in result.stdout.split("---")[1].splitlines()
     assert envbuild.installed_test_deps(result).installed == ["file:requirements/tests.txt"]
+
+
+async def test_the_baseline_creates_the_unprivileged_test_user(built) -> None:
+    sandbox, image, result, _ = built
+    assert envbuild.tester_ready(result)
+    owner = await sandbox.run(
+        image, "stat -c %U /work/repo /work/repo/.git && id -u fixedyet", workdir="/work/repo",
+        timeout_s=60,
+    )
+    assert owner.stdout.split()[:2] == ["fixedyet", "fixedyet"]
+
+
+async def test_tests_run_unprivileged_on_the_baseline_and_after_a_checkout(built) -> None:
+    sandbox, image, _, _ = built
+    here = await run_test_on_side(
+        sandbox, image, test_path="tests/test_ir_user.py", test_code=UNPRIVILEGED
+    )
+    assert here.outcomes == [Outcome.PASS, Outcome.PASS], here.log_excerpt
+    # a checkout and a reinstall run as root; the files they create are handed back
+    there = await run_test_on_side(
+        sandbox, image, test_path="tests/test_ir_user.py", test_code=UNPRIVILEGED,
+        checkout=OLD_SHA,
+    )
+    assert there.outcomes == [Outcome.PASS, Outcome.PASS], there.log_excerpt

@@ -323,18 +323,22 @@ def suite_script(timeout_s: int = SUITE_TIMEOUT_S) -> str:
     ``--continue-on-collection-errors`` keeps one module that cannot be imported from hiding the
     rest; ``--maxfail=0`` undoes a ``-x`` the project's own addopts might set. ``-p no:pretty``
     and ``-p no:sugar`` switch off plugins that replace pytest's summary line (pydantic's test
-    dependencies bring pytest-pretty), which the fallback reads.
+    dependencies bring pytest-pretty), which the fallback reads. The tests run as the
+    unprivileged user of `envbuild.TESTER_FUNCTIONS`, not as root.
     """
     return "\n".join(
         [
             "set -u",
             "export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1",
+            envbuild.TESTER_FUNCTIONS,
             f"cd {REPO_DIR} || {{ echo __SETUP_FAILED__=cd; exit 20; }}",
             f"rm -f {SUITE_REPORT_PATH}",
+            "ir_own",
             # without the plugin file (a caller that did not ship it) pytest still runs
             f"ir_report=; [ -f {SUITE_PLUGIN_DIR}/{SUITE_PLUGIN}.py ] "
             f"&& ir_report='-p {SUITE_PLUGIN}'",
-            f"timeout -k 10 {int(timeout_s)} env FIXEDYET_SUITE_REPORT={SUITE_REPORT_PATH} "
+            f"ir_as_tester timeout -k 10 {int(timeout_s)} "
+            f"env FIXEDYET_SUITE_REPORT={SUITE_REPORT_PATH} "
             f'PYTHONPATH="{SUITE_PLUGIN_DIR}${{PYTHONPATH:+:$PYTHONPATH}}" '
             "python -m pytest -q -p no:cacheprovider -p no:pretty -p no:sugar $ir_report "
             "--maxfail=0 --continue-on-collection-errors --tb=line -rfE "

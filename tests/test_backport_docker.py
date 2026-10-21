@@ -229,6 +229,26 @@ async def test_suite_script_reads_the_plugin_report_at_any_verbosity(world) -> N
     assert suite.failing_tests == ["tests/test_known_bad.py::test_known_failure"]
 
 
+async def test_the_suite_runs_as_the_unprivileged_user(world) -> None:
+    # A test that expects a read-only file to be unwritable fails as root (nedbat/cog's
+    # WritabilityTests). With the baseline's test user the suite runs as that user.
+    sandbox, image, _ = world
+    with_user = await sandbox.run(image, envbuild.TESTER_SETUP, workdir="/work", keep=True)
+    assert "__TESTER_OK__=" in with_user.stdout and with_user.image
+    readonly = (
+        "import os\n\n\ndef test_read_only(tmp_path):\n"
+        "    path = tmp_path / 'ro'\n    path.write_text('x')\n    path.chmod(0o444)\n"
+        "    assert not os.access(path, os.W_OK)\n"
+    )
+    files = {**suite_files(), "/work/repo/tests/test_read_only.py": readonly}
+    result = await sandbox.run(
+        with_user.image, suite_script(), files=files, workdir="/work/repo", network=False
+    )
+    suite = parse_suite(result)
+    assert suite.ran and (suite.passed, suite.failed) == (2, 1), suite.log_excerpt
+    assert suite.failing_tests == ["tests/test_known_bad.py::test_known_failure"]
+
+
 async def test_pick_script_applies_a_clean_fix_and_exports_it(world) -> None:
     sandbox, image, marks = world
     result = await sandbox.run(

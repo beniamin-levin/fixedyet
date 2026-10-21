@@ -192,7 +192,10 @@ def test_suite_script_runs_everything_with_the_nine_hundred_second_limit() -> No
     assert "timeout -k 10 900 env FIXEDYET_SUITE_REPORT=" in script
     assert "python -m pytest -q" in script
     assert "--maxfail=0" in script  # undoes a -x in the project's own addopts
-    assert " -x" not in script
+    pytest_line = next(line for line in script.splitlines() if "python -m pytest" in line)
+    assert " -x" not in pytest_line
+    assert pytest_line.startswith("ir_as_tester timeout")  # as the unprivileged user
+    assert script.index("ir_own") < script.index(pytest_line)
     assert "--continue-on-collection-errors" in script
     assert "-rfE" in script
     assert bp.suite_script(60).count("timeout -k 10 60 ") == 1
@@ -621,7 +624,10 @@ async def test_the_sandbox_steps_use_the_branch_head_images_and_limits() -> None
         assert by_kind[kind].timeout_s >= 900
         assert "timeout -k 10 900 env FIXEDYET_SUITE_REPORT=" in by_kind[kind].command
         assert by_kind[kind].files == bp.suite_files()  # the plugin that writes the report
-        assert " -x" not in by_kind[kind].command
+        pytest_line = next(
+            line for line in by_kind[kind].command.splitlines() if "python -m pytest" in line
+        )
+        assert " -x" not in pytest_line
         assert by_kind[kind].network is False  # the project's tests are untrusted code
     assert by_kind["suite-before"].image == "img-base"
     assert by_kind["suite-after"].image == "img-picked"

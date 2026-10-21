@@ -72,6 +72,45 @@ PYTEST_SUMMARY_PATTERN = (
 )
 NO_SUMMARY_EXIT_CODE = 70  # recorded instead of pytest's exit 1 when no summary line was printed
 
+TESTER = "fixedyet"
+TESTER_HOME = f"/home/{TESTER}"
+TESTER_FUNCTIONS = f"""\
+ir_has_tester() {{ [ "$(id -u)" = 0 ] && id -u {TESTER} >/dev/null 2>&1; }}
+ir_own() {{
+  if ir_has_tester; then find /work -xdev ! -user {TESTER} -exec chown -h {TESTER}:{TESTER} {{}} + \
+    > /dev/null 2>&1; fi
+  return 0
+}}
+ir_as_tester() {{
+  if ! ir_has_tester; then "$@"; return; fi
+  if command -v setpriv > /dev/null 2>&1; then
+    setpriv --reuid="$(id -u {TESTER})" --regid="$(id -g {TESTER})" --clear-groups \
+      env HOME={TESTER_HOME} USER={TESTER} LOGNAME={TESTER} "$@"
+  else
+    python -c 'import os, pwd, sys
+p = pwd.getpwnam("{TESTER}")
+os.setgroups([]); os.setgid(p.pw_gid); os.setuid(p.pw_uid)
+os.environ.update(HOME=p.pw_dir, USER=p.pw_name, LOGNAME=p.pw_name)
+os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+  fi
+}}"""
+"""Shell functions for the scripts that run the project's tests. The baseline creates the
+unprivileged user `TESTER` and gives it /work; setup steps (clone, checkout, pip) stay root, and
+the tests run as that user, so a test that expects a read-only file to be unwritable passes the
+way it does on a developer's machine. ``ir_own`` hands files a root step created back to the
+user (only those: no copy of the whole tree), ``ir_as_tester CMD...`` runs CMD as the user. On a
+checkpoint built before the user existed both fall back to running as root."""
+
+TESTER_SETUP = (
+    f"(id -u {TESTER} > /dev/null 2>&1 || useradd -m -d {TESTER_HOME} -s /bin/bash {TESTER} "
+    f"|| adduser -D -h {TESTER_HOME} {TESTER}) > /dev/null 2>&1 "
+    "&& git config --system --add safe.directory '*' "
+    f"&& chown -R {TESTER}:{TESTER} /work && echo __TESTER_OK__={TESTER} "
+    "|| echo __TESTER_FAILED__=setup"
+)
+"""The baseline's last step: the test user, /work owned by it, and git told that root may work in
+a repository it does not own (git refuses "dubious ownership" otherwise). Never fatal."""
+
 TESTDEPS_PATH = "/tmp/ir_testdeps.py"  # noqa: S108 - inside the sandbox, not on the host
 PROBE_TEST_PATH = "tests/test_fixedyet_probe.py"
 """The stub the baseline's repair step collects: it lives in the directory the real test will."""
@@ -297,6 +336,11 @@ class DepsReport:
         return "; ".join(parts)
 
 
+def tester_ready(result: ExecResult) -> bool:
+    """True when the baseline created the unprivileged test user (`TESTER_SETUP`)."""
+    return f"__TESTER_OK__={TESTER}" in result.stdout
+
+
 def installed_test_deps(result: ExecResult) -> DepsReport:
     """The `DepsReport` read from the baseline script's markers (empty when none apply)."""
 
@@ -365,6 +409,8 @@ def baseline_script(
             "echo __STEP__=repair",
             f"python {TESTDEPS_PATH} repair {repo_dir} {PROBE_TEST_PATH} "
             "|| echo __REPAIR_CRASHED__=exit",
+            "echo __STEP__=tester",
+            TESTER_SETUP,
             "echo __STEP__=sanity",
             'python -c "import sys; print(sys.version)" || exit 14',
             "pip freeze | head -n 30",
@@ -457,6 +503,8 @@ async def build_baseline(
     repaired = repairs_made(result)
     if repaired:
         await _emit(progress, f"Test environment repair: {repaired.describe()}")
+    if not tester_ready(result):
+        await _emit(progress, "Could not create the unprivileged test user; tests run as root")
     await _emit(
         progress,
         f"Baseline ready in {time.monotonic() - started:.0f}s, checkpoint {_short(result.image)}",
@@ -555,7 +603,8 @@ def side_script(
     interpreter cannot import). Only the helper's ``| `` log lines are echoed, never its markers.
 
     Each pytest run writes to its own log; only the last bytes of it are echoed, each line
-    prefixed with ``| `` so test output can never forge a ``__RC__=`` marker line.
+    prefixed with ``| `` so test output can never forge a ``__RC__=`` marker line. The setup
+    steps run as root; the test runs as the unprivileged `TESTER` (see `TESTER_FUNCTIONS`).
     """
     path = shlex.quote(_check_test_path(test_path))
     repo_dir = shlex.quote(REPO_DIR)
@@ -563,6 +612,7 @@ def side_script(
     lines = [
         "set -u",
         "export GIT_TERMINAL_PROMPT=0 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1",
+        TESTER_FUNCTIONS,
         f"cd {shlex.quote(REPO_DIR)} || {{ echo __SETUP_FAILED__=cd; exit 20; }}",
     ]
     if checkout:
@@ -595,10 +645,11 @@ def side_script(
             f"python {TESTDEPS_PATH} repair {repo_dir} {path} 2>&1 | {_HELPER_LOG_ONLY}"
         )
     lines += [
+        "ir_own",
         f"for i in $(seq 1 {runs}); do",
         '  echo "__RUN_START__=$i"',
-        f"  timeout -k 5 {per_run_timeout_s} python -m pytest -x -q -p no:cacheprovider {path}"
-        ' > "/tmp/ir_run_$i.log" 2>&1',
+        f"  ir_as_tester timeout -k 5 {per_run_timeout_s} python -m pytest -x -q "
+        f'-p no:cacheprovider {path} > "/tmp/ir_run_$i.log" 2>&1',
         "  rc=$?",
         # pytest exits 1 for a failed test, but also when it dies with a Python traceback before
         # it ran anything (a pytest plugin that cannot be imported, for one). Only a run that

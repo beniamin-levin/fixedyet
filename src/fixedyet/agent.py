@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from fixedyet.envbuild import PYTEST_SUMMARY_PATTERN
+from fixedyet.envbuild import PYTEST_SUMMARY_PATTERN, TESTER_FUNCTIONS
 from fixedyet.llm import LLM, ToolCall
 from fixedyet.models import (
     ExecResult,
@@ -587,8 +587,10 @@ class ReproAgent:
         if problem := check_test_code(code):
             return f"not run: {problem}", f"run_test rejected: {problem}"
         # No network: the test must not need it, and the sandbox enforces that rule.
+        # as the unprivileged test user, like the side runs that decide the verdict
         result = await self._exec(
-            f"python -m pytest -x -q --tb=short -p no:cacheprovider {TEST_PATH} 2>&1",
+            f"{TESTER_FUNCTIONS}\nir_own\nir_as_tester python -m pytest -x -q --tb=short "
+            f"-p no:cacheprovider {TEST_PATH} 2>&1",
             files={f"{REPO_DIR}/{TEST_PATH}": code},
             timeout_s=300,
             network=False,
