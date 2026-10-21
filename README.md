@@ -88,9 +88,10 @@ Keys in `.env` (never committed):
 |---|---|
 | `NEBIUS_API_KEY` | Token Factory inference, and Sandboxes unless `CONTREE_TOKEN` is set |
 | `TAVILY_API_KEY` | evidence. Without it that step is skipped |
-| `GITHUB_TOKEN` | optional for `run`: a read-only fine-grained token for public repositories, to lift the API rate limit. Without it GitHub allows 60 requests an hour and one run makes about 5 to 8, so a handful of runs empty the hour (a run that hits the limit still finishes, but cannot look up the fixing pull request). Required only for `fixedyet backport --open-pr`, which also falls back to `gh auth token`: see [Verified backports](#verified-backports-draft-prs) for what that token may do |
+| `GITHUB_TOKEN` | optional for `run`: a read-only fine-grained token for public repositories, to lift the API rate limit. Without it GitHub allows 60 requests an hour and one run makes about 5 to 8, so a handful of runs empty the hour (a run that hits the limit still finishes, but cannot look up the fixing pull request). Required only for `fixedyet backport --open-pr` and `fixedyet fix --open-pr`, which also fall back to `gh auth token`: see [Verified backports](#verified-backports-draft-prs) for what that token may do |
 | `FIXEDYET_SANDBOX` | `nebius` (default) or `docker` for a local Docker daemon |
 | `FIXEDYET_KEEP_CHECKPOINTS` | Docker backend only: how many of the newest checkpoint images to keep (default 6) |
+| `FIXEDYET_FIX_BUDGET_USD` | [fix mode](#fix-mode-open-bugs-to-verified-draft-prs): the model cost cap of one fix, every attempt included (default 0.25) |
 
 Sandboxes is a beta product, so access may need to be requested from Nebius. The Docker backend runs the same flow on a local daemon.
 
@@ -134,6 +135,7 @@ fixedyet run URL --fix-ref v2.4.0     # fix side is a tag, branch or commit inst
 fixedyet run URL --md report.md --json assessment.json
 fixedyet backport URL                 # prove the fix on the maintenance branch (dry run)
 fixedyet backport URL --open-pr       # ... and open a DRAFT pull request on your fork
+fixedyet fix --from-assessment a.json # an open bug: the model writes a fix, the sandbox verifies it
 fixedyet serve --port 8090            # the demo web app, on http://127.0.0.1:8090
 fixedyet serve --root-path /fixedyet  # the same, behind a proxy that serves it under /fixedyet/
 fixedyet mcp                          # the MCP server on stdio
@@ -244,13 +246,62 @@ The token needs to create a fork, push to it and open pull requests: a fine-grai
 - The suite runs without network, so a test that needs one fails before and after alike and sits in the baseline. A test that is flaky can still be reported as a regression; the failing ids are listed so that you can see.
 - Projects that keep one rolling branch (`stable`) instead of one branch per minor release give `not_applicable` unless you pass `--target-branch`. `pallets/click` is such a project at the time of writing.
 
+## Fix mode: open bugs to verified draft PRs
+
+When the verdict is `open_bug`, the reproduction test fails on `main` too: the bug is real and nobody has fixed it yet. `fixedyet fix` asks Nemotron 3 Super for the smallest change that makes that test pass, and accepts nothing it has not proved in the sandbox.
+
+```bash
+fixedyet fix --from-assessment assessment.json                  # an open_bug run saved with --json
+fixedyet fix https://github.com/OWNER/REPO/issues/123           # reproduce first, then fix
+fixedyet fix --from-assessment a.json --json r.json --md r.md --pr-preview pr.md   # save it all
+fixedyet fix --from-assessment a.json --open-pr                 # ... and a DRAFT PR on your fork
+fixedyet fix --from-assessment a.json --open-pr --pr-target upstream   # ... on the project (asks)
+```
+
+1. **Base.** The head of the project's default branch, found with `git ls-remote`, is built in the sandbox and pinned by commit.
+2. **The test must fail there, twice.** It runs at the path the pull request will add it (`tests/test_issue_<n>.py`, or the repository's `test/` or `testing/` directory), so what is verified is what would ship. A test that passes means `already_fixed`; one that errors or flips means `error`.
+3. **Localize.** The model sees at most 4 of the project's source files and about 60 KB: the project's own frames in the failing traceback first, then files the issue names, then the files that define what the test imports or the issue's code mentions (found with `git grep` in the sandbox). Tests, docs, examples and vendored code are never shown as source. A big file is sent as windows (the functions around those lines) with an outline, and the model may ask once for up to 3 more files.
+4. **Edits, not diffs.** The answer is search/replace blocks: a file, an exact old block, a new block. On the host, as text, each old block must occur exactly once (a block that only differs by a uniform re-indentation still counts once); only existing `.py` source files may change, never a test, CI, packaging or configuration file, and never a new file; at most 80 changed lines; the file must still parse. Anything else is refused with the reason, and with the closest lines when a block matches nowhere.
+5. **Verify in the sandbox.** The edited files are written over the checkout, `git diff` makes the patch, and the test must pass twice. Then the project's own suite runs without the change (once) and with it, 900 s each, no network: nothing may newly fail. The model's code never runs on the host.
+6. **Iterate.** Up to 3 attempts. A failed one goes back to the model: the rejected edits and why, or the diff with the test output, or the newly failing tests with the end of the suite log. Every attempt starts from the original code. The model may also answer that the test itself is wrong (`CANNOT_FIX`), which ends the fix with nothing changed. `FIXEDYET_FIX_BUDGET_USD` (default $0.25) caps the model cost of the whole fix.
+
+| Status | Meaning |
+|---|---|
+| `verified` | the test fails twice without the change and passes twice with it; the suite has no newly failing test |
+| `not_fixed` | no attempt passed; every attempt and its reason are in the result |
+| `already_fixed` | the test passes on the default branch now |
+| `not_applicable` | not an open bug, no reproduction test, or not a GitHub issue |
+| `error` | a step could not run (the build, the suite on the default branch); the reason says which |
+
+The result (`FixResult`) holds the attempts, the verified diff, the test and suite tables before and after, the model's one-line summary and its explanation (marked as unchecked text), cost and time. `--open-pr` works only on `verified` and uses the backport's machinery: the branch `fixedyet/fix-<issue>` is pushed to your fork with the change and the regression test, authored by you, and a **draft** pull request is opened against the default branch (your fork's copy by default, the upstream project only after you type its name). The body starts with `Fixes #<n>`, says plainly that the change was written by an AI model and verified by machine, gives the tables, the patch summary and the regression test, and ends with the same disclosure line as a backport. When the repository has no `tests/`, `test/` or `testing/` directory the test is left out of the pull request and the body says so.
+
+### Live results
+
+Six live runs on 21 October 2026, on four `open_bug` reports from the demo, all on the **local Docker backend** with Nemotron 3 Super through Token Factory (the Nebius Sandboxes backend is implemented but has not run a fix live). No pull request was opened: the previews are for review.
+
+| Issue | Result | Attempts | Change | Project suite without / with | Model cost | Time |
+|---|---|---|---|---|---|---|
+| [pallets/jinja#2244](https://github.com/pallets/jinja/issues/2244) | **verified** | 1 (after one request for `tests.py` and `runtime.py`) | `src/jinja2/runtime.py`: removes `ChainableUndefined.__html__` (3 lines) | 911 passed / 911 passed | $0.016 | 80 s |
+| [marshmallow-code/marshmallow#3072](https://github.com/marshmallow-code/marshmallow/issues/3072) | **verified** (second run) | 1 | `src/marshmallow/validate.py`: `(?!-)` and `(?<!-)` around the last label of `Email.DOMAIN_REGEX` (+1 / -1) | 1192 passed / 1192 passed | $0.007 | 35 s |
+| marshmallow#3072, first run | not fixed | 3, all rejected | the model repeated an edit and dropped a quote when copying; this led to the repeat, re-indent and closest-lines handling | - | $0.020 | 69 s |
+| [dateutil/dateutil#1588](https://github.com/dateutil/dateutil/issues/1588) | not fixed (two runs) | 3 + 3 | run 1: an `and`/`or` precedence slip broke 115 tests, then logic that kept the intersection, then alternatives for one place; run 2: a block that is not in the file, then the same unbalanced bracket twice | 5044 passed, 3 failed (run 1's baseline; run 2 never reached the suite) | $0.031 + $0.023 | 241 s + 94 s |
+| [pyparsing/pyparsing#693](https://github.com/pyparsing/pyparsing/issues/693) | stopped | 2 of 3 | two answers ran out of tokens on reasoning (then a 12k limit and a 180 s timeout, since raised to 16k and 420 s); stopped by hand during the third | - | about $0.026 | 7+ min |
+
+Read these as a maintainer would. The marshmallow change is exactly the fix the issue proposes, and it touches the root cause. The jinja change removes the method that makes an undefined value look escaped. `ChainableUndefined.__html__` was added in 2019 to fix `Markup()` on a chainable undefined; the class's `__getattr__` now raises `AttributeError` for dunder names, so the method looks redundant, and a manual container check after the run agrees (`Markup()`, `escape()` and autoescaped output are still empty without it). The suite has no direct test of that case, though, and the open upstream pull request for the issue changes the `escaped` test instead; both are defensible, and the choice is the maintainers'. Every one of these four issues already had an open upstream pull request when the runs were made (jinja #2259, marshmallow #3073, dateutil #1589, pyparsing #694), so neither verified fix should be opened as a competing pull request without talking to the maintainers first. The pyparsing report is a lesson for the triage step: its test compares a `ParseResults` object with a list, which is never equal, and on `master` the parsed value is already `[['x']]`; there is no source bug to fix there, and the right answer from fix mode would have been `CANNOT_FIX`.
+
+### Limits
+
+- A verified fix is a fix that the model's own test accepts and the project's suite does not reject. That is evidence, not a review: the test can be too narrow and the suite can miss things. Read the diff as you would a stranger's pull request.
+- The model sees a few files, not the whole project. A fix that needs a change in code it was not shown can only be reached through its one request for more files.
+- An open bug often has a pull request already. Look at the issue's linked pull requests before you open another.
+
 ## Web demo
 
 https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at saved example reports.
 
 Run it locally with `fixedyet serve`. The page uses only relative URLs, so it works at the root of a host and under a prefix: behind nginx's `location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }` (which strips the prefix), start it with `--root-path /fixedyet` or `FIXEDYET_ROOT_PATH=/fixedyet` so redirects carry the prefix. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](deploy/README.md).
 
-The **All reports** page (`/reports`, linked from the header) lists every example and every finished run in the runs directory, newest first, with chips for All / Fixed on main / Open bug / Not reproduced / Other and a search by repository or title. A report opens at `reports#<id>`, which can be shared. On a report that is fixed on main with a known fixing commit, the **Backport fix → draft PR** button tells a visitor that opening pull requests on the demo is limited to its maintainer, and shows the commands to run it themselves (`fixedyet backport <issue URL> --open-pr`, and with `--pr-target upstream` for the upstream project) with a link to the verified example. Setting `FIXEDYET_ADMIN_TOKEN` turns on maintainer mode: after signing in (the small "Maintainer sign-in" link at the bottom of the page) the owner works in two steps. **Verify backport** runs the cherry-pick, the reproduction test and the project's suite on the server and opens no pull request; the card then shows the facts, the patch to review, and a warning when the target branch looks inactive (no commit for 180 days, or a newer release line). A second request then opens a draft pull request in the owner's own fork. The owner can also hide a report. Without the token every maintainer endpoint answers 404. See [`deploy/README.md`](deploy/README.md#maintainer-mode).
+The **All reports** page (`/reports`, linked from the header) lists every example and every finished run in the runs directory, newest first, with chips for All / Fixed on main / Open bug / Not reproduced / Other and a search by repository or title. A report opens at `reports#<id>`, which can be shared. On a report that is fixed on main with a known fixing commit, the **Backport fix → draft PR** button tells a visitor that opening pull requests on the demo is limited to its maintainer, and shows the commands to run it themselves (`fixedyet backport <issue URL> --open-pr`, and with `--pr-target upstream` for the upstream project) with a link to the verified example. Setting `FIXEDYET_ADMIN_TOKEN` turns on maintainer mode: after signing in (the small "Maintainer sign-in" link at the bottom of the page) the owner works in two steps. **Verify backport** runs the cherry-pick, the reproduction test and the project's suite on the server and opens no pull request; the card then shows the facts, the patch to review, and a warning when the target branch looks inactive (no commit for 180 days, or a newer release line). A second request then opens a draft pull request in the owner's own fork, or on the upstream project after the owner types its name. On an open bug the maintainer gets **Attempt a fix** instead ([fix mode](#fix-mode-open-bugs-to-verified-draft-prs)): the same progress log, then the verified diff (light, with red and green line tints) and the same two pull request buttons; visitors see a note that only the maintainer can run it. The owner can also hide a report. Without the token every maintainer endpoint answers 404. See [`deploy/README.md`](deploy/README.md#maintainer-mode).
 
 The reports in [`examples/`](examples) are saved output of real runs on real GitHub issues (Docker sandbox backend, Nemotron 3 Super through Token Factory). Each file names the issue it ran on, and the page marks them as real runs. A saved `fixedyet backport --json` result in that folder (`real-backport-<owner>-<repo>-<number>.json` and `.md`) is listed and drawn as a backport report.
 
@@ -291,6 +342,8 @@ Nemotron 3 Super costs $0.30 per million input tokens and $0.90 per million outp
 
 Token Factory has no spending limit and charges the card when the balance goes negative, so a second cap lives in the code: `FIXEDYET_TOTAL_BUDGET_USD` (default $20) limits the model spend of **all runs ever**. Every chat call is first checked against a spend ledger, `runs/spend-ledger.json`: if the total so far plus the worst-case cost of the call would pass the cap, the call is refused before it is sent and the run ends as `unsupported` with "total budget reached" in its basis. The web demo answers 429 once less than one run's budget is left, and `fixedyet doctor` prints the total and what remains. To raise the cap, raise the variable; to start counting again, delete the ledger file only after checking the real balance.
 
+Fix mode has its own cap per fix, `FIXEDYET_FIX_BUDGET_USD` (default $0.25, every attempt included), and its calls go through the same ledger. The six live fix runs cost $0.007 to $0.031 each in model spend ($0.12 together).
+
 ## Limitations
 
 - **Pure-Python projects that test with pytest.** That is what the environment builder installs and what the verdict runs.
@@ -303,7 +356,7 @@ Token Factory has no spending limit and charges the card when the balance goes n
 ## Prior art and how this differs
 
 - **Metabase Repro-Bot** (open source, MIT) is the closest relative. It checks a bug at the reported version and on `master` and reports that it is fixed. It works only on Metabase, lets the model decide the verdict, forbids web search in its prompt and runs inside Claude Code. FixedYet is generic across pure-Python projects, lets rules decide, and adds web evidence.
-- **SWE-agent, mini-swe-agent, OpenHands** and the commercial coding agents go straight to a fix. Reproduction is at most a step inside their prompts, never an output. FixedYet stops at the proof and does not write the fix.
+- **SWE-agent, mini-swe-agent, OpenHands** and the commercial coding agents go straight to a fix. Reproduction is at most a step inside their prompts, never an output. FixedYet's main output is the proof. Its fix mode is deliberately narrower than those agents: only for a bug the sandbox has already shown to be open, at most 80 changed lines, never a test or packaging file, and nothing is called a fix until the reproduction test flips and the project's suite has no new failure.
 - **The OpenAI, Vercel and Daytona reference agents** for issue triage run code against the default branch only. They do not pin the reported version and they let the model judge the result.
 - **Label-and-answer triage bots** work from documentation and code search without running anything.
 
@@ -312,8 +365,8 @@ As of a market check on 21 October 2026, to our knowledge no tool combines a pin
 ## Safety
 
 - **Issue text and web content are untrusted data.** The model is told so, snippets are only ever run inside a sandbox, and nothing from an issue is run on the host.
-- **Code runs only in sandboxes.** The host process never executes code from an issue.
-- **It never posts to other people's repositories by default.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels or comments are created. The write paths are `fixedyet backport --open-pr` and the demo's maintainer-only backport button: both push to the token owner's own fork and open a *draft* pull request, and neither comments on an issue. Both can target the upstream project instead, only after the person types the repository's name: the command line asks for it, and the web page's maintainer types it before the request is sent ([details](#verified-backports-draft-prs)).
+- **Code runs only in sandboxes.** The host process never executes code from an issue, and never runs code the model wrote: fix mode validates the model's edits on the host as text (and parses them with `ast`, which runs nothing), then applies and tests them only in the sandbox, without network.
+- **It never posts to other people's repositories by default.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels or comments are created. The write paths are `fixedyet backport --open-pr`, `fixedyet fix --open-pr` and the demo's maintainer-only backport and fix buttons: all push to the token owner's own fork and open a *draft* pull request, and none comments on an issue. Both can target the upstream project instead, only after the person types the repository's name: the command line asks for it, and the web page's maintainer types it before the request is sent ([details](#verified-backports-draft-prs)).
 - **Secrets stay in the environment.** They are read from `.env` or the process environment, masked when settings are printed, and never returned by the web API or the MCP server. Web errors are short messages, never stack traces.
 - **The demo is rate limited,** to one run at a time and a daily total, so it cannot be used to spend the owner's credits without limit.
 
@@ -330,6 +383,7 @@ src/fixedyet/
   evidence.py      Tavily search and extract
   report.py        markdown rendering
   backport.py      verified backports: branch detection, cherry-pick and suite gates in the sandbox
+  fixmode.py       fix mode for open bugs: localize, model edits, validation, sandbox verification
   pullrequest.py   fork, push from the sandbox result, draft pull request (only with --open-pr)
   web/             the FastAPI demo, the reports page and its static files
   mcp_server.py    the MCP server

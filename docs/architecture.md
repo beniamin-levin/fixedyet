@@ -17,8 +17,9 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 | `src/fixedyet/report.py` | core | markdown rendering of an `Assessment` |
 | `src/fixedyet/pipeline.py` | core | `reproduce()` and `reproduce_instance()` |
 | `src/fixedyet/backport.py` | backport | branch detection, cherry-pick and suite gates, `backport()` and `BackportResult` |
-| `src/fixedyet/pullrequest.py` | backport | fork, push of the sandbox patch, draft pull request (`--open-pr` only) |
-| `src/fixedyet/cli.py` | core | `fixedyet run|backport|doctor|eval|serve|mcp|gc` |
+| `src/fixedyet/pullrequest.py` | backport | fork, push of the sandbox patch, draft pull request (`--open-pr` only), for backports and fixes |
+| `src/fixedyet/fixmode.py` | fix | fix mode for open bugs: localization, model edits, validation, sandbox verification, `attempt_fix()` and `FixResult` |
+| `src/fixedyet/cli.py` | core | `fixedyet run|backport|fix|doctor|eval|serve|mcp|gc` |
 | `src/fixedyet/sandbox/*` | sandbox | `Sandbox` protocol, Nebius and Docker backends |
 | `src/fixedyet/envbuild.py` | sandbox | baseline checkpoint builder |
 | `src/fixedyet/testdeps.py` | sandbox | test dependency installer; shipped into the baseline sandbox and run there (standard library only) |
@@ -124,6 +125,23 @@ async def open_backport_pr(result: BackportResult, *, token: str, target: "fork"
     # only for status == verified; target="upstream" raises unless confirmed_upstream is True;
     # draft=True is hard-wired; there is no ready-for-review, comment or force-push call at all
 def pr_title(result) -> str ; def pr_body(result, *, login: str) -> str   # ends with DISCLOSURE
+async def open_fix_pr(result: FixResult, *, token: str, target: "fork"|"upstream" = "fork",
+                      confirmed_upstream: bool = False, ...) -> PullRequest
+    # the same flow as open_backport_pr (one shared core): base = the default branch,
+    # head = fixedyet/fix-<issue>, the patch adds the regression test, author = token owner
+def fix_pr_title(result) -> str ; def fix_pr_body(result, *, login: str) -> str   # ends with DISCLOSURE
+def fix_pr_preview(result, *, login: str) -> str   # title, base/head, body, diff; sends nothing
+
+# fixmode.py
+async def attempt_fix(assessment: Assessment, *, settings=None, sandbox=None, llm=None,
+                      github=None, progress=None, list_branches=None, python_version=None,
+                      extra_packages=(), suite_timeout_s=900, max_attempts=3,
+                      budget_usd=None) -> FixResult
+    # never raises for anything the world can do; status: verified | not_fixed | already_fixed
+    # | not_applicable | error. See "Fix mode" below.
+def apply_edits(edits, originals, tracked) -> EditOutcome   # pure: validation of model edits
+def parse_proposal(text: str) -> Proposal                 # pure: the model's answer
+def rank_files(...) -> list[Candidate] ; def show_file(...) -> ShownFile | None   # pure
 def resolve_token(configured: str | None) -> str      # GITHUB_TOKEN, else `gh auth token`
 def confirm_upstream(repo: str, *, assume_yes: bool = False) -> bool       # type the repo name
 ```
@@ -191,9 +209,45 @@ token (GITHUB_TOKEN | gh auth token) -> GET /user (login = the token's owner)
 - The host runs only `git` (`init`, `fetch`, `checkout`, `am`, `push`, `rev-parse`) with hooks off and without the user's git config. Nothing from the project is executed on the host.
 - The MCP tool `propose_backport` never imports `pullrequest`. The web app imports it in one place, the maintainer-only backport job (`web/app.py: open_draft_pr`), which passes `target="fork"`, or `target="upstream"` with `confirmed_upstream=True` only after the maintainer typed the upstream repository's name into the step-2 request (`confirm`); any other text is a 400 before GitHub is called.
 
+## Fix mode (open bugs, model-written fixes, draft pull requests)
+
+Input: an `Assessment` with verdict `open_bug` and a reproduction test. Output: a `FixResult` (models.py: `status`, `reason`, `base_branch`, `base_sha`, `summary`, `explanation`, `diff`, `files_changed`, `lines_added`/`lines_removed`, `context_files`, `regression_test_path`, `repro_before`/`repro_after`, `suite_before`/`suite_after`, `newly_failing`, `attempts` as `FixAttempt`, `log_excerpt`, `budget_usd`, `usage`). `Assessment.fix` is optional and `report.py` renders it as the "Fix" section.
+
+```
+assessment --> not open_bug / no test / not a GitHub issue --> not_applicable
+           --> issue thread (GitHub API) and head of the default branch (git ls-remote, host)
+sandbox:   baseline checkout of that commit (envbuild.build_baseline, pinned)
+  survey   git ls-files + git grep for definitions of the names the test and the issue use
+  a. repro test x2 at <test dir>/test_issue_<n>.py      PASS -> already_fixed; not FAIL -> error
+host:      localize (pure): project frames in the failing traceback, files the issue names,
+           files defining what the test imports or the issue's code mentions; <= 4 files,
+           ~60 KB; a big file as windows (the enclosing functions of the anchors) + an outline
+loop, <= 3 attempts, model cost <= FIXEDYET_FIX_BUDGET_USD:
+  model    SUMMARY / EXPLANATION / FILE + SEARCH/REPLACE blocks; or NEED (once, <= 3 files);
+           or CANNOT_FIX: <why> (ends the loop, not_fixed)
+  host     apply_edits (text only): old block exactly once (also after a uniform re-indent),
+           source .py files only (no tests, CI, packaging, docs, vendored code, new files),
+           <= 80 changed lines, still parses (ast), no alternatives for the same lines
+  sandbox  the edited files written over the checkout, git diff, keep=True (no network)
+  c. repro test x2 on the patched image                 not PASS -> feedback (diff + output)
+  d. suite on the baseline (once) and on the patched image (900 s, no network)
+     newly failing / count rose -> feedback (ids + log); baseline suite cannot run -> error
+  all clear -> verified
+```
+
+Design decisions:
+
+- **Search/replace, not diffs.** The model never writes a unified diff. It names a file and an exact block, and the host finds that block exactly once. The diff is made by `git diff` in the sandbox, so it is always well formed.
+- **Validation is text, execution is sandbox.** `apply_edits` is a pure function over strings; `ast.parse` checks syntax without running anything. Model-written code runs only in sandbox forks without network.
+- **Feedback that teaches.** A rejected edit comes back with the reason and, when a block matches nowhere, the closest lines in the file; a test that still fails comes back with the diff and the output; a regression with the newly failing ids and the end of the suite log. Every attempt starts again from the original code.
+- **Room to think, then brevity.** Each call may use 16,000 tokens (reasoning included) with a 420 s request timeout; an answer cut off by the token limit before any edit is named as such, and the next call asks without the reasoning.
+- **The test is the spec, and it can be wrong.** The model may answer `CANNOT_FIX` when it judges the test wrong; nothing is changed then.
+- **Verified where it ships.** The checks run the test at the path the pull request adds it (`tests/`, `test/` or `testing/`), so what was verified is what is proposed.
+- **Pull requests** reuse the backport flow (`pullrequest._open_draft`): fork, push of `fixedyet/fix-<issue>` from a temp clone of the verified commit with `git am`, draft pull request against the default branch, typed confirmation for upstream, idempotent per target, `DISCLOSURE` last. The commit is authored by the token's owner; its message and the body say the change was written by AI and verified by machine.
+
 ### Web: reports page and maintainer mode
 
-`GET /api/reports` merges `examples/*.json` with every readable `<runs_dir>/<stamp>-<owner>-<repo>-<number>/assessment.json`, newest first; `GET /api/reports/{id}` returns the assessment, the markdown and the saved backport. Ids are checked against `[A-Za-z0-9][A-Za-z0-9._-]*` without `..`, and every path built from one is resolved and checked to stay under its directory. Maintainer mode exists only when `FIXEDYET_ADMIN_TOKEN` is set (otherwise every admin endpoint is a 404; a wrong token is a bare 401, compared with `hmac.compare_digest`). Backporting is two steps. `POST /api/reports/{id}/backport` starts a job in the same `Run`/`RunStore` as live runs (kind `backport`, one slot, same server-sent events, not counted against the daily limit): `backport()` in the sandbox and no pull request, then `github.target_activity()` (the target branch's last commit date and the latest release, best effort, null on any failure). A verified record is returned instead of being run again. `POST /api/reports/{id}/backport/pr` (body `{"target": "fork"}`) needs a verified record (409 `not_verified`), opens a draft pull request with `open_backport_pr(target="fork")` inline with a 60 s timeout, and is idempotent per target. The record, with `pr_url`, `pr_target`, `pr_number`, a `prs` map per target and `target_activity`, is saved to `<runs_dir>/backports/<id>.json`; the API adds `target_warning` (the last commit more than 180 days old, or a latest release with a newer major.minor than the branch) when it reads one. Hidden ids go to `<runs_dir>/hidden.json` (temp file plus `os.replace`). The fixing commit comes from the report's `reproduction.fixing_commit`; a report without one cannot be backported.
+`GET /api/reports` merges `examples/*.json` with every readable `<runs_dir>/<stamp>-<owner>-<repo>-<number>/assessment.json`, newest first; `GET /api/reports/{id}` returns the assessment, the markdown and the saved backport. Ids are checked against `[A-Za-z0-9][A-Za-z0-9._-]*` without `..`, and every path built from one is resolved and checked to stay under its directory. Maintainer mode exists only when `FIXEDYET_ADMIN_TOKEN` is set (otherwise every admin endpoint is a 404; a wrong token is a bare 401, compared with `hmac.compare_digest`). Backporting is two steps. `POST /api/reports/{id}/backport` starts a job in the same `Run`/`RunStore` as live runs (kind `backport`, one slot, same server-sent events, not counted against the daily limit): `backport()` in the sandbox and no pull request, then `github.target_activity()` (the target branch's last commit date and the latest release, best effort, null on any failure). A verified record is returned instead of being run again. `POST /api/reports/{id}/backport/pr` (body `{"target": "fork"}`) needs a verified record (409 `not_verified`), opens a draft pull request with `open_backport_pr(target="fork")` inline with a 60 s timeout, and is idempotent per target. The record, with `pr_url`, `pr_target`, `pr_number`, a `prs` map per target and `target_activity`, is saved to `<runs_dir>/backports/<id>.json`; the API adds `target_warning` (the last commit more than 180 days old, or a latest release with a newer major.minor than the branch) when it reads one. Hidden ids go to `<runs_dir>/hidden.json` (temp file plus `os.replace`). The fixing commit comes from the report's `reproduction.fixing_commit`; a report without one cannot be backported. Fix mode mirrors this for open bugs: `POST /api/reports/{id}/fix` (a job of kind `fix`, 90-minute timeout, refused with 429 when the total budget has less left than `FIXEDYET_FIX_BUDGET_USD`) and `POST /api/reports/{id}/fix/pr` (the same step-2 code as backports), with records in `<runs_dir>/fixes/<id>.json`; summaries carry `can_fix` and `fix`.
 
 ## Rules for everyone
 
