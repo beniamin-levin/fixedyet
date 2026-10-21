@@ -70,6 +70,9 @@ class Settings(BaseModel):
     max_turns: int = 20
     demo_daily_limit: int = 5
     runs_dir: Path = Path("runs")
+    # The lifetime spend ledger. None: a user-level state file (see ledger.ledger_path), so a
+    # different runs directory never starts a fresh total.
+    ledger_path: Path | None = None
     keep_checkpoints: int = Field(default=DEFAULT_KEEP_CHECKPOINTS, ge=0)
     root_path: str = ""  # URL prefix the demo is served under, e.g. "/fixedyet"
     admin_token: str = ""  # turns on maintainer mode in the web demo; empty means off
@@ -114,6 +117,7 @@ class Settings(BaseModel):
             "max_turns": get("FIXEDYET_MAX_TURNS"),
             "demo_daily_limit": get("FIXEDYET_DEMO_DAILY_LIMIT"),
             "runs_dir": get("FIXEDYET_RUNS_DIR"),
+            "ledger_path": get("FIXEDYET_LEDGER_PATH"),
             "keep_checkpoints": get("FIXEDYET_KEEP_CHECKPOINTS"),
             "root_path": get("FIXEDYET_ROOT_PATH"),
             "admin_token": get("FIXEDYET_ADMIN_TOKEN"),

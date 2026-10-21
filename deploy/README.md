@@ -89,12 +89,26 @@ Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does no
 | `FIXEDYET_ROOT_PATH` | no | URL prefix the app is served under, normally `/fixedyet`. The unit already passes `--root-path /fixedyet`; the flag wins over this variable |
 | `FIXEDYET_KEEP_CHECKPOINTS` | no | only for the `docker` sandbox: how many of the newest `fixedyet-ckpt` images to keep after each run, default `6` |
 | `FIXEDYET_RUN_BUDGET_USD` | no | hard cost cap per run, default `0.60` |
-| `FIXEDYET_TOTAL_BUDGET_USD` | no | hard cap on model spend over the life of the install, default `20`, kept in `runs/spend-ledger.json`. Token Factory charges the card when the balance goes negative, so this is the real spending limit |
+| `FIXEDYET_TOTAL_BUDGET_USD` | no | hard cap on model spend over the life of the install, default `20`, counted in the spend ledger (`FIXEDYET_LEDGER_PATH`). Token Factory charges the card when the balance goes negative, so this is the real spending limit |
+| `FIXEDYET_LEDGER_PATH` | no | the spend ledger file. Leave it out of this file: the units set it (see [The spend ledger](#the-spend-ledger)) |
 | `FIXEDYET_MAX_TURNS` | no | agent turns per run, default `20` |
 | `FIXEDYET_DEMO_DAILY_LIMIT` | no | live runs per UTC day for the whole site, default `5`. This is the spending limit of the demo |
 | `FIXEDYET_RUNS_DIR` | no | default `runs`, which is `/opt/fixedyet/runs` |
 
 After editing the file, run `deploy/deploy.sh SERVER_ADDRESS` again (or `sudo systemctl restart fixedyet` on the server).
+
+### The spend ledger
+
+The lifetime model spend (`FIXEDYET_TOTAL_BUDGET_USD` is checked against it) lives in one JSON file. It used to be `<runs dir>/spend-ledger.json`, so pointing `FIXEDYET_RUNS_DIR` somewhere new started a fresh ledger at $0. It is now `FIXEDYET_LEDGER_PATH`, and without that variable a user-level file (`~/.local/state/fixedyet/spend-ledger.json`) that does not depend on the runs directory.
+
+The server keeps its old file, so its accounting continues without a migration: `fixedyet.service` sets `FIXEDYET_LEDGER_PATH=/opt/fixedyet/runs/spend-ledger.json`, and the Docker host's drop-in (`fixedyet-docker-host.conf`) sets `/var/lib/fixedyet/runs/spend-ledger.json`, the file that holds the demo's spend so far. The service user's home is not writable under the unit's hardening, so the user-level default would not work there anyway. A `FIXEDYET_LEDGER_PATH` line in `/etc/fixedyet.env` would override the unit's value; leave it out. Check after a deploy that the total carried on:
+
+```bash
+systemctl show fixedyet -p Environment | tr ' ' '\n' | grep LEDGER   # the path the service uses
+curl -s http://127.0.0.1:8090/api/status   # budget_remaining_usd: the cap minus the spend so far, not the whole cap
+```
+
+If a ledger is ever moved by hand, copy the file to the new path before the first run there. When the new file does not exist yet, FixedYet reads the old `<runs dir>/spend-ledger.json` of the current runs directory and writes its total to the new place on the next spend, so a move never resets the total.
 
 Worst-case spend is `FIXEDYET_DEMO_DAILY_LIMIT` times `FIXEDYET_RUN_BUDGET_USD` per day for model tokens, plus Tavily credits and sandbox time. Set the limit to what the credits can carry. Independently of both, `FIXEDYET_TOTAL_BUDGET_USD` stops all model calls once the ledger total reaches it; `GET /api/status` shows `budget_remaining_usd`.
 

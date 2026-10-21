@@ -31,9 +31,12 @@ from fixedyet.models import ExecResult, Issue, Outcome, SideRun, Usage
 
 @pytest.fixture(autouse=True)
 def _relative_runs_dir_is_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`Settings().runs_dir` is the relative `runs`. A test that builds a real `LLM` with default
-    settings would write `runs/spend-ledger.json` into the checkout; this sends it to tmp_path."""
+    """`Settings().runs_dir` is the relative `runs`, and the spend ledger defaults to a user-level
+    state file. A test that builds a real `LLM` must write neither into the checkout nor into the
+    real home: the working directory and XDG_STATE_HOME both go to tmp_path."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("FIXEDYET_LEDGER_PATH", raising=False)
 
 
 @pytest.fixture

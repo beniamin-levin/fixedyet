@@ -12,6 +12,9 @@ WorkingDirectory=/opt/fixedyet
 # Secrets live here, not in the repository. See deploy/README.md. Mode 600, owned by root.
 EnvironmentFile=/etc/fixedyet.env
 Environment=PYTHONUNBUFFERED=1
+# The lifetime spend ledger stays where it has always been (the default, a file in the user's
+# home, is not writable here). A FIXEDYET_LEDGER_PATH line in /etc/fixedyet.env overrides this.
+Environment=FIXEDYET_LEDGER_PATH=/opt/fixedyet/runs/spend-ledger.json
 ExecStart=/opt/fixedyet/.venv/bin/fixedyet serve --host 127.0.0.1 --port 8090 --root-path /fixedyet
 Restart=on-failure
 RestartSec=5

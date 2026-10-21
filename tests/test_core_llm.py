@@ -477,7 +477,7 @@ def make_capped_llm(
 
 
 def ledger_json(settings: Settings) -> dict[str, Any]:
-    return json.loads((settings.runs_dir / "spend-ledger.json").read_text(encoding="utf-8"))
+    return json.loads(ledger.ledger_path(settings).read_text(encoding="utf-8"))
 
 
 def test_the_estimate_is_an_upper_bound_that_grows_with_prompt_and_max_tokens() -> None:

@@ -1,11 +1,20 @@
 """The spend ledger: how much model money this installation has used in its whole life.
 
 Nebius Token Factory draws from a balance and charges the owner's card when the balance goes
-negative; it has no spending-limit setting. So the cap on total spend lives here. One JSON file,
-``<runs_dir>/spend-ledger.json``, holds the cumulative USD spent on chat calls across every run
-(CLI, web demo, MCP, eval) plus a per-day breakdown:
+negative; it has no spending-limit setting. So the cap on total spend lives here. One JSON file
+holds the cumulative USD spent on chat calls across every run (CLI, web demo, MCP, eval) plus a
+per-day breakdown:
 
     {"total_usd": 1.2345, "days": {"2026-10-21": 0.8, "2026-10-22": 0.4345}}
+
+Where it lives
+    ``FIXEDYET_LEDGER_PATH`` when it is set; otherwise
+    ``$XDG_STATE_HOME/fixedyet/spend-ledger.json`` (``~/.local/state/fixedyet/...``), one file
+    per user, whatever the runs directory. Before this setting existed the ledger was
+    ``<runs_dir>/spend-ledger.json``, so a new ``FIXEDYET_RUNS_DIR`` started again at $0. When
+    the ledger file does not exist yet, the total is read from that old file of the current runs
+    directory, and the first spend writes it to the new place: moving the ledger never resets
+    the total.
 
 How it stays correct
     * Writes are atomic: a temporary file in the same directory, fsync, then ``os.replace``. A
@@ -60,8 +69,32 @@ class LedgerError(RuntimeError):
 # -- paths and settings --------------------------------------------------------------------------
 
 
-def ledger_path(settings: Any) -> Path:
+def default_ledger_path() -> Path | None:
+    """``$XDG_STATE_HOME/fixedyet/spend-ledger.json``, else under ``~/.local/state``; None when
+    there is no home directory to put it in."""
+    state = os.environ.get("XDG_STATE_HOME", "").strip()
+    try:
+        base = Path(state) if state.startswith("/") else Path.home() / ".local" / "state"
+    except RuntimeError:  # no HOME and no passwd entry
+        return None
+    return base / "fixedyet" / LEDGER_NAME
+
+
+def legacy_ledger_path(settings: Any) -> Path:
+    """Where the ledger was kept before ``FIXEDYET_LEDGER_PATH``: in the runs directory."""
     return Path(settings.runs_dir) / LEDGER_NAME
+
+
+def ledger_path(settings: Any) -> Path:
+    """``settings.ledger_path`` (``FIXEDYET_LEDGER_PATH``), else the user-level default."""
+    configured = getattr(settings, "ledger_path", None)
+    if configured:
+        return Path(configured).expanduser()
+    return default_ledger_path() or legacy_ledger_path(settings)
+
+
+def _lock_path(path: Path) -> Path:
+    return path.with_name(LOCK_NAME) if path.name == LEDGER_NAME else path.with_suffix(".lock")
 
 
 def _key(settings: Any) -> Path:
@@ -126,7 +159,7 @@ def _exclusive(path: Path) -> Iterator[None]:
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            lock_file = open(path.with_name(LOCK_NAME), "a")  # noqa: SIM115 - closed below
+            lock_file = open(_lock_path(path), "a")  # noqa: SIM115 - closed below
         except OSError as exc:
             raise LedgerError(f"cannot lock the spend ledger {path}: {exc}") from exc
         with lock_file:
@@ -137,13 +170,28 @@ def _exclusive(path: Path) -> Iterator[None]:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+def _load(settings: Any, path: Path) -> dict[str, Any]:
+    """The ledger at ``path``. While that file does not exist, the old one in the runs directory
+    (see "Where it lives"), so that a new ledger location starts from the total spent so far."""
+    if path.exists():
+        return _read(path)
+    legacy = legacy_ledger_path(settings)
+    try:
+        if legacy.exists() and legacy.resolve() != path.resolve():
+            return _read(legacy)
+    except OSError:
+        pass
+    return _read(path)
+
+
 # -- public API ----------------------------------------------------------------------------------
 
 
 def spent_total(settings: Any) -> float:
     """Cumulative USD spent on chat calls, including any spend that could not be saved yet."""
     with _thread_lock:
-        return _read(ledger_path(settings))["total_usd"] + _unsaved.get(_key(settings), 0.0)
+        path = ledger_path(settings)
+        return _load(settings, path)["total_usd"] + _unsaved.get(_key(settings), 0.0)
 
 
 def remaining(settings: Any) -> float:
@@ -166,7 +214,7 @@ def record(settings: Any, usd: float) -> None:
         if owed <= 0:
             return
         try:
-            data = _read(path)
+            data = _load(settings, path)
             today = _today()
             data["days"][today] = data["days"].get(today, 0.0) + owed
             data["total_usd"] += owed

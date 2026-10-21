@@ -573,7 +573,8 @@ def _ledger_check(settings: Settings) -> Check:
         return "spend ledger", FAIL, str(exc)[:300]
     budget = ledger.total_budget(settings)
     left = max(budget - spent, 0.0)
-    detail = f"spent ${spent:.4f} of ${budget:.2f}, remaining ${left:.4f}"
+    detail = (f"spent ${spent:.4f} of ${budget:.2f}, remaining ${left:.4f} "
+              f"({ledger.ledger_path(settings)})")
     if left < settings.run_budget_usd:
         need = f"${settings.run_budget_usd:.2f}"
         return "spend ledger", FAIL, f"{detail}; too little for one run ({need})"
