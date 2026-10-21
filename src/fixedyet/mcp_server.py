@@ -1,6 +1,6 @@
 """MCP server for FixedYet (stdio transport).
 
-Three tools:
+Four tools:
 
 ``reproduce_issue(issue_url, fix_ref=None)``
     Runs the full pipeline on a public GitHub issue and returns the markdown report followed
@@ -15,6 +15,14 @@ Three tools:
     the maintenance branch of the reported version in a sandbox. Returns the markdown summary and
     a JSON block with the BackportResult (status, patch, test results before and after). It
     never pushes anything and never opens a pull request; that is `fixedyet backport --open-pr`.
+
+``propose_fix(issue_url)``
+    Dry run only: reproduces the issue, and when the bug is still open on main asks the model
+    for the smallest change that makes the reproduction test pass, then verifies it in the
+    sandbox (the test fails twice without it and passes twice with it, and the project's suite
+    has no new failure). Returns the markdown summary and a JSON block with the FixResult (status,
+    diff, attempts, suite results). It never pushes anything and never opens a pull request;
+    that is `fixedyet fix --open-pr`.
 
 A run takes a few minutes and spends Token Factory, Sandboxes and Tavily credits, so clients
 should call these tools on purpose. The server reads its keys from the environment or from a
@@ -42,7 +50,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fixedyet.models import Assessment, BackportResult, Verdict
+from fixedyet.models import Assessment, BackportResult, FixResult, Verdict
 from fixedyet.web import parse_issue_url
 
 try:  # mcp >= 2 renamed FastMCP to MCPServer
@@ -58,8 +66,8 @@ mcp = _Server(
         "FixedYet reproduces a public GitHub bug report in a sandbox at the reported "
         "version, runs the same test against a fix side (main by default), and returns a "
         "rule-based verdict with evidence. Runs take a few minutes and cost money, so call "
-        "the tools only when the user wants a bug checked. propose_backport is a dry run: it never "
-        "pushes or opens a pull request."
+        "the tools only when the user wants a bug checked. propose_backport and propose_fix are "
+        "dry runs: they never push or open a pull request."
     ),
 )
 
@@ -89,6 +97,18 @@ def render_backport(result: BackportResult) -> str:
     from fixedyet.report import render_backport_markdown
 
     return render_backport_markdown(result)
+
+
+async def run_fix(assessment: Assessment) -> FixResult:
+    from fixedyet.fixmode import attempt_fix
+
+    return await attempt_fix(assessment)
+
+
+def render_fix(result: FixResult) -> str:
+    from fixedyet.report import render_fix_markdown
+
+    return render_fix_markdown(result)
 
 
 # --- helpers --------------------------------------------------------------------------
@@ -239,6 +259,43 @@ async def propose_backport(issue_url: str, target_branch: str | None = None) -> 
     except Exception:  # a rendering bug must not hide the status
         report = f"# Backport: {result.status.value}\n\n{result.reason}"
     return f"{report.rstrip()}\n\n```json\n{result.model_dump_json(indent=2)}\n```\n"
+
+
+@mcp.tool()
+async def propose_fix(issue_url: str) -> str:
+    """Propose a fix for an open bug and verify it in a sandbox, as a dry run (nothing is pushed
+    or opened).
+
+    Reproduces the issue; if the bug is still open on main (verdict open_bug), asks the model for
+    the smallest source change that makes the reproduction test pass, at most 3 attempts. A change
+    counts as verified only when, in the sandbox, the test fails twice without it and passes twice
+    with it, and the project's own test suite has no newly failing test. Only existing source
+    files may change (never a test, CI or packaging file), at most 80 lines. Takes several minutes
+    and costs money; the model cost of the fix is capped by FIXEDYET_FIX_BUDGET_USD.
+
+    Args:
+        issue_url: URL of a public GitHub issue, like https://github.com/owner/repo/issues/123.
+
+    Returns:
+        A line with the reproduction verdict, the markdown summary, then a fenced JSON block with
+        the FixResult. Its status is one of verified, not_fixed, already_fixed, not_applicable
+        (the bug is not an open bug), error. A verified diff is evidence, not a review.
+    """
+    url = _clean_url(issue_url)
+    assessment = await run_pipeline(url, None)
+    result = await run_fix(assessment)
+    try:
+        report = render_fix(result)
+    except Exception:  # a rendering bug must not hide the status
+        report = f"# Fix: {result.status.value}\n\n{result.reason}"
+    verdict = (
+        f"Reproduction verdict: {assessment.verdict.value} "
+        f"({assessment.confidence.value} confidence). Nothing was pushed and no pull request "
+        "was opened."
+    )
+    return (
+        f"{verdict}\n\n{report.rstrip()}\n\n```json\n{result.model_dump_json(indent=2)}\n```\n"
+    )
 
 
 def main() -> None:

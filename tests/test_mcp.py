@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -197,7 +198,7 @@ async def test_ordinary_refs_are_accepted(pipeline: FakePipeline, ref: str) -> N
 
 async def test_both_tools_are_registered_with_descriptions() -> None:
     tools = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
-    assert set(tools) == {"reproduce_issue", "check_fixed", "propose_backport"}
+    assert set(tools) == {"reproduce_issue", "check_fixed", "propose_backport", "propose_fix"}
     assert "sandbox" in tools["reproduce_issue"].description.lower()
     assert "fixed" in tools["check_fixed"].description.lower()
 
@@ -325,3 +326,134 @@ async def test_a_broken_backport_renderer_does_not_hide_the_status(
     monkeypatch.setattr(mcp_server, "render_backport", broken)
     out = await mcp_server.propose_backport(ISSUE)
     assert out.startswith("# Backport: verified") and json_block(out)["status"] == "verified"
+
+
+# --- propose_fix --------------------------------------------------------------------------
+
+
+def make_fix(status: str = "verified"):
+    from fixedyet.models import FixResult, FixStatus
+
+    return FixResult(
+        status=FixStatus(status), reason=f"it is {status}", issue_url=ISSUE, title="Fake issue",
+        repo="psf/requests", base_branch="main", base_sha="5ef70112a1ff19c05324ff889dd30405b100204",
+        diff="diff --git a/src/x.py b/src/x.py\n-old\n+new\n" if status == "verified" else "",
+        files_changed=["src/x.py"] if status == "verified" else [],
+    )
+
+
+class FakeFix:
+    def __init__(self, status: str = "verified") -> None:
+        self.status = status
+        self.calls: list[Assessment] = []
+
+    async def __call__(self, assessment: Assessment):
+        self.calls.append(assessment)
+        return make_fix(self.status)
+
+
+@pytest.fixture
+def fixes(monkeypatch: pytest.MonkeyPatch, pipeline: FakePipeline) -> FakeFix:
+    fake = FakeFix()
+    monkeypatch.setattr(mcp_server, "run_fix", fake)
+    monkeypatch.setattr(
+        mcp_server, "render_fix", lambda r: f"# Fix: {r.status.value}\n\n{r.reason}"
+    )
+    return fake
+
+
+async def test_propose_fix_reproduces_then_returns_the_verified_diff(
+    pipeline: FakePipeline, fixes: FakeFix
+) -> None:
+    pipeline.assessment = make_assessment(Verdict.OPEN_BUG)
+    out = await mcp_server.propose_fix(f"{ISSUE}#issuecomment-1")
+
+    assert out.startswith("Reproduction verdict: open_bug (high confidence).")
+    assert "no pull request was opened" in out
+    assert out.index("# Fix: verified") < out.index("```json")
+    data = json_block(out)
+    assert data["status"] == "verified" and "+new" in data["diff"]
+    assert pipeline.calls == [(ISSUE, None)]  # main is the fix side, as fix mode needs
+    assert [a.verdict for a in fixes.calls] == [Verdict.OPEN_BUG]
+
+
+@pytest.mark.parametrize(
+    "status", ["not_fixed", "already_fixed", "not_applicable", "error"]
+)
+async def test_propose_fix_reports_every_status(
+    pipeline: FakePipeline, fixes: FakeFix, status: str
+) -> None:
+    fixes.status = status
+    out = await mcp_server.propose_fix(ISSUE)
+    assert json_block(out)["status"] == status
+    assert f"# Fix: {status}" in out
+
+
+async def test_propose_fix_on_a_bug_that_is_not_open_says_so(
+    pipeline: FakePipeline, fixes: FakeFix
+) -> None:
+    """Fix mode itself answers not_applicable for any verdict but open_bug; the tool passes the
+    reproduction on and shows its verdict."""
+    fixes.status = "not_applicable"
+    out = await mcp_server.propose_fix(ISSUE)  # the fake pipeline says fixed_on_main
+    assert out.startswith("Reproduction verdict: fixed_on_main")
+    assert json_block(out)["status"] == "not_applicable"
+
+
+async def test_propose_fix_validates_before_any_run(
+    pipeline: FakePipeline, fixes: FakeFix
+) -> None:
+    for url in ("", "https://example.com/x/y/issues/1", "https://github.com/x/y/pull/1"):
+        with pytest.raises(ValueError, match="GitHub issue URL"):
+            await mcp_server.propose_fix(url)
+    assert pipeline.calls == [] and fixes.calls == []
+
+
+async def test_propose_fix_is_a_dry_run_that_never_touches_github(
+    pipeline: FakePipeline, fixes: FakeFix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*_: object, **__: object) -> None:
+        raise AssertionError("the MCP tool must never open a pull request")
+
+    monkeypatch.setattr("fixedyet.pullrequest.open_fix_pr", forbidden)
+    monkeypatch.setattr("fixedyet.pullrequest.PullRequestClient", forbidden)
+    pipeline.assessment = make_assessment(Verdict.OPEN_BUG)
+    await mcp_server.propose_fix(ISSUE)
+    assert "open_fix_pr" not in SOURCE
+
+
+SOURCE = Path(mcp_server.__file__).read_text(encoding="utf-8")
+
+
+async def test_the_real_fix_seam_calls_fix_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Assessment] = []
+
+    async def attempt_fix(assessment: Assessment, **kwargs: object):
+        seen.append(assessment)
+        assert kwargs == {}  # settings, sandbox and budget come from the environment
+        return make_fix()
+
+    monkeypatch.setattr("fixedyet.fixmode.attempt_fix", attempt_fix)
+    assessment = make_assessment(Verdict.OPEN_BUG)
+    result = await mcp_server.run_fix(assessment)
+    assert result.status.value == "verified" and seen == [assessment]
+
+
+async def test_propose_fix_is_described_as_a_dry_run() -> None:
+    tools = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
+    text = tools["propose_fix"].description.lower()
+    assert "dry run" in text and "nothing is pushed" in text and "open bug" in text
+    tool = tools["propose_fix"]
+    schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)  # mcp 2 / 1
+    assert schema["required"] == ["issue_url"]
+
+
+async def test_a_broken_fix_renderer_does_not_hide_the_status(
+    pipeline: FakePipeline, fixes: FakeFix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_: object) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mcp_server, "render_fix", broken)
+    out = await mcp_server.propose_fix(ISSUE)
+    assert "# Fix: verified" in out and json_block(out)["status"] == "verified"
