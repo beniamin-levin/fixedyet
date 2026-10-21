@@ -1,6 +1,9 @@
-"""Open a DRAFT pull request for a verified backport.
+"""Open a DRAFT pull request for a verified backport, or for a verified fix of an open bug.
 
-Only `fixedyet backport --open-pr` gets here, and only for a result whose status is `verified`.
+Only `fixedyet backport --open-pr`, `fixedyet fix --open-pr` and the web demo's maintainer get
+here, and only for a result whose status is `verified`. A backport goes to the maintenance
+branch (`open_backport_pr`); a fix goes to the default branch, from `fixedyet/fix-<issue>`, and
+also adds the reproduction test as a regression test (`open_fix_pr`). Both share the flow below.
 
     token (GITHUB_TOKEN, else `gh auth token`)  ->  who owns it?
       -> fork the upstream repository into that account (reuse it if it exists) and wait for it
@@ -27,15 +30,19 @@ import os
 import re
 import subprocess
 import tempfile
+import textwrap
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.header import Header
+from email.utils import format_datetime, formataddr
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 
 from fixedyet.github import parse_issue_url
-from fixedyet.models import BackportResult, BackportStatus
+from fixedyet.models import BackportResult, BackportStatus, FixResult, FixStatus, SideRun
 from fixedyet.report import _cell, _fence, _line, _link
 
 log = logging.getLogger(__name__)
@@ -557,7 +564,6 @@ async def open_backport_pr(
     so nothing reaches the upstream project. ``target="upstream"`` opens it on the upstream
     project and is refused unless ``confirmed_upstream`` is True (the caller asks the person).
     """
-    say = say or (lambda _message: None)
     if result.status is not BackportStatus.VERIFIED:
         raise PullRequestError(
             f"only a verified backport gets a pull request; this one is {result.status.value}"
@@ -567,61 +573,353 @@ async def open_backport_pr(
         raise PullRequestError("the backport result has no patch or no base commit")
     if not _REPO_RE.match(result.repo) or not _BRANCH_RE.match(branch):
         raise PullRequestError("the backport result names an invalid repository or branch")
-    if target not in ("fork", "upstream"):
-        raise PullRequestError(f"unknown pull request target {target!r}")
-    if target == "upstream" and not confirmed_upstream:
-        raise PullRequestError(
-            f"a pull request on the upstream project {result.repo} needs explicit confirmation"
-        )
+    _check_target(result.repo, target, confirmed_upstream)
     try:
         _, _, issue_number = parse_issue_url(result.issue_url)
     except ValueError as exc:
         raise PullRequestError(f"not a GitHub issue URL: {result.issue_url!r}") from exc
+    return await _open_draft(
+        repo=result.repo, base_branch=branch, base_sha=base_sha,
+        pr_branch=backport_branch_name(issue_number, branch), title=pr_title(result),
+        make_body=lambda me: pr_body(result, login=me.login),
+        make_patch=lambda me: result.patch,
+        token=token, target=target, client=client, pusher=pusher, say=say,
+        poll_interval_s=poll_interval_s, fork_timeout_s=fork_timeout_s, web_base=web_base,
+    )
 
+
+def _check_target(repo: str, target: str, confirmed_upstream: bool) -> None:
+    if target not in ("fork", "upstream"):
+        raise PullRequestError(f"unknown pull request target {target!r}")
+    if target == "upstream" and not confirmed_upstream:
+        raise PullRequestError(
+            f"a pull request on the upstream project {repo} needs explicit confirmation"
+        )
+
+
+async def _open_draft(
+    *,
+    repo: str,
+    base_branch: str,
+    base_sha: str,
+    pr_branch: str,
+    title: str,
+    make_body: Callable[[GitHubUser], str],
+    make_patch: Callable[[GitHubUser], str],
+    token: str,
+    target: str,
+    client: httpx.AsyncClient | None,
+    pusher: Pusher | None,
+    say: Callable[[str], None] | None,
+    poll_interval_s: float,
+    fork_timeout_s: float,
+    web_base: str,
+) -> PullRequest:
+    """The shared flow: who owns the token, the fork, an existing pull request, the push of
+    ``pr_branch`` to the fork, and the draft pull request against ``base_branch``. The caller has
+    validated the result and the target already."""
+    say = say or (lambda _message: None)
     gh = PullRequestClient(
         token, client=client, poll_interval_s=poll_interval_s, fork_timeout_s=fork_timeout_s
     )
     try:
         me = await gh.whoami()
         say(f"The token belongs to @{me.login}")
-        owner = result.repo.split("/", 1)[0]
+        owner = repo.split("/", 1)[0]
         if me.login.lower() == owner.lower():
             raise PullRequestError(
-                f"the token belongs to the owner of {result.repo}, so there is no fork to push to"
+                f"the token belongs to the owner of {repo}, so there is no fork to push to"
             )
-        fork = await gh.ensure_fork(result.repo, me.login, say=say)
-        pr_branch = backport_branch_name(issue_number, branch)
+        fork = await gh.ensure_fork(repo, me.login, say=say)
         head = f"{me.login}:{pr_branch}"
 
         push_base = False
         if target == "fork":
-            synced = await gh.sync_fork_branch(fork, branch)
+            synced = await gh.sync_fork_branch(fork, base_branch)
             if not synced:
-                say(f"Could not fast-forward {fork}:{branch} to upstream")
-            push_base = await gh.branch_sha(fork, branch) is None
-        base_repo = fork if target == "fork" else result.repo
+                say(f"Could not fast-forward {fork}:{base_branch} to upstream")
+            push_base = await gh.branch_sha(fork, base_branch) is None
+        base_repo = fork if target == "fork" else repo
 
-        existing = await gh.find_open_pr(base_repo, head, branch)
+        existing = await gh.find_open_pr(base_repo, head, base_branch)
         if existing:
             say("An open pull request for this branch already exists")
-            return _pull_request(existing, base_repo, branch, head, fork, me.login, created=False)
+            return _pull_request(
+                existing, base_repo, base_branch, head, fork, me.login, created=False
+            )
 
         say(f"Pushing {pr_branch} to {fork}")
-        email = f"{me.id}+{me.login}@users.noreply.github.com" if me.id else (
-            f"{me.login}@users.noreply.github.com")
+        email = noreply_email(me)
         request = PushRequest(
-            upstream_url=f"{web_base}/{result.repo}.git", fork_url=f"{web_base}/{fork}.git",
-            base_sha=base_sha, base_branch=branch, branch=pr_branch, patch=result.patch,
-            committer_name=me.name or me.login, committer_email=email, token=token,
-            push_base_branch=push_base,
+            upstream_url=f"{web_base}/{repo}.git", fork_url=f"{web_base}/{fork}.git",
+            base_sha=base_sha, base_branch=base_branch, branch=pr_branch,
+            patch=make_patch(me), committer_name=me.name or me.login, committer_email=email,
+            token=token, push_base_branch=push_base,
         )
         await (pusher or push_with_git)(request)
 
         say(f"Opening a draft pull request on {base_repo}")
         created = await gh.create_draft_pr(
-            base_repo, title=pr_title(result), head=head, base=branch,
-            body=pr_body(result, login=me.login),
+            base_repo, title=title, head=head, base=base_branch, body=make_body(me),
         )
-        return _pull_request(created, base_repo, branch, head, fork, me.login, created=True)
+        return _pull_request(created, base_repo, base_branch, head, fork, me.login, created=True)
     finally:
         await gh.aclose()
+
+
+def noreply_email(me: GitHubUser) -> str:
+    """The token owner's GitHub noreply address, which keeps their real address private."""
+    if me.id:
+        return f"{me.id}+{me.login}@users.noreply.github.com"
+    return f"{me.login}@users.noreply.github.com"
+
+
+# -- a verified fix of an open bug ------------------------------------------------------------
+
+FIX_ATTRIBUTION = (
+    "Written with FixedYet: the change was proposed by an AI model (NVIDIA Nemotron via Nebius "
+    "Token Factory) and verified in a sandbox. The regression test fails before it and passes "
+    "after it, and the project's test suite has no newly failing test."
+)
+
+
+def fix_branch_name(issue_number: int) -> str:
+    """``fixedyet/fix-<issue number>``."""
+    return f"fixedyet/fix-{int(issue_number)}"
+
+
+def _issue_number(result: FixResult) -> int:
+    try:
+        return parse_issue_url(result.issue_url)[2]
+    except ValueError as exc:
+        raise PullRequestError(f"not a GitHub issue URL: {result.issue_url!r}") from exc
+
+
+def _no_mentions(text: str) -> str:
+    """Model-written text cannot ping anyone: a zero-width space after every ``@name``'s @."""
+    return re.sub(r"(?<![\w`])@(?=[A-Za-z0-9])", "@\u200b", text)
+
+
+def fix_pr_title(result: FixResult) -> str:
+    """The one-line summary of the change, or ``Fix #<n>: <issue title>``."""
+    summary = " ".join(result.summary.split()) or f"Fix #{_issue_number(result)}: {result.title}"
+    summary = _no_mentions(summary)
+    if len(summary) > TITLE_MAX_CHARS:
+        summary = summary[: TITLE_MAX_CHARS - 3].rstrip() + "..."
+    return summary
+
+
+def _runs_table(rows: list[tuple[str, SideRun | None]]) -> list[str]:
+    runs = max((len(s.outcomes) for _, s in rows if s), default=1) or 1
+    out = [
+        "| | " + " | ".join(f"Run {i}" for i in range(1, runs + 1)) + " |",
+        "|---|" + "---|" * runs,
+    ]
+    for label, side in rows:
+        cells = [o.value.upper() for o in side.outcomes] if side else []
+        cells += ["-"] * (runs - len(cells))
+        out.append(f"| {label} | " + " | ".join(cells) + " |")
+    return out
+
+
+def fix_pr_body(result: FixResult, *, login: str) -> str:
+    """The pull request description of a verified fix. Ends with the fixed disclosure line."""
+    number = _issue_number(result)
+    branch = result.base_branch or "main"
+    sha = result.base_sha or ""
+    commit_url = f"{GITHUB_WEB}/{result.repo}/commit/{sha}" if sha and result.repo else None
+    stat = diffstat(result.diff)
+    attempt = next((a.number for a in result.attempts if a.outcome == "verified"),
+                   len(result.attempts))
+    lines = [
+        f"Fixes #{number}.",
+        "",
+        "**This change was written by an AI model and verified by machine, not written by a "
+        "person.** FixedYet asked NVIDIA Nemotron for the smallest change that makes the "
+        "regression test below pass, then checked it in a sandbox: the test fails on "
+        f"`{_cell(branch)}` without the change and passes with it (twice each), and the "
+        "project's own test suite has no newly failing test. A passing suite is evidence, not a "
+        "review.",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| Issue | {result.issue_url} |",
+        f"| Verified on | `{_cell(branch)}` at {_link(sha[:12], commit_url) if sha else '-'} |",
+        f"| Change | {len(stat)} file{'s' if len(stat) != 1 else ''}, "
+        f"+{sum(a for _, a, _ in stat)} / -{sum(r for _, _, r in stat)} lines, attempt "
+        f"{attempt} of the model |",
+        "",
+        "## What the change does",
+        "",
+        "_The model's own account. The sandbox checked the behaviour, not this text._",
+        "",
+        _no_mentions(_line(result.explanation)) or "(no explanation was given)",
+        "",
+        f"## Regression test on `{_cell(branch)}`",
+        "",
+        *_runs_table([("Without the change", result.repro_before),
+                      ("With the change", result.repro_after)]),
+        "",
+    ]
+    test_path = result.regression_test_path
+    if test_path:
+        lines.append(
+            f"The test was written by FixedYet (by the model) from the issue. This pull request "
+            f"adds it as `{_cell(test_path)}`, where it ran in every check above."
+        )
+    else:
+        lines.append(
+            "The test was written by FixedYet (by the model) from the issue. The repository has "
+            "no `tests/`, `test/` or `testing/` directory, so it is **not** part of this pull "
+            "request; it is below for reviewers."
+        )
+    if result.repro_test_code:
+        lines += [
+            "",
+            "<details><summary>Regression test</summary>",
+            "",
+            _fence(result.repro_test_code, "python"),
+            "",
+            "</details>",
+        ]
+    sb, sa = result.suite_before, result.suite_after
+    lines += ["", f"## Project test suite on `{_cell(branch)}`", ""]
+    if sb and sa:
+        lines += ["| | Without the change | With the change |", "|---|---|---|"]
+        for label, name in (("Passed", "passed"), ("Failed", "failed"), ("Errors", "errors"),
+                            ("Skipped", "skipped")):
+            lines.append(f"| {label} | {getattr(sb, name)} | {getattr(sa, name)} |")
+        newly = ", ".join(f"`{_cell(t)}`" for t in result.newly_failing) or "none"
+        lines += ["", f"Tests failing with the change that did not fail without it: {newly}."]
+        if sb.failed or sb.errors:
+            lines.append("Tests that already failed without the change are the baseline and are "
+                         "not blamed on it.")
+    else:
+        lines.append("The suite was not run.")
+    lines += ["", "## Patch summary", ""]
+    if result.summary:
+        lines += [f"`{_cell(result.summary)}`", ""]
+    if stat:
+        lines += ["| File | Added | Removed |", "|---|---|---|"]
+        lines += [f"| `{_cell(name)}` | {added} | {removed} |" for name, added, removed in stat]
+        lines += [
+            "",
+            f"{len(stat)} source file{'s' if len(stat) != 1 else ''} changed, "
+            f"{sum(a for _, a, _ in stat)} insertions(+), {sum(r for _, _, r in stat)} "
+            "deletions(-)" + (", plus the new regression test." if test_path else "."),
+        ]
+    lines += ["", "---", DISCLOSURE.format(login=_line(login))]
+    return "\n".join(lines) + "\n"
+
+
+def new_file_diff(path: str, text: str) -> str:
+    """A git diff that creates ``path`` with ``text``."""
+    body = text.splitlines()
+    count = len(body)
+    span = "1" if count == 1 else f"1,{count}"
+    out = [f"diff --git a/{path} b/{path}", "new file mode 100644", "--- /dev/null",
+           f"+++ b/{path}", f"@@ -0,0 +{span} @@", *(f"+{line}" for line in body)]
+    tail = "" if text.endswith("\n") else "\\ No newline at end of file\n"
+    return "\n".join(out) + "\n" + tail
+
+
+def fix_commit_message(result: FixResult) -> str:
+    """Subject, ``Fixes #n.``, the model's explanation (wrapped) and the attribution. No line
+    starts with ``-`` or ``diff`` so that `git am` cannot take the message for the patch."""
+    number = _issue_number(result)
+    subject = fix_pr_title(result)
+    parts = [subject, "", f"Fixes #{number}."]
+    if result.explanation:
+        parts += ["", *textwrap.wrap(_no_mentions(_line(result.explanation)), 72)]
+    parts += ["", *textwrap.wrap(FIX_ATTRIBUTION, 72)]
+    safe = [(" " + p) if re.match(r"^(-|diff |Index: )", p) else p for p in parts]
+    return "\n".join(safe)
+
+
+def fix_patch(
+    result: FixResult, *, author_name: str, author_email: str, when: datetime | None = None,
+) -> str:
+    """The verified change plus the new regression test as one mbox patch for `git am`, authored
+    by the person who submits it."""
+    if not result.diff.strip():
+        raise PullRequestError("the fix result has no diff")
+    message = fix_commit_message(result)
+    subject, _, body = message.partition("\n")
+    subject_header = subject if subject.isascii() else Header(subject, "utf-8").encode()
+    diff = result.diff if result.diff.endswith("\n") else result.diff + "\n"
+    if result.regression_test_path and result.repro_test_code:
+        diff += new_file_diff(result.regression_test_path, result.repro_test_code)
+    return (
+        "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n"
+        f"From: {formataddr((author_name, author_email))}\n"
+        f"Date: {format_datetime(when or datetime.now(UTC))}\n"
+        f"Subject: [PATCH] {subject_header}\n"
+        "MIME-Version: 1.0\n"
+        "Content-Type: text/plain; charset=UTF-8\n"
+        "Content-Transfer-Encoding: 8bit\n"
+        f"\n{body.lstrip(chr(10))}\n---\n\n{diff}-- \nFixedYet\n"
+    )
+
+
+def fix_pr_preview(result: FixResult, *, login: str) -> str:
+    """What the draft pull request would look like: title, base and head, body, and the diff that
+    GitHub shows under "Files changed". Nothing is sent anywhere."""
+    number = _issue_number(result)
+    head = f"{login}:{fix_branch_name(number)}"
+    patch = result.diff if result.diff.endswith("\n") else result.diff + "\n"
+    if result.regression_test_path and result.repro_test_code:
+        patch += new_file_diff(result.regression_test_path, result.repro_test_code)
+    return (
+        f"# {fix_pr_title(result)}\n\n"
+        f"base: {result.repo} {result.base_branch or 'main'}  \u00b7  head: {head}  "
+        "\u00b7  DRAFT\n\n"
+        "---\n\n"
+        f"{fix_pr_body(result, login=login)}\n"
+        "---\n\n"
+        "## Files changed (what GitHub shows in the diff tab)\n\n"
+        f"{_fence(patch, 'diff')}\n"
+    )
+
+
+async def open_fix_pr(
+    result: FixResult,
+    *,
+    token: str,
+    target: PrTarget = "fork",
+    confirmed_upstream: bool = False,
+    client: httpx.AsyncClient | None = None,
+    pusher: Pusher | None = None,
+    say: Callable[[str], None] | None = None,
+    poll_interval_s: float = 3.0,
+    fork_timeout_s: float = 180.0,
+    web_base: str = GITHUB_WEB,
+) -> PullRequest:
+    """Fork, push ``fixedyet/fix-<issue>`` (the verified change and the regression test, authored
+    by the token's owner) and open a DRAFT pull request against the default branch.
+
+    ``target="fork"`` (default) opens it against the fork's own copy of the default branch, so
+    nothing reaches the upstream project. ``target="upstream"`` opens it on the upstream project
+    and is refused unless ``confirmed_upstream`` is True (the caller asks the person).
+    """
+    if result.status is not FixStatus.VERIFIED:
+        raise PullRequestError(
+            f"only a verified fix gets a pull request; this one is {result.status.value}"
+        )
+    branch, base_sha = result.base_branch, result.base_sha
+    if not (result.diff.strip() and branch and base_sha and _SHA_RE.match(base_sha)):
+        raise PullRequestError("the fix result has no diff or no base commit")
+    if not _REPO_RE.match(result.repo) or not _BRANCH_RE.match(branch):
+        raise PullRequestError("the fix result names an invalid repository or branch")
+    _check_target(result.repo, target, confirmed_upstream)
+    number = _issue_number(result)
+
+    def make_patch(me: GitHubUser) -> str:
+        return fix_patch(result, author_name=me.name or me.login, author_email=noreply_email(me))
+
+    return await _open_draft(
+        repo=result.repo, base_branch=branch, base_sha=base_sha,
+        pr_branch=fix_branch_name(number), title=fix_pr_title(result),
+        make_body=lambda me: fix_pr_body(result, login=me.login), make_patch=make_patch,
+        token=token, target=target, client=client, pusher=pusher, say=say,
+        poll_interval_s=poll_interval_s, fork_timeout_s=fork_timeout_s, web_base=web_base,
+    )

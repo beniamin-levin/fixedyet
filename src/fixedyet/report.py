@@ -14,6 +14,8 @@ from fixedyet.models import (
     BackportResult,
     BackportStatus,
     Evidence,
+    FixResult,
+    FixStatus,
     SideRun,
     SuiteRun,
     Verdict,
@@ -34,6 +36,13 @@ BACKPORT_HEADLINES: dict[BackportStatus, str] = {
     BackportStatus.ALREADY_FIXED_ON_BRANCH: "No backport needed: {branch} already has the fix",
     BackportStatus.NOT_APPLICABLE: "No backport possible",
     BackportStatus.ERROR: "Backport not verified: a step could not be completed",
+}
+FIX_HEADLINES: dict[FixStatus, str] = {
+    FixStatus.VERIFIED: "Verified fix: the test fails on {branch} without it and passes with it",
+    FixStatus.NOT_FIXED: "No verified fix: the attempts did not pass the checks",
+    FixStatus.ALREADY_FIXED: "Nothing to fix: the test already passes on {branch}",
+    FixStatus.NOT_APPLICABLE: "No fix attempted",
+    FixStatus.ERROR: "Fix not verified: a step could not be completed",
 }
 LOG_EXCERPT_CHARS = 1_500
 PATCH_MARKDOWN_CHARS = 12_000
@@ -164,6 +173,8 @@ def render_markdown(a: Assessment) -> str:
 
     if a.backport is not None:
         out += ["", *backport_section(a.backport)]
+    if a.fix is not None:
+        out += ["", *fix_section(a.fix)]
 
     out += ["", "## Usage", "", _usage_line(a)]
 
@@ -291,4 +302,101 @@ def render_backport_markdown(r: BackportResult) -> str:
         out.append(f"**Issue:** {_link(r.title or r.issue_url, r.issue_url)}")
         out.append("")
     out += backport_section(r)
+    return "\n".join(out).rstrip() + "\n"
+
+
+# -- fix mode -------------------------------------------------------------------------------------
+
+
+def _fix_suite_table(r: FixResult) -> str | None:
+    if r.suite_before is None and r.suite_after is None:
+        return None
+    rows = ["| Project test suite | Without the change | With the change |", "|---|---|---|"]
+    for label, name in (("Passed", "passed"), ("Failed", "failed"), ("Errors", "errors"),
+                        ("Skipped", "skipped")):
+        rows.append(f"| {label} | {_suite_cell(r.suite_before, name)} | "
+                    f"{_suite_cell(r.suite_after, name)} |")
+    both_ran = bool(r.suite_before and r.suite_before.ran and r.suite_after and r.suite_after.ran)
+    newly = (", ".join(f"`{_cell(t)}`" for t in r.newly_failing) if r.newly_failing
+             else ("none" if both_ran else "-"))
+    rows.append(f"| Newly failing tests | - | {newly} |")
+    return "\n".join(rows)
+
+
+def _fix_repro_table(r: FixResult) -> str | None:
+    sides = [(label, side) for label, side in (("Without the change", r.repro_before),
+                                                ("With the change", r.repro_after)) if side]
+    if not sides:
+        return None
+    runs = max(len(side.outcomes) for _, side in sides) or 1
+    rows = [f"| Reproduction test on `{_cell(r.base_branch or 'main')}` | "
+            + " | ".join(f"Run {i}" for i in range(1, runs + 1)) + " |", "|---|" + "---|" * runs]
+    for label, side in sides:
+        cells = [o.value.upper() for o in side.outcomes] + ["-"] * (runs - len(side.outcomes))
+        rows.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(rows)
+
+
+def fix_section(r: FixResult, level: int = 2) -> list[str]:
+    """The "Fix" section as markdown lines, whatever the status: the attempts are always listed,
+    so a fix that failed is reported as plainly as one that worked."""
+    hashes = "#" * level
+    out = [f"{hashes} Fix", "", f"**Status:** `{r.status.value}`  "]
+    if r.reason:
+        out.append(f"**Result:** {_line(r.reason)}  ")
+    if r.base_branch:
+        head = f" at `{_cell((r.base_sha or '')[:12])}`" if r.base_sha else ""
+        out.append(f"**Verified on:** `{_cell(r.base_branch)}`{head}  ")
+    if r.context_files:
+        shown = ", ".join(f"`{_cell(p)}`" for p in r.context_files)
+        out.append(f"**Code shown to the model:** {shown}  ")
+    if r.regression_test_path:
+        out.append(f"**Regression test in the pull request:** `{_cell(r.regression_test_path)}`  ")
+    elif r.status is FixStatus.VERIFIED:
+        out.append("**Regression test in the pull request:** none (no tests/, test/ or testing/ "
+                   "directory)  ")
+    out[-1] = out[-1].rstrip()
+    if r.summary:
+        out += ["", f"**Change:** {_line(r.summary)}"]
+    if r.explanation:
+        out += ["", f"**The model's account** (not checked by the sandbox): "
+                f"{_line(r.explanation)}"]
+    repro = _fix_repro_table(r)
+    if repro:
+        out += ["", repro]
+    suite = _fix_suite_table(r)
+    if suite:
+        out += ["", suite]
+    if r.attempts:
+        out += ["", "| Attempt | Outcome | Changed lines | Model cost | Detail |",
+                "|---|---|---|---|---|"]
+        for a in r.attempts:
+            out.append(f"| {a.number} | `{a.outcome}` | {a.lines_changed} | "
+                       f"${a.cost_usd:.4f} | {_cell(a.reason) or '-'} |")
+    if r.diff:
+        diff = r.diff
+        note = ""
+        if len(diff) > PATCH_MARKDOWN_CHARS:
+            diff = diff[:PATCH_MARKDOWN_CHARS].rsplit("\n", 1)[0]
+            note = f"\n\n_The diff is cut here; the whole diff is {len(r.diff):,} characters._"
+        label = "Verified diff" if r.status is FixStatus.VERIFIED else "Diff (not verified)"
+        out += ["", f"{label}:", "", _fence(diff, "diff")]
+        out[-1] += note
+    if r.log_excerpt and r.status is not FixStatus.VERIFIED:
+        out += ["", "Output of the step that stopped it (end of the log):", "",
+                _fence(_log_tail(r.log_excerpt))]
+    u = r.usage
+    out += ["", f"_{len(r.attempts)} attempt(s), {u.llm_calls} model calls, {u.sandbox_runs} "
+            f"sandbox runs, {u.wall_seconds:.0f} s wall time, ${u.cost_usd:.4f} model cost "
+            f"(cap ${r.budget_usd:.2f})._"]
+    return out
+
+
+def render_fix_markdown(r: FixResult) -> str:
+    """A standalone markdown summary of a fix run (what `fixedyet fix` prints)."""
+    headline = FIX_HEADLINES[r.status].format(branch=r.base_branch or "main")
+    out = [f"# {headline}", ""]
+    if r.issue_url:
+        out += [f"**Issue:** {_link(r.title or r.issue_url, r.issue_url)}", ""]
+    out += fix_section(r)
     return "\n".join(out).rstrip() + "\n"
