@@ -43,6 +43,9 @@ elif cmd == "inspect":
 elif cmd == "commit":
     print("sha256:committed")
 elif cmd == "image":
+    local = os.environ.get("FAKE_LOCAL_IMAGES")
+    if local is not None:
+        sys.exit(0 if args[-1] in local.split(",") else 1)
     sys.exit(int(os.environ.get("FAKE_IMAGE_INSPECT_RC", "0")))
 elif cmd == "pull":
     sys.exit(int(os.environ.get("FAKE_PULL_RC", "0")))
@@ -202,3 +205,30 @@ async def test_option_like_image_names_are_rejected(
     with pytest.raises(SandboxError, match="invalid image"):
         await sb.run("--privileged", "true")
     assert not log.exists()
+
+
+async def test_a_local_minor_image_is_used_instead_of_pulling_a_patch_release(
+    fake_docker: tuple[DockerSandbox, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sb, log = fake_docker
+    monkeypatch.setenv("FAKE_LOCAL_IMAGES", "python:3.12")
+    assert await sb.base_image("3.12.7") == "python:3.12"
+    assert [c[0] for c in calls(log)] == ["image", "image"]
+
+
+async def test_a_patch_release_is_pulled_when_no_minor_image_is_local(
+    fake_docker: tuple[DockerSandbox, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sb, log = fake_docker
+    monkeypatch.setenv("FAKE_LOCAL_IMAGES", "python:3.11")
+    assert await sb.base_image("3.12.7") == "python:3.12.7"
+    assert calls(log)[-1] == ["pull", "python:3.12.7"]
+
+
+async def test_a_local_patch_release_is_used_as_is(
+    fake_docker: tuple[DockerSandbox, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sb, log = fake_docker
+    monkeypatch.setenv("FAKE_LOCAL_IMAGES", "python:3.12.7,python:3.12")
+    assert await sb.base_image("3.12.7") == "python:3.12.7"
+    assert [c[0] for c in calls(log)] == ["image"]

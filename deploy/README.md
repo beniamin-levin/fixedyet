@@ -97,6 +97,25 @@ After editing the file, run `deploy/deploy.sh SERVER_ADDRESS` again (or `sudo sy
 
 Worst-case spend is `FIXEDYET_DEMO_DAILY_LIMIT` times `FIXEDYET_RUN_BUDGET_USD` per day for model tokens, plus Tavily credits and sandbox time. Set the limit to what the credits can carry. Independently of both, `FIXEDYET_TOTAL_BUDGET_USD` stops all model calls once the ledger total reaches it; `GET /api/status` shows `budget_remaining_usd`.
 
+## Live runs on a second VM (Docker sandbox)
+
+Live runs need a sandbox. With the `docker` backend, the runs need more memory and disk than the VM that serves the website should give up, so they can run on a second VM in the same private subnet:
+
+```sh
+# on the Docker VM, once: swap, Docker, and a firewall rule for the proxy VM only
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+sudo apt-get install -y docker.io python3.12-venv iptables-persistent
+sudo iptables -I INPUT 5 -s <proxy-private-ip>/32 -p tcp --dport 8090 -m state --state NEW -j ACCEPT
+sudo netfilter-persistent save
+# /etc/fixedyet.env as above, with FIXEDYET_SANDBOX=docker
+
+# from your Mac
+DEPLOY_DOCKER_HOST=1 deploy/deploy.sh <docker-vm-public-ip>
+FIXEDYET_UPSTREAM=<docker-vm-private-ip>:8090 deploy/deploy.sh <proxy-vm-public-ip>
+```
+
+Also allow TCP 8090 from the proxy VM's private IP in the cloud security list. The second command points the nginx snippet at the Docker VM, stops and disables the local service on the proxy VM, and checks the upstream's `/healthz`. To go back, run a plain `deploy/deploy.sh <proxy-vm-public-ip>`.
+
 ## Operating it
 
 ```bash

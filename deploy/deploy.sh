@@ -15,6 +15,12 @@
 #   - NEVER edits an existing nginx server block: you add one `include` line to the
 #     benlevin.fyi server once, and the script tells you when that is still missing
 #   - NEVER writes /etc/fixedyet.env (your secrets)
+#
+# Two optional roles, for running the Docker sandbox on a second VM:
+#   DEPLOY_DOCKER_HOST=1        this HOST runs Docker: the service joins the docker group and
+#                               listens on all interfaces (firewall it to the proxy VM only)
+#   FIXEDYET_UPSTREAM=IP:PORT   this HOST only proxies: nginx forwards /fixedyet/ to IP:PORT
+#                               and the local service is stopped and disabled
 set -euo pipefail
 
 REMOTE_DIR=/opt/fixedyet
@@ -24,6 +30,8 @@ PORT=8090
 PUBLIC_URL=https://benlevin.fyi/fixedyet/
 
 HOST="${DEPLOY_HOST:-}"
+UPSTREAM="${FIXEDYET_UPSTREAM:-}"
+DOCKER_HOST_ROLE="${DEPLOY_DOCKER_HOST:-0}"
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
@@ -77,9 +85,9 @@ echo "== copying the repository =="
 rsync "${RSYNC_ARGS[@]}" ./ "$TARGET:$REMOTE_DIR/"
 
 echo "== installing on the server =="
-ssh "${SSH_OPTS[@]}" "$TARGET" bash -s -- "$REMOTE_DIR" "$SERVICE" "$ENV_FILE" "$PORT" <<'REMOTE'
+ssh "${SSH_OPTS[@]}" "$TARGET" bash -s -- "$REMOTE_DIR" "$SERVICE" "$ENV_FILE" "$PORT" "$UPSTREAM" "$DOCKER_HOST_ROLE" <<'REMOTE'
 set -euo pipefail
-REMOTE_DIR=$1; SERVICE=$2; ENV_FILE=$3; PORT=$4
+REMOTE_DIR=$1; SERVICE=$2; ENV_FILE=$3; PORT=$4; UPSTREAM=$5; DOCKER_HOST_ROLE=$6
 
 # Files must be readable by the service user whatever their mode was on the Mac.
 find "$REMOTE_DIR" \( -path "$REMOTE_DIR/runs" -o -path "$REMOTE_DIR/.venv" \) -prune \
@@ -111,8 +119,18 @@ fi
 
 # 3. The systemd unit.
 sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/$SERVICE.service" "/etc/systemd/system/$SERVICE.service"
+if [ "$DOCKER_HOST_ROLE" = 1 ]; then
+  command -v docker >/dev/null 2>&1 || { echo "DEPLOY_DOCKER_HOST=1 but docker is not installed" >&2; exit 1; }
+  sudo usermod -aG docker fixedyet
+  sudo install -d -o fixedyet -g fixedyet -m 750 /var/lib/fixedyet /var/lib/fixedyet/runs /var/lib/fixedyet/docker-config
+  sudo install -d -m 755 "/etc/systemd/system/$SERVICE.service.d"
+  sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet-docker-host.conf" \
+    "/etc/systemd/system/$SERVICE.service.d/docker-host.conf"
+fi
 sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE" >/dev/null 2>&1
+if [ -z "$UPSTREAM" ]; then
+  sudo systemctl enable "$SERVICE" >/dev/null 2>&1
+fi
 
 # 4. nginx: a location snippet and a rate-limit zone. The existing benlevin.fyi server block
 #    is never edited; it includes the snippet with one line that you add once.
@@ -130,7 +148,16 @@ else
     if [ -e "$dest" ]; then sudo cp -p "$dest" "$dest.bak"; fi
   done
   sudo install -d -m 755 /etc/nginx/snippets /etc/nginx/conf.d
-  sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet.nginx.conf" "$SNIPPET"
+  if [ -n "$UPSTREAM" ]; then
+    sed "s#proxy_pass http://127.0.0.1:$PORT/;#proxy_pass http://$UPSTREAM/;#" \
+      "$REMOTE_DIR/deploy/fixedyet.nginx.conf" > /tmp/fixedyet-snippet.conf
+    grep -q "proxy_pass http://$UPSTREAM/;" /tmp/fixedyet-snippet.conf \
+      || { echo "could not point the nginx snippet at $UPSTREAM" >&2; undo_nginx; exit 1; }
+    sudo install -m 644 -o root -g root /tmp/fixedyet-snippet.conf "$SNIPPET"
+    rm -f /tmp/fixedyet-snippet.conf
+  else
+    sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet.nginx.conf" "$SNIPPET"
+  fi
   sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet-limits.nginx.conf" "$LIMITS"
   if sudo nginx -t; then
     sudo rm -f "$SNIPPET.bak" "$LIMITS.bak"
@@ -152,7 +179,18 @@ else
   fi
 fi
 
-# 5. Start the service, but only once the secrets file exists. It is never created here.
+# 5. Proxy-only host: the app runs on $UPSTREAM, so stop the local copy and check the upstream.
+if [ -n "$UPSTREAM" ]; then
+  sudo systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+  if curl -fsS -m 5 "http://$UPSTREAM/healthz" >/dev/null; then
+    echo "proxying to $UPSTREAM: $(curl -fsS -m 5 "http://$UPSTREAM/healthz")"
+    exit 0
+  fi
+  echo "nginx now points at $UPSTREAM, but it does not answer /healthz" >&2
+  exit 1
+fi
+
+# 6. Start the service, but only once the secrets file exists. It is never created here.
 if [ ! -f "$ENV_FILE" ]; then
   echo
   echo "NOT STARTED: $ENV_FILE does not exist."

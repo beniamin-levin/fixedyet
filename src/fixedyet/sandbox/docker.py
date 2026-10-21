@@ -157,6 +157,13 @@ class DockerSandbox:
             return self._base_images[version]
         ref = f"python:{version}"
         inspect = await self._docker("image", "inspect", "--format", "{{.Id}}", ref)
+        minor = ".".join(version.split(".")[:2])
+        if inspect.returncode != 0 and minor != version:
+            # A patch release rarely matters to a bug report, and a pull is 1.5 GB: on a small
+            # VM that is minutes. Reuse a local python:X.Y when there is one.
+            local = await self._docker("image", "inspect", "--format", "{{.Id}}", f"python:{minor}")
+            if local.returncode == 0:
+                ref, inspect = f"python:{minor}", local
         if inspect.returncode != 0:
             pull = await self._docker("pull", ref, limit_s=1200)
             if pull.returncode != 0:
