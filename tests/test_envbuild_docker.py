@@ -29,6 +29,9 @@ OLD_SHA = "a1f00056ebc65d17ae69c5aba324ef4f0382138a"  # "Switch to nox", June 20
 PASSING = "def test_ok():\n    assert 1 + 1 == 2\n"
 FAILING = "def test_bad():\n    assert 1 + 1 == 3\n"
 BROKEN = "def test_oops(:\n"  # syntax error: pytest exits 2 at collection
+# Kills the interpreter with exit 1 before pytest can print a summary, like a pytest plugin
+# that crashes on import: a run in which no test ever decided anything.
+CRASHES_PYTEST = "import os\n\n\ndef test_dies():\n    os._exit(1)\n"
 IMPORTS_PACKAGE = "def test_import():\n    import sample\n    assert sample\n"
 HEAD_CHECK = """import subprocess
 
@@ -102,6 +105,14 @@ async def test_collection_error_gives_error(built) -> None:
     sandbox, image, _, _ = built
     side = await run_test_on_side(
         sandbox, image, test_path="tests/test_ir_probe.py", test_code=BROKEN, runs=1
+    )
+    assert side.outcomes == [Outcome.ERROR]
+
+
+async def test_pytest_dying_with_exit_one_is_an_error_not_a_failure(built) -> None:
+    sandbox, image, _, _ = built
+    side = await run_test_on_side(
+        sandbox, image, test_path="tests/test_ir_probe.py", test_code=CRASHES_PYTEST, runs=1
     )
     assert side.outcomes == [Outcome.ERROR]
 

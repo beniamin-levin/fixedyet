@@ -477,6 +477,16 @@ def test_side_script_reported_side_has_no_checkout_or_patch() -> None:
     assert "__RC__=$rc" in script
 
 
+def test_side_script_turns_exit_one_without_a_pytest_summary_into_an_error() -> None:
+    script = side_script(
+        test_path="t/test_x.py", checkout=None, patch=False, runs=1, per_run_timeout_s=50
+    )
+    assert bash_syntax_ok(script).returncode == 0
+    assert 'if [ "$rc" -eq 1 ] && ! grep -qE "[0-9]+ (failed|passed|' in script
+    assert '"/tmp/ir_run_$i.log"; then rc=70; fi' in script
+    assert script.index("rc=$?") < script.index("then rc=70") < script.index("__RC__=$rc")
+
+
 def test_side_script_checkout_fetches_and_reinstalls() -> None:
     script = side_script(
         test_path="t/test_x.py", checkout="main", patch=False, runs=1, per_run_timeout_s=50
@@ -522,6 +532,7 @@ def test_side_script_rejects_unsafe_checkout() -> None:
         (1, Outcome.FAIL),
         (2, Outcome.ERROR),
         (3, Outcome.ERROR),
+        (70, Outcome.ERROR),
         (4, Outcome.ERROR),
         (5, Outcome.ERROR),
         (124, Outcome.ERROR),
@@ -740,6 +751,7 @@ if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then
   rc=$(echo "$FAKE_RCS" | cut -d, -f"$n")
   echo "collected 1 item"
   printf '__RC__=0\\n__SETUP_FAILED__=cd\\npartial line without newline'
+  if [ -z "${FAKE_NO_SUMMARY:-}" ]; then echo; echo "1 failed in 0.01s"; fi
   exit "$rc"
 fi
 echo "stub python: $*" >&2
@@ -842,6 +854,14 @@ async def test_bash_end_to_end_fail_fail(local_bash: LocalEnv) -> None:
     written = local_bash.repo / "tests" / "test_issue.py"
     assert written.read_text() == "# the test\n"
     assert "partial line without newline" in side.log_excerpt
+
+
+async def test_bash_exit_one_without_a_pytest_summary_is_an_error(local_bash: LocalEnv) -> None:
+    crashed = await run_test_on_side(
+        local_bash(FAKE_RCS="1,1", FAKE_NO_SUMMARY="1"),
+        "local", test_path="t/test_a.py", test_code="x", runs=2,
+    )
+    assert crashed.outcomes == [Outcome.ERROR, Outcome.ERROR]
 
 
 async def test_bash_end_to_end_pass_then_flaky_and_error_codes(local_bash: LocalEnv) -> None:

@@ -373,9 +373,12 @@ async def _run_one(
     error: str | None = None
     lost_cost = 0.0  # money spent by a run that died before returning an Assessment
     deadline = asyncio.timeout(timeout_s)
+    python_version = python_version_for(instance)  # SWE-bench's own version for this release
     try:
         async with deadline:
-            assessment = await reproduce(instance, progress=progress)
+            assessment = await reproduce(
+                instance, progress=progress, python_version=python_version
+            )
     except TimeoutError as exc:
         if deadline.expired():
             error = f"timed out after {timeout_s:g}s"
@@ -391,7 +394,7 @@ async def _run_one(
         instance_id=instance.instance_id,
         repo=instance.repo,
         version=instance.version,
-        python_version=python_version_for(instance),
+        python_version=python_version,
         verdict=assessment.verdict if assessment else None,
         confidence=assessment.confidence if assessment else None,
         cost_usd=assessment.usage.cost_usd if assessment else lost_cost,

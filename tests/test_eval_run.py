@@ -246,14 +246,17 @@ class FakeReproduce:
         self.default_cost = default_cost
         self.delay = delay
         self.started: list[str] = []
+        self.python_versions: list[str | None] = []
         self.running = 0
         self.max_running = 0
 
     async def __call__(
-        self, inst: SweBenchInstance, *, settings: object = None, progress: object = None
+        self, inst: SweBenchInstance, *, settings: object = None, progress: object = None,
+        python_version: str | None = None,
     ) -> Assessment:
         n = int(inst.instance_id.rsplit("-", 1)[1])
         self.started.append(inst.instance_id)
+        self.python_versions.append(python_version)
         self.running += 1
         self.max_running = max(self.max_running, self.running)
         try:
@@ -282,6 +285,7 @@ async def test_run_instances_returns_results_in_input_order() -> None:
     assert fake.max_running == 2
     assert all(r.verdict is Verdict.FIXED_ON_MAIN and r.cost_usd == 0.5 for r in results)
     assert all(r.python_version == "3.9" and r.wall_seconds > 0 for r in results)
+    assert fake.python_versions == ["3.9", "3.9", "3.9"]  # SWE-bench's version reaches the build
     assert any("[1/3] start psf__requests-3" in line for line in lines)
     assert any("[agent] working on 1" in line for line in lines)
     assert any("psf__requests-2: fixed_on_main (high) cost $0.5000" in line for line in lines)

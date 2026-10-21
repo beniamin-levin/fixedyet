@@ -141,7 +141,9 @@ else
     undo_nginx
     exit 1
   fi
-  if ! sudo grep -rqE 'include[[:space:]]+(/etc/nginx/)?snippets/fixedyet\.conf' \
+  # -R, not -r: the entries in sites-enabled are symlinks, and -r skips symlinks found while
+  # walking a directory. With -r the check never saw the include and always printed the notice.
+  if ! sudo grep -RqE '^[[:space:]]*include[[:space:]]+(/etc/nginx/)?snippets/fixedyet\.conf' \
       /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null; then
     echo
     echo "ACTION NEEDED: add this line inside the existing benlevin.fyi server { } block:"

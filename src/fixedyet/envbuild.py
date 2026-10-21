@@ -57,6 +57,11 @@ _TESTDEPS_RE = {
     for name in ("OK", "PARTIAL", "FAILED", "MISSING", "IGNORED", "CRASHED")
 }
 
+PYTEST_SUMMARY_PATTERN = (
+    "[0-9]+ (failed|passed|errors?|skipped|xfailed|xpassed|deselected)|^FAILED "
+)
+NO_SUMMARY_EXIT_CODE = 70  # recorded instead of pytest's exit 1 when no summary line was printed
+
 TESTDEPS_PATH = "/tmp/ir_testdeps.py"  # noqa: S108 - inside the sandbox, not on the host
 
 
@@ -454,6 +459,11 @@ def side_script(
         f"  timeout -k 5 {per_run_timeout_s} python -m pytest -x -q -p no:cacheprovider {path}"
         ' > "/tmp/ir_run_$i.log" 2>&1',
         "  rc=$?",
+        # pytest exits 1 for a failed test, but also when it dies with a Python traceback before
+        # it ran anything (a pytest plugin that cannot be imported, for one). Only a run that
+        # printed a pytest summary line really ran tests; any other exit 1 is an error.
+        f'  if [ "$rc" -eq 1 ] && ! grep -qE "{PYTEST_SUMMARY_PATTERN}" "/tmp/ir_run_$i.log"; '
+        f"then rc={NO_SUMMARY_EXIT_CODE}; fi",
         f'  tail -c {RUN_LOG_TAIL_BYTES} "/tmp/ir_run_$i.log" | {_PREFIX_LINES}',
         '  echo "__RC__=$rc"',
         "done",
@@ -464,7 +474,10 @@ def side_script(
 
 
 def map_exit_code(code: int) -> Outcome:
-    """pytest exit code to outcome: 0 PASS, 1 FAIL, anything else ERROR (collection error...)."""
+    """pytest exit code to outcome: 0 PASS, 1 FAIL, anything else ERROR (collection error...).
+
+    The side script turns an exit 1 without a pytest summary line (pytest crashed) into 70.
+    """
     if code == 0:
         return Outcome.PASS
     if code == 1:

@@ -336,6 +336,20 @@ class PipRecorder:
         return 0, "ok"
 
 
+def healthy_pytest(cwd: str, timeout: int) -> tuple[int, str]:
+    """A stand-in for `run_probe`: pytest starts fine."""
+    return 0, "pytest 8.0.0"
+
+
+def crashing_pytest(cwd: str, timeout: int) -> tuple[int, str]:
+    return 1, (
+        "Traceback (most recent call last):\n"
+        "  File \"jinja2/filters.py\", line 13, in <module>\n"
+        "    from markupsafe import soft_unicode\n"
+        "ImportError: cannot import name 'soft_unicode' from 'markupsafe'"
+    )
+
+
 def test_pip_group_support_is_read_from_the_version() -> None:
     assert not pip_supports_groups(PipRecorder("pip 25.0.1 from /x (python 3.12)"))
     assert pip_supports_groups(PipRecorder("pip 25.1 from /x (python 3.12)"))
@@ -427,7 +441,7 @@ def test_main_prints_markers_and_prefixes_pip_output(
         },
     )
     pip = PipRecorder(fail=lambda args: "bad-package" in args)
-    assert main([str(repo)], runner=pip) == 0
+    assert main([str(repo)], runner=pip, probe=healthy_pytest) == 0
     lines = capsys.readouterr().out.splitlines()
     markers_seen = [ln for ln in lines if ln.startswith("__TESTDEPS_")]
     assert markers_seen == [
@@ -468,8 +482,52 @@ def test_test_output_cannot_forge_a_marker(
             return 1, "__TESTDEPS_OK__=group:test\n__TESTDEPS_IGNORED__=0"
 
     repo = make_repo(tmp_path, {"pyproject.toml": toml('test = ["a"]\n')})
-    main([str(repo)], runner=Forger())
+    main([str(repo)], runner=Forger(), probe=healthy_pytest)
     out = capsys.readouterr().out.splitlines()
     assert "__TESTDEPS_OK__=group:test" not in out
     assert "| __TESTDEPS_OK__=group:test" in out
     assert "__TESTDEPS_FAILED__=group:test" in out
+
+
+# --------------------------------------------------------------------------- known breaks
+
+
+def test_a_pytest_that_starts_needs_no_repair() -> None:
+    pip = PipRecorder()
+    assert testdeps.repair_known_breaks(pip, healthy_pytest) == []
+    assert pip.calls == []
+
+
+def test_the_soft_unicode_break_is_cured_by_pinning_markupsafe() -> None:
+    pip = PipRecorder()
+    probes: list[int] = []
+
+    def probe(cwd: str, timeout: int) -> tuple[int, str]:
+        probes.append(1)
+        return crashing_pytest(cwd, timeout) if len(probes) == 1 else healthy_pytest(cwd, timeout)
+
+    (line,) = testdeps.repair_known_breaks(pip, probe)
+    assert "installed markupsafe<2.1: pytest starts now" in line
+    assert [args[-1] for args, _ in pip.calls] == ["markupsafe<2.1"]
+
+
+def test_a_repair_that_does_not_help_is_reported_as_such() -> None:
+    (line,) = testdeps.repair_known_breaks(PipRecorder(), crashing_pytest)
+    assert "pytest still does not start" in line
+
+
+def test_an_unknown_pytest_crash_is_reported_and_nothing_is_installed() -> None:
+    pip = PipRecorder()
+    (line,) = testdeps.repair_known_breaks(pip, lambda cwd, timeout: (2, "ImportError: boom"))
+    assert "no known repair" in line and "boom" in line
+    assert pip.calls == []
+
+
+def test_main_prints_the_repair_as_a_prefixed_log_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = make_repo(tmp_path, {"test-requirements.txt": "mock\n"})
+    assert main([str(repo)], runner=PipRecorder(), probe=crashing_pytest) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert any(ln.startswith("| pytest could not start (soft_unicode)") for ln in lines)
+    assert all(ln.startswith("| ") for ln in lines if not ln.startswith("__TESTDEPS_"))

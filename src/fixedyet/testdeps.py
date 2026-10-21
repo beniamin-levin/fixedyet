@@ -20,6 +20,10 @@ How it installs: ``pip install --group <name>`` when the pip in the image has ``
 read with ``tomllib`` here and installed by name, in one command first and one by one when that
 fails. A failure is never fatal: the build goes on, and the markers on stdout say what is missing.
 
+One repair follows the installs: if ``python -m pytest --version`` crashes on a known
+incompatibility among the packages just installed, the one pin that cures it is installed
+(``KNOWN_BREAKS``).
+
 What it refuses, because a reporter-controlled repository decides these files: a requirement that
 is not a plain ``name[extras] version-pins ; marker`` (so no URL, VCS reference, path or pip
 option), an ``-r`` include that leaves the repository, a symlink that leaves it, a group or file
@@ -68,6 +72,13 @@ MAX_INCLUDE_DEPTH = 3
 PIP_TIMEOUT_S = 600
 TOTAL_BUDGET_S = 900
 GROUP_SUPPORT_VERSION = (25, 1)  # the first pip with `pip install --group`
+
+# A pytest start-up crash whose output contains the needle is cured by installing the pin. Jinja2
+# older than 3.1 imports `soft_unicode`, which MarkupSafe 2.1 removed, and the test requirements
+# of old requests (Flask<2, hence Jinja2<3) pull in exactly that pair, so pytest dies while it
+# loads the pytest-httpbin plugin, before any test runs.
+KNOWN_BREAKS = (("soft_unicode", "markupsafe<2.1"),)
+PROBE_TIMEOUT_S = 120
 
 # One requirement as pip accepts it from a package index: a name, extras, version pins and an
 # environment marker. `@`, `/`, `:`, `\`, `$`, backticks, `&`, `|`, `;` (after the marker's own)
@@ -348,6 +359,36 @@ def run_pip(args: list[str], cwd: str, timeout: int) -> tuple[int, str]:
     return done.returncode, (done.stdout or "") + (done.stderr or "")
 
 
+def run_probe(cwd: str, timeout: int) -> tuple[int, str]:
+    """Run ``python -m pytest --version``; ``(exit code, combined output)``. 124 on a timeout."""
+    command = [sys.executable, "-m", "pytest", "--version"]
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"pytest --version timed out after {timeout}s"
+    except OSError as exc:
+        return 127, str(exc)
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def repair_known_breaks(runner=run_pip, probe=run_probe) -> list[str]:
+    """If pytest cannot start after the installs, apply the pin from `KNOWN_BREAKS` that cures
+    the crash. Returns log lines (empty when pytest starts fine). Never raises."""
+    code, output = probe("/", PROBE_TIMEOUT_S)
+    if code == 0:
+        return []
+    for needle, pin in KNOWN_BREAKS:
+        if needle in output:
+            flags = ["install", "--disable-pip-version-check", "--no-input"]
+            runner([*flags, pin], "/", PIP_TIMEOUT_S)
+            again, _ = probe("/", PROBE_TIMEOUT_S)
+            verdict = "pytest starts now" if again == 0 else "pytest still does not start"
+            return [f"pytest could not start ({needle}); installed {pin}: {verdict}"]
+    return [f"pytest could not start (exit {code}); no known repair\n{_tail(output, 4)}"]
+
+
 def pip_supports_groups(runner=run_pip) -> bool:
     """True when the pip in this interpreter has ``pip install --group`` (pip 25.1 and newer)."""
     code, output = runner(["--version"], "/", 60)
@@ -428,7 +469,7 @@ def markers(source: Source, outcome: Outcome) -> list[str]:
     return lines
 
 
-def main(argv: list[str] | None = None, *, runner=run_pip) -> int:
+def main(argv: list[str] | None = None, *, runner=run_pip, probe=run_probe) -> int:
     args = sys.argv[1:] if argv is None else argv
     repo = Path(args[0]) if args else Path.cwd()
     try:
@@ -455,6 +496,12 @@ def main(argv: list[str] | None = None, *, runner=run_pip) -> int:
             print(f"| {line}")  # prefixed, so pip's own text can never forge a marker
         for line in markers(source, outcome):
             print(line)
+    try:
+        for line in repair_known_breaks(runner, probe):
+            for part in line.splitlines():
+                print(f"| {part}")
+    except Exception as exc:  # pragma: no cover - the repair must never fail the build
+        print(f"__TESTDEPS_CRASHED__=repair: {type(exc).__name__}")
     if ignored:
         print(f"__TESTDEPS_IGNORED__={ignored}")
     return 0
