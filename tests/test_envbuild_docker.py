@@ -176,6 +176,30 @@ async def test_checkout_moves_to_another_commit_and_reinstalls(built) -> None:
     assert wrong.outcomes == [Outcome.FAIL, Outcome.FAIL]
 
 
+NO_NETWORK = """import socket
+
+import pytest
+
+
+def test_the_internet_is_out_of_reach():
+    with pytest.raises(OSError):
+        socket.create_connection(("pypi.org", 443), timeout=5)
+"""
+
+
+async def test_the_decisive_runs_have_no_network_even_after_a_checkout(built) -> None:
+    sandbox, image, _, _ = built
+    reported = await run_test_on_side(
+        sandbox, image, test_path="tests/test_ir_net.py", test_code=NO_NETWORK, runs=1
+    )
+    fix_side = await run_test_on_side(
+        sandbox, image, test_path="tests/test_ir_net.py", test_code=NO_NETWORK, runs=1,
+        checkout=OLD_SHA,  # the checkout and its reinstall did have network
+    )
+    assert reported.outcomes == fix_side.outcomes == [Outcome.PASS], fix_side.log_excerpt
+    assert fix_side.commit == OLD_SHA and fix_side.checkpoint_image != image
+
+
 async def test_patch_flips_the_test_and_forks_stay_isolated(built) -> None:
     sandbox, image, _, _ = built
     without = await run_test_on_side(

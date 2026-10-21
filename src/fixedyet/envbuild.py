@@ -598,6 +598,9 @@ def side_script(
 ) -> str:
     """Shell script: optional checkout and patch, reinstall, write the test, run pytest N times.
 
+    With ``runs=0`` it is the setup alone: `prepare_side` runs it with network into a kept image,
+    and the test runs come after, from that image, without network.
+
     Another ref has its own test requirements and its own conftest, so after a checkout the
     sandbox helper (`TESTDEPS_PATH`, shipped by `run_test_on_side`) installs ``project_extras``
     again and, with the test file in place, repairs whatever stops pytest from loading the
@@ -647,6 +650,8 @@ def side_script(
         lines.append(
             f"python {TESTDEPS_PATH} repair {repo_dir} {path} 2>&1 | {_HELPER_LOG_ONLY}"
         )
+    if runs == 0:
+        return "\n".join([*lines, "echo __PREPARED__=1", "exit 0", ""])
     lines += [
         "ir_own",
         f"for i in $(seq 1 {runs}); do",
@@ -763,6 +768,51 @@ def build_side_run(result: ExecResult, *, ref: str, image: str, runs: int) -> Si
     )
 
 
+PREPARE_TIMEOUT_S = 600
+
+
+@dataclass
+class PreparedSide:
+    """A side's setup, done with network and kept: the image its test runs fork, or the failed
+    setup's output (`image` is None) for `build_side_run` to report as ERROR runs."""
+
+    image: str | None
+    result: ExecResult
+
+
+async def prepare_side(
+    sb: Sandbox,
+    image: str,
+    *,
+    test_path: str,
+    test_code: str,
+    checkout: str | None = None,
+    patch: str | None = None,
+    project_extras: Sequence[str] = (),
+    timeout_s: int = PREPARE_TIMEOUT_S,
+) -> PreparedSide:
+    """Check out ``checkout`` or apply ``patch``, reinstall, reinstall the extras and repair the
+    conftest of that ref (`side_script` with no runs), with network, and keep the result."""
+    script = side_script(
+        test_path=test_path, checkout=checkout, patch=patch is not None, runs=0,
+        per_run_timeout_s=30, project_extras=project_extras,
+    )
+    files = {_TEST_FILE_STAGING: test_code}
+    if checkout:
+        files[TESTDEPS_PATH] = helper_source()
+    if patch is not None:
+        files[_PATCH_STAGING] = patch if patch.endswith("\n") else patch + "\n"
+    result = await sb.run(
+        image, script, files=files, workdir=REPO_DIR, timeout_s=timeout_s, keep=True,
+        network=True,
+    )
+    ready = (
+        "__PREPARED__=1" in result.stdout and result.exit_code == 0 and not result.timed_out
+        and not _SETUP_FAILED_RE.search(result.stdout)
+    )
+    return PreparedSide(result.image if ready and result.image else None, result)
+
+
 async def run_test_on_side(
     sb: Sandbox,
     image: str,
@@ -774,7 +824,7 @@ async def run_test_on_side(
     runs: int = 2,
     ref: str | None = None,
     timeout_s: int = TEST_TIMEOUT_S,
-    network: bool = True,
+    network: bool = False,
     project_extras: Sequence[str] = (),
 ) -> SideRun:
     """Run the reproduction test ``runs`` times on one side, in ONE sandbox run from ``image``.
@@ -785,11 +835,29 @@ async def run_test_on_side(
     1 to FAIL, anything else to ERROR. A setup failure or a sandbox timeout yields ERROR outcomes
     rather than an exception; only a broken sandbox (`SandboxError`) propagates.
 
+    The test runs have no network (``network=False``, the default): the runs that decide a
+    verdict execute the project's code and the model's test, and neither should reach the
+    internet. A checkout or a patch needs the network for its reinstall, so that setup runs
+    first in its own sandbox run (`prepare_side`, kept as an image) and the tests run from that
+    image offline; `SideRun.checkpoint_image` is then the prepared image. ``network=True`` keeps
+    the old single run with network for everything.
+
     After a ``checkout`` the sandbox helper also installs ``project_extras`` again and repairs a
     conftest that cannot load (see `side_script`), which is why it travels with the test file.
     """
     if runs < 1:
         raise EnvBuildError("runs must be at least 1")
+    label = ref or side_label(checkout, patch)
+    setup_log = ""
+    if (checkout or patch is not None) and not network:
+        prepared = await prepare_side(
+            sb, image, test_path=test_path, test_code=test_code, checkout=checkout,
+            patch=patch, project_extras=project_extras,
+        )
+        if prepared.image is None:
+            return build_side_run(prepared.result, ref=label, image=image, runs=runs)
+        image, checkout, patch = prepared.image, None, None
+        setup_log = prepared.result.stdout.replace("__PREPARED__=1\n", "")
     setup_budget = 300 if (checkout or patch) else 30
     per_run = max(30, (timeout_s - setup_budget) // runs)
     script = side_script(
@@ -808,4 +876,10 @@ async def run_test_on_side(
     result = await sb.run(
         image, script, files=files, workdir=REPO_DIR, timeout_s=timeout_s, network=network
     )
-    return build_side_run(result, ref=ref or side_label(checkout, patch), image=image, runs=runs)
+    if setup_log:  # the reinstall's and the repair's log lines belong to this side's setup
+        runs_out = _HEAD_LINE_RE.sub("", result.stdout) if _HEAD_RE.search(setup_log) else (
+            result.stdout
+        )
+        result = result.model_copy(update={"stdout": setup_log + runs_out})
+    return build_side_run(result, ref=label, image=image, runs=runs)
+

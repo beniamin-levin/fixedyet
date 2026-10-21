@@ -733,9 +733,14 @@ def test_parse_exit_codes() -> None:
 
 
 def exec_result(
-    stdout: str, *, stderr: str = "", exit_code: int = 0, timed_out: bool = False
+    stdout: str, *, stderr: str = "", exit_code: int = 0, timed_out: bool = False,
+    image: str | None = None,
 ) -> ExecResult:
-    return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out)
+    return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out,
+                      image=image)
+
+
+PREPARED = "| reinstalled\n__HEAD__=" + "c" * 40 + "\n__PREPARED__=1\n"
 
 
 def test_build_side_run_pass_pass_and_fail_fail() -> None:
@@ -878,16 +883,24 @@ async def test_run_test_on_side_stages_files_and_builds_side_run() -> None:
 
 
 async def test_run_test_on_side_checkout_runs_and_ref_override() -> None:
-    sb = FakeSandbox([exec_result(run_output(0, 0, 0))])
+    sb = FakeSandbox([exec_result(PREPARED, image="ckpt-main"), exec_result(run_output(0, 0, 0))])
     side = await run_test_on_side(
         sb, "ckpt", test_path="t.py", test_code="x", checkout="main", runs=3, ref="main@abc"
     )
     assert side.outcomes == [Outcome.PASS] * 3
     assert side.ref == "main@abc"
-    assert "git fetch --quiet origin main" in sb.calls[0].command
-    assert "seq 1 3" in sb.calls[0].command
+    prepare, runs = sb.calls
+    # the checkout and its reinstall need the network and are kept as an image ...
+    assert "git fetch --quiet origin main" in prepare.command and "seq 1" not in prepare.command
+    assert (prepare.image, prepare.keep, prepare.network) == ("ckpt", True, True)
+    # ... the test runs fork that image without network, and check nothing out again
+    assert (runs.image, runs.keep, runs.network) == ("ckpt-main", False, False)
+    assert "seq 1 3" in runs.command and "git fetch" not in runs.command
+    assert side.checkpoint_image == "ckpt-main"
+    assert side.commit == "c" * 40
+    assert "reinstalled" in side.log_excerpt  # the setup's log lines stay with the side
     only_checkout = await run_test_on_side(
-        FakeSandbox([exec_result(run_output(0, 0))]),
+        FakeSandbox([exec_result(PREPARED, image="i2"), exec_result(run_output(0, 0))]),
         "c",
         test_path="t.py",
         test_code="x",
@@ -896,8 +909,28 @@ async def test_run_test_on_side_checkout_runs_and_ref_override() -> None:
     assert only_checkout.ref == "v2"
 
 
-async def test_run_test_on_side_patch_gets_trailing_newline_and_label() -> None:
+async def test_run_test_on_side_a_failed_setup_never_runs_the_tests() -> None:
+    failed = exec_result("__SETUP_FAILED__=reinstall\n| ERROR: no wheel\n", exit_code=22)
+    sb = FakeSandbox([failed])
+    side = await run_test_on_side(sb, "ckpt", test_path="t.py", test_code="x", checkout="main")
+    assert side.outcomes == [Outcome.ERROR, Outcome.ERROR]
+    assert "__SETUP_FAILED__=reinstall" in side.log_excerpt
+    assert len(sb.calls) == 1 and side.checkpoint_image == "ckpt"
+
+
+async def test_run_test_on_side_with_network_keeps_the_single_run() -> None:
     sb = FakeSandbox([exec_result(run_output(0, 0))])
+    side = await run_test_on_side(
+        sb, "c", test_path="t.py", test_code="x", checkout="main", network=True
+    )
+    assert side.outcomes == [Outcome.PASS, Outcome.PASS]
+    (call,) = sb.calls
+    assert call.network is True and call.keep is False
+    assert "git fetch --quiet origin main" in call.command and "seq 1 2" in call.command
+
+
+async def test_run_test_on_side_patch_gets_trailing_newline_and_label() -> None:
+    sb = FakeSandbox([exec_result(PREPARED, image="p"), exec_result(run_output(0, 0))])
     side = await run_test_on_side(sb, "ckpt", test_path="t.py", test_code="x", patch="--- a\n+++ b")
     assert side.ref == "gold_patch"
     assert sb.calls[0].files is not None
@@ -908,10 +941,18 @@ async def test_run_test_on_side_patch_gets_trailing_newline_and_label() -> None:
 async def test_run_test_on_side_timeout_budget_is_split_across_runs() -> None:
     sb = FakeSandbox([exec_result(run_output(0, 0))])
     await run_test_on_side(
-        sb, "c", test_path="t.py", test_code="x", timeout_s=630, runs=2, checkout="main"
+        sb, "c", test_path="t.py", test_code="x", timeout_s=630, runs=2, checkout="main",
+        network=True,
     )
     assert sb.calls[0].timeout_s == 630
     assert "timeout -k 5 165 python" in sb.calls[0].command  # (630 - 300 setup) / 2
+    offline = FakeSandbox([exec_result(PREPARED, image="p"), exec_result(run_output(0, 0))])
+    await run_test_on_side(
+        offline, "c", test_path="t.py", test_code="x", timeout_s=630, runs=2, checkout="main"
+    )
+    assert offline.calls[0].timeout_s == 600  # the setup has its own run and its own budget
+    assert offline.calls[1].timeout_s == 630
+    assert "timeout -k 5 300 python" in offline.calls[1].command  # (630 - 30) / 2
 
 
 async def test_run_test_on_side_sandbox_timeout_gives_error_outcomes() -> None:
@@ -1013,6 +1054,7 @@ class LocalBashSandbox:
             stdout=out.decode(),
             stderr=err.decode(),
             duration_s=time.monotonic() - started,
+            image="local-kept" if keep else None,  # the host's files persist between runs
         )
 
 

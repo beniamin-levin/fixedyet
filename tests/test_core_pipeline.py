@@ -629,11 +629,13 @@ async def test_pipeline_works_with_the_real_envbuild_on_a_fake_sandbox(
     monkeypatch.setattr(envbuild, "resolve_ref_for_version", resolve)
 
     def side(call: Any) -> ExecResult:
-        fixed = "git fetch" in call.command  # only the fix side checks out another ref
+        fixed = call.image == "ckpt-main"  # the fix side runs from its prepared image
         rc = 0 if fixed else 1
         marks = "".join(f"__RUN_START__={i}\n__RC__={rc}\n" for i in (1, 2))
         return ExecResult(exit_code=0, stdout=marks)
 
+    prepared = ExecResult(exit_code=0, stdout="__PREPARED__=1\n", image="ckpt-main")
+    fake_sandbox.on("__PREPARED__", prepared)  # the fix side's checkout, with network
     fake_sandbox.on("__RUN_START__", side)
     built = ExecResult(exit_code=0, stdout="__STEP__=done\n", image="ckpt-baseline")
     fake_sandbox.on("git clone", built)
@@ -646,7 +648,13 @@ async def test_pipeline_works_with_the_real_envbuild_on_a_fake_sandbox(
     assert (a.verdict, a.confidence) == (Verdict.FIXED_ON_MAIN, Confidence.HIGH)
     assert a.reproduction.reported_side.checkpoint_image == "ckpt-baseline"
     assert (a.reproduction.reported_side.ref, a.reproduction.fix_side.ref) == ("v1.2.0", "main")
-    assert a.usage.sandbox_runs == len(fake_sandbox.calls) == 4  # baseline, agent run_test, 2 sides
+    # baseline, agent run_test, the fix side's checkout, the two sides' test runs
+    assert a.usage.sandbox_runs == len(fake_sandbox.calls) == 5
+    runs = [c for c in fake_sandbox.calls if "__RUN_START__" in c.command]
+    assert len(runs) == 2 and not any(c.network for c in runs)  # the decisive runs are offline
+    (checkout,) = [c for c in fake_sandbox.calls if "__PREPARED__" in c.command]
+    assert checkout.network and checkout.keep and "git fetch" in checkout.command
+    assert a.reproduction.fix_side.checkpoint_image == "ckpt-main"
     clone = next(c for c in fake_sandbox.calls if "git clone" in c.command)
     assert "v1.2.0" in clone.command and "acme/widgets" in clone.command
 
