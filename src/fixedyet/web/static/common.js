@@ -126,6 +126,13 @@
       const base = gh.repo(repo);
       return base && SHA_RE.test(String(sha)) ? `${base}/commit/${sha}` : null;
     },
+    blob(repo, sha, path, line) {
+      const base = gh.repo(repo);
+      const file = refPath(path);
+      const n = String(line);
+      return base && file && SHA_RE.test(String(sha)) && /^[1-9]\d{0,6}$/.test(n)
+        ? `${base}/blob/${sha}/${file}#L${n}` : null;
+    },
     branch(repo, name) {
       const base = gh.repo(repo);
       const path = base && refPath(name);
@@ -663,6 +670,26 @@
     return root;
   }
 
+  // The other callers of what a verified fix changes: code the reproduction test did not run,
+  // which a reviewer should check before trusting "verified". Null when there is nothing to say.
+  function otherCallers(f, repo) {
+    if (f.status !== 'verified' || !(f.changed_functions || []).length) return null;
+    const names = f.changed_functions.join(', ');
+    const sites = f.other_callers || [];
+    if (!sites.length) {
+      return el('p', { class: 'muted small', text: `Other callers of ${names}: none found (searched by name).` });
+    }
+    const items = sites.map((s) => el('li', null,
+      link(gh.blob(repo, f.base_sha, s.path, s.line), `${s.path}:${s.line}`), ` uses ${s.symbol}`,
+      s.code ? codeBlock(s.code, 'text') : null));
+    const more = (f.other_callers_total || 0) - sites.length;
+    if (more > 0) items.push(el('li', { text: `and ${more} more` }));
+    return el('div', { class: 'other-callers' },
+      el('p', null, el('strong', { text: 'Other callers of the changed code, not covered by the reproduction' }),
+        ` (${names}; searched by name). The suite passing does not show that they behave as before.`),
+      el('ul', null, items));
+  }
+
   // The report of a fix result (fix mode on an open bug) as a DOM node.
   function renderFix(f, markdown, options = {}) {
     const repo = gh.repoOf(f.repo) || gh.repoOf(f.issue_url);
@@ -685,6 +712,7 @@
     if ((f.files_changed || []).length) facts.push(fact('Change', `${f.files_changed.length} file${f.files_changed.length === 1 ? '' : 's'}, +${f.lines_added} −${f.lines_removed}`));
     if ((f.context_files || []).length) facts.push(fact('Code shown to the model', f.context_files.join(', ')));
     if (f.regression_test_path) facts.push(fact('Regression test in the PR', f.regression_test_path));
+    else if (f.status === 'verified') facts.push(fact('Regression test in the PR', `none (${f.regression_test_note || 'the repository has no tests'})`));
     if (facts.length) root.append(section('The fix', el('dl', { class: 'facts' }, facts)));
 
     if (f.summary || f.explanation) {
@@ -698,7 +726,7 @@
       copy.addEventListener('click', () => copyText(f.diff, copy));
       root.append(section(f.status === 'verified' ? 'Verified diff' : 'Diff (not verified)',
         el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: `git diff on ${branch}` }), copy),
-        codeBlock(f.diff, 'diff')));
+        codeBlock(f.diff, 'diff'), otherCallers(f, repo)));
     }
     if (f.repro_before || f.repro_after) {
       root.append(section(`Reproduction test on ${branch}`, el('div', { class: 'sides' },
@@ -757,6 +785,7 @@
   globalThis.FY = {
     $, el, safeUrl, link, gh, refLink, commitLink, linkify, formatDuration, formatCost, formatDate,
     copyText, codeBlock, renderInline, renderMarkdown, renderReport, renderBackport, renderFix, banner,
+    otherCallers,
     VERDICTS, BACKPORT_STATUS, FIX_STATUS,
   };
 })();

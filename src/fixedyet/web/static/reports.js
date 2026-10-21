@@ -18,8 +18,8 @@
 
   const {
     $, el, link, gh, refLink, commitLink, linkify, formatCost, formatDuration, formatDate,
-    copyText, codeBlock, renderReport, renderBackport, renderFix, VERDICTS, BACKPORT_STATUS,
-    FIX_STATUS,
+    copyText, codeBlock, renderReport, renderBackport, renderFix, otherCallers, VERDICTS,
+    BACKPORT_STATUS, FIX_STATUS,
   } = globalThis.FY;
 
   const TOKEN_KEY = 'fixedyet-maintainer-token';
@@ -389,7 +389,8 @@
     if (result.base_sha) facts.push(fact('Verified on', el('span', null, `${branch} at `, commitLink(repo, result.base_sha))));
     facts.push(fact('Change', `${(result.files_changed || []).length} file(s), +${result.lines_added || 0} −${result.lines_removed || 0}`));
     facts.push(fact('Suite without', suiteText(result.suite_before)), fact('Suite with', suiteText(result.suite_after)));
-    facts.push(fact('Regression test', result.regression_test_path || 'none (no test directory)'));
+    facts.push(fact('Regression test', result.regression_test_path
+      || `none (${result.regression_test_note || 'the repository has no tests'})`));
     const parts = [el('dl', { class: 'facts' }, facts)];
     if (result.summary) parts.push(el('p', { class: 'fix-summary' }, el('strong', { text: result.summary })));
     if (result.explanation) {
@@ -397,6 +398,8 @@
         el('p', { class: 'muted small', text: 'Written by the model. The sandbox checked the behaviour, not this text. Read the diff before you open a pull request.' }));
     }
     if (result.diff) parts.push(codeBlock(result.diff, 'diff'));
+    const callers = otherCallers(result, repo);
+    if (callers) parts.push(callers);
     parts.push(...prButtons(d, record, area, 'fix', result.repo || repo || ''));
     return parts;
   }

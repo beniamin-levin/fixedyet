@@ -14,7 +14,15 @@ import pytest
 import respx
 
 from fixedyet import pullrequest as pr
-from fixedyet.models import FixAttempt, FixResult, FixStatus, Outcome, SideRun, SuiteRun
+from fixedyet.models import (
+    CallSite,
+    FixAttempt,
+    FixResult,
+    FixStatus,
+    Outcome,
+    SideRun,
+    SuiteRun,
+)
 
 API = "https://api.github.com"
 TOKEN = "ghp_SECRETSECRETSECRET1234"
@@ -93,6 +101,22 @@ def test_a_test_that_passes_where_it_would_ship_is_left_out_with_the_reason() ->
     body = pr.fix_pr_body(result, login="alice")
     assert f"**not** part of this pull request ({note})" in body
     assert "new file mode" not in pr.fix_pr_preview(result, login="alice")
+
+
+def test_the_body_lists_the_other_callers_of_the_changed_code() -> None:
+    # rdflib#3602: the change to _val passed the suite but also changed what MIN and MAX return
+    sites = [CallSite(symbol="_val", path="rdflib/plugins/sparql/aggregates.py", line=120,
+                      code="  120          return _val(v)")]
+    result = verified(changed_functions=["_val"], other_callers=sites, other_callers_total=3)
+    body = pr.fix_pr_body(result, login="alice")
+    assert "## Other callers of the changed code, not covered by the reproduction" in body
+    link = f"https://github.com/acme/widgets/blob/{BASE}/rdflib/plugins/sparql/aggregates.py#L120"
+    assert f"- [rdflib/plugins/sparql/aggregates.py:120]({link}) uses `_val`" in body
+    assert "- and 2 more" in body
+    assert body.index("Other callers") < body.index("## Project test suite")
+    none = pr.fix_pr_body(verified(changed_functions=["parse"]), login="alice")
+    assert "None found for `parse`" in none
+    assert "Other callers" not in pr.fix_pr_body(verified(), login="alice")
 
 
 def test_model_text_cannot_mention_anyone_or_break_the_layout() -> None:

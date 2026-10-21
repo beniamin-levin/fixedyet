@@ -241,6 +241,16 @@ class FixAttempt(BaseModel):
     answer: str = ""  # the start of the model's answer, for reading what went wrong
 
 
+class CallSite(BaseModel):
+    """A line outside a change that uses a function the change edits, found by name (git grep):
+    code the reproduction test does not exercise, which a reviewer should look at."""
+
+    symbol: str  # the function or method the change edits
+    path: str
+    line: int
+    code: str = ""  # the line and its neighbours, numbered
+
+
 class FixResult(BaseModel):
     """A fix for an open bug, written by the model and verified in the sandbox on main."""
 
@@ -268,6 +278,9 @@ class FixResult(BaseModel):
     suite_after: SuiteRun | None = None
     newly_failing: list[str] = Field(default_factory=list)
     attempts: list[FixAttempt] = Field(default_factory=list)
+    changed_functions: list[str] = Field(default_factory=list)  # what the verified change edits
+    other_callers: list[CallSite] = Field(default_factory=list)  # their other uses (the first few)
+    other_callers_total: int = 0  # how many other uses were found in all
     log_excerpt: str = ""  # output of the step that stopped it
     model: str = ""
     budget_usd: float = 0.0  # the model cost cap this fix ran under

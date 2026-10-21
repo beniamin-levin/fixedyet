@@ -789,6 +789,7 @@ def fix_pr_body(result: FixResult, *, login: str) -> str:
             "",
             "</details>",
         ]
+    lines += _callers_section(result)
     sb, sa = result.suite_before, result.suite_after
     lines += ["", f"## Project test suite on `{_cell(branch)}`", ""]
     if sb and sa:
@@ -817,6 +818,29 @@ def fix_pr_body(result: FixResult, *, login: str) -> str:
         ]
     lines += ["", "---", DISCLOSURE.format(login=_line(login))]
     return "\n".join(lines) + "\n"
+
+
+def _callers_section(result: FixResult) -> list[str]:
+    """Other callers of the functions the change edits, linked at the verified commit, so that a
+    reviewer checks the code the reproduction test did not run."""
+    if not result.changed_functions:
+        return []
+    names = ", ".join(f"`{_cell(n)}`" for n in result.changed_functions)
+    out = ["", "## Other callers of the changed code, not covered by the reproduction", ""]
+    if not result.other_callers:
+        return out + [f"None found for {names} (a search by name in the project's source)."]
+    sha = result.base_sha or ""
+    out += [f"The change edits {names}. These lines use the same name elsewhere in the project's "
+            "source (a search by name, so some may be another function of that name). The suite "
+            "passing does not show that they behave as before; please check them:", ""]
+    for site in result.other_callers:
+        place = f"{site.path}:{site.line}"
+        url = (f"{GITHUB_WEB}/{result.repo}/blob/{sha}/{site.path}#L{site.line}"
+               if sha and result.repo and _SHA_RE.match(sha) else None)
+        out.append(f"- {_link(place, url)} uses `{_cell(site.symbol)}`")
+    if result.other_callers_total > len(result.other_callers):
+        out.append(f"- and {result.other_callers_total - len(result.other_callers)} more")
+    return out
 
 
 def new_file_diff(path: str, text: str) -> str:

@@ -369,6 +369,22 @@ def _fix_repro_table(r: FixResult) -> str | None:
     return "\n".join(rows)
 
 
+def _callers_lines(r: FixResult) -> list[str]:
+    """The other callers of what the verified change edits: the code the test did not run."""
+    if r.status is not FixStatus.VERIFIED or not r.changed_functions:
+        return []
+    names = ", ".join(f"`{_cell(n)}`" for n in r.changed_functions)
+    head = "**Other callers of the changed code, not covered by the reproduction**"
+    if not r.other_callers:
+        return ["", f"{head}: none found for {names} (searched by name, best effort)."]
+    out = ["", f"{head} (searched by name, best effort; the suite passing does not show that "
+           "they behave as before):", ""]
+    out += [f"- `{_cell(s.path)}:{s.line}` uses `{_cell(s.symbol)}`" for s in r.other_callers]
+    if r.other_callers_total > len(r.other_callers):
+        out.append(f"- and {r.other_callers_total - len(r.other_callers)} more")
+    return out
+
+
 def fix_section(r: FixResult, level: int = 2) -> list[str]:
     """The "Fix" section as markdown lines, whatever the status: the attempts are always listed,
     so a fix that failed is reported as plainly as one that worked."""
@@ -396,6 +412,7 @@ def fix_section(r: FixResult, level: int = 2) -> list[str]:
     repro = _fix_repro_table(r)
     if repro:
         out += ["", repro]
+    out += _callers_lines(r)
     suite = _fix_suite_table(r)
     if suite:
         out += ["", suite]

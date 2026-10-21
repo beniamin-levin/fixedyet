@@ -32,6 +32,7 @@ from fixedyet.models import (
     Usage,
     Verdict,
 )
+from fixedyet.report import render_fix_markdown
 from fixedyet.sandbox.base import SandboxError
 
 ISSUE = "https://github.com/acme/widgets/issues/42"
@@ -173,6 +174,111 @@ def test_the_survey_reads_the_pytest_config_files() -> None:
     survey = fm.parse_survey(ExecResult(exit_code=0, stdout=out))
     assert survey.configs == {"pyproject.toml": toml}
     assert survey.files == ["pyproject.toml", "test/test_a.py"]
+
+
+# -- the blast radius --------------------------------------------------------------------------
+
+EVAL = """class Aggregate:
+    def _val(self, v):
+        return v
+
+    def minimum(self, values):
+        return min(self._val(v) for v in values)
+
+
+def unrelated():
+    return 2
+"""
+
+
+def test_changed_functions_are_the_defs_around_the_changed_lines() -> None:
+    edited = EVAL.replace("        return v\n", "        return str(v)\n")
+    assert [b.name for b in fm.changed_functions(EVAL, edited)] == ["_val"]
+    added = EVAL.replace("    return 2\n", "    x = 1\n    return 2 + x\n")
+    assert [b.name for b in fm.changed_functions(EVAL, added)] == ["unrelated"]
+    assert fm.changed_functions("def broken(:\n", "x") == []
+
+
+def test_callers_script_greps_whole_words_and_skips_dunders_and_odd_names() -> None:
+    script = fm.callers_script(["_val", "__init__", "x; rm -rf /", "_val", "ab"])
+    assert script.count("git -c core.quotepath=off grep -n -I -w -F -C 1 -e _val -- '*.py'") == 1
+    assert "__init__" not in script and "rm -rf" not in script and "-e ab " not in script
+    assert "__CALL__=_val\\t" in script
+
+
+GREP = """__CALL__=_val\tpkg/eval.py-2-    def _val(self, v):
+__CALL__=_val\tpkg/eval.py:3:        return _val(v - 1) if v else v
+__CALL__=_val\tpkg/eval.py-4-
+__CALL__=_val\tpkg/eval.py:6:        return min(self._val(v) for v in values)
+__CALL__=_val\tpkg/aggregates.py-10-    # MIN and MAX
+__CALL__=_val\tpkg/aggregates.py:11:        best = _val(value)
+__CALL__=_val\tpkg/aggregates.py-12-        return best
+__CALL__=_val\t--
+__CALL__=_val\tpkg/aggregates.py:30:from pkg.eval import _val
+__CALL__=_val\tpkg/aggregates.py:31:    # _val is the value
+__CALL__=_val\ttests/test_eval.py:5:    assert _val(1) == 1
+__CALL__=_val\tdocs/example.py:2:print(_val(3))
+__CALL__=other\tpkg/x-y.py:9:    other()
+"""
+
+
+def test_other_callers_leave_out_tests_definitions_imports_and_the_function_itself() -> None:
+    found = fm.parse_callers(ExecResult(exit_code=0, stdout=GREP))
+    sources = ["pkg/eval.py", "pkg/aggregates.py", "pkg/x-y.py"]
+    sites, total = fm.select_callers(found, sources, {"_val": [("pkg/eval.py", 2, 3)]})
+    assert [(s.symbol, s.path, s.line) for s in sites] == [
+        ("_val", "pkg/eval.py", 6), ("other", "pkg/x-y.py", 9), ("_val", "pkg/aggregates.py", 11),
+    ]
+    assert total == 3
+    assert sites[2].code == ("   10      # MIN and MAX\n   11          best = _val(value)\n"
+                             "   12          return best")
+    capped, total = fm.select_callers(found, sources, {}, limit=2)
+    assert len(capped) == 2 and total == 4  # the recursive call counts once nothing is excluded
+
+
+async def test_a_verified_fix_lists_the_other_callers_of_the_changed_function() -> None:
+    files = {**FILES, "widgets/cli.py": (
+        "from widgets.core import parse\n\n\ndef main(argv):\n    return parse(argv[0])\n")}
+    result, sandbox, llm = await run_fix([GOOD], World(files=files))
+    assert result.status is FixStatus.VERIFIED, result.reason
+    assert result.changed_functions == ["parse"]
+    assert [(s.path, s.line, s.symbol) for s in result.other_callers] == [
+        ("widgets/cli.py", 5, "parse"),
+    ]
+    assert result.other_callers_total == 1
+    assert "return parse(argv[0])" in result.other_callers[0].code
+    # the model saw them before it answered, with the rule to keep their behaviour
+    system, user = llm.prompts[0][0]["content"], llm.prompts[0][1]["content"]
+    assert "other callers" in system and "must not alter" in system
+    assert "Other callers of parse" in user and "widgets/cli.py:5 uses parse" in user
+    markdown = render_fix_markdown(result)
+    assert "**Other callers of the changed code, not covered by the reproduction**" in markdown
+    assert "`widgets/cli.py:5` uses `parse`" in markdown
+
+
+async def test_no_other_callers_is_an_empty_list_not_an_error() -> None:
+    result, _, llm = await run_fix([GOOD])
+    assert result.status is FixStatus.VERIFIED
+    assert result.changed_functions == ["parse"] and result.other_callers == []
+    assert "Other callers" not in llm.prompts[0][1]["content"]
+
+
+async def test_a_failed_caller_lookup_never_fails_the_fix() -> None:
+    world = World()
+    sandbox = ScriptedSandbox(world)
+    original = sandbox.run
+
+    async def flaky(image: str, command: str, **kwargs: Any) -> ExecResult:
+        if "__CALL__=" in command:
+            raise SandboxError("docker hiccup")
+        return await original(image, command, **kwargs)
+
+    sandbox.run = flaky  # type: ignore[method-assign]
+    result = await fm.attempt_fix(
+        assessment(), sandbox=sandbox, llm=FakeLLM([GOOD]), github=FakeGitHub(),
+        list_branches=lister, settings=Settings(nebius_api_key="k"),
+    )
+    assert result.status is FixStatus.VERIFIED and result.other_callers == []
 
 
 # -- the model's answer ------------------------------------------------------------------------
@@ -596,6 +702,22 @@ class ScriptedSandbox:
                 else:
                     out += f"__MISSING__={path}\n"
             return ExecResult(exit_code=0, stdout=out)
+        if "__CALL__=" in command:  # git grep -n -w -C 1 for each name, over the world's files
+            self._record("callers", image, command=command, **meta)
+            out = ""
+            for name in re.findall(r"-e (\w+) --", command):
+                word = re.compile(rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])")
+                for path, text in w.files.items():
+                    if not path.endswith(".py"):
+                        continue
+                    lines = text.splitlines()
+                    hits = [n for n, line in enumerate(lines, 1) if word.search(line)]
+                    shown = sorted({k for n in hits for k in (n - 1, n, n + 1)
+                                    if 1 <= k <= len(lines)})
+                    for k in shown:
+                        sep = ":" if k in hits else "-"
+                        out += f"__CALL__={name}\t{path}{sep}{k}{sep}{lines[k - 1]}\n"
+            return ExecResult(exit_code=0, stdout=out)
         if "__DIFF_B64__" in command:
             self._record("apply", image, **meta)
             edited = {k.removeprefix("/work/repo/"): v for k, v in (files or {}).items()}
@@ -723,8 +845,8 @@ async def test_a_good_first_answer_is_verified() -> None:
     assert result.usage.sandbox_runs == len(sandbox.calls) and result.usage.wall_seconds >= 0
     assert "attempt 1 of 3" in result.reason and "no newly failing" in result.reason
     assert sandbox.kinds() == [
-        "build", "survey", "repro-before", "repro-before", "read", "apply", "repro-after",
-        "suite-before", "suite-after",
+        "build", "survey", "repro-before", "repro-before", "read", "callers", "apply",
+        "repro-after", "suite-before", "suite-after", "callers",
     ]
     # first where the assessment ran it, then where the pull request adds it
     assert [c["path"] for c in sandbox.calls if c["kind"] == "repro-before"] == [
@@ -736,8 +858,8 @@ async def test_a_good_first_answer_is_verified() -> None:
 async def test_patched_code_runs_only_in_the_sandbox_and_without_network() -> None:
     _, sandbox, _ = await run_fix([GOOD])
     by_kind = {c["kind"]: c for c in sandbox.calls}
-    for kind in ("survey", "read", "apply", "repro-before", "repro-after", "suite-before",
-                 "suite-after"):
+    for kind in ("survey", "read", "callers", "apply", "repro-before", "repro-after",
+                 "suite-before", "suite-after"):
         assert by_kind[kind]["network"] is False, kind
     assert by_kind["apply"]["keep"] is True and by_kind["apply"]["image"] == "img-base"
     assert by_kind["apply"]["files"] == {"/work/repo/widgets/core.py": CORE.replace("[:-1]", "")}
@@ -999,7 +1121,6 @@ async def test_nothing_to_tie_the_failure_to_is_not_fixed_without_a_model_call()
 
 
 async def test_the_markdown_summary_lists_every_attempt_and_the_verified_diff() -> None:
-    from fixedyet.report import render_fix_markdown
 
     result, _, _ = await run_fix([WRONG, GOOD])
     text = render_fix_markdown(result)
