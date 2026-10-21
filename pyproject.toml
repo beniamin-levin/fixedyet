@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fixedyet"
+version = "0.1.0"
+description = "Reproduce GitHub bug reports in microVM sandboxes at the reported version, check them against main, and return a rule-based verdict."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [{ name = "Beniamin Levin" }]
+dependencies = [
+  "openai>=1.60",
+  "httpx>=0.27",
+  "pydantic>=2.8",
+  "python-dotenv>=1.0",
+  "tavily-python>=0.5",
+  "contree-sdk>=0.3.6",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "mcp>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "respx>=0.21", "ruff>=0.6"]
+
+[project.scripts]
+fixedyet = "fixedyet.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fixedyet"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["docker: needs a local Docker daemon", "live: calls paid external APIs"]
+addopts = "-m 'not docker and not live'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]

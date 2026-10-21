@@ -1,0 +1,32 @@
+name: ci
+
+# Lint and unit tests. No network, no Docker, no paid APIs: the default pytest addopts skip the
+# `docker` and `live` markers. Docker integration tests run in sandbox-docker.yml.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check src tests
+      - name: Unit tests
+        run: pytest
