@@ -1,0 +1,38 @@
+# FixedYet evaluation set: 15 instances of SWE-bench Verified (princeton-nlp/SWE-bench_Verified).
+#
+# Selection rule. An instance is in when ALL of these hold:
+#   1. Light, pure-Python repository: psf/requests, pallets/flask, pytest-dev/pytest or
+#      pylint-dev/pylint. Nothing that needs a database, a service, a compiled extension
+#      built from source, or a GPU.
+#   2. The base commit installs with a plain `pip install -e .` on the Python version in
+#      the comment (SWE-bench's own version for that release, all within 3.9-3.12). Its
+#      declared dependencies resolve on their own: no pre-install command, apt package
+#      or pre-release is needed. SWE-bench's pinned versions exist for reproducibility,
+#      not because the install fails without them. That rules out pytest 6.3 (setup.cfg
+#      typo), pylint 3.x (pre-release astroid), pylint 2.8 (pyenchant) and pytest 4.x.
+#   3. The problem statement carries a snippet or clear steps and a stated expected
+#      behaviour, and the bug can be shown without the network or a paid service. That
+#      rules out proxy, Windows-only, debug-build-only and feature-request instances.
+#   4. Older and newer mixed: the fixing pull requests run from 2014 to 2023.
+#
+# Order. Repositories and ages are interleaved on purpose, so `--limit N` on any prefix
+# stays representative. Every id is in Verified; the two marked (also in Lite) are in both.
+#
+# Format: one instance id per line; `#` starts a comment. Trailing comment = repo, release,
+# date of the fixing pull request, Python version.
+
+psf__requests-1921           # psf/requests 2.3, 2014-02-14, python 3.9
+pytest-dev__pytest-6202      # pytest-dev/pytest 5.2, 2019-11-16, python 3.9
+pylint-dev__pylint-4604      # pylint-dev/pylint 2.9, 2021-06-22, python 3.9
+pallets__flask-5014          # pallets/flask 2.3, 2023-03-04, python 3.11
+pytest-dev__pytest-7432      # pytest-dev/pytest 5.4, 2020-06-29, python 3.9 (also in Lite)
+psf__requests-2317           # psf/requests 2.4, 2014-11-01, python 3.9 (also in Lite)
+pylint-dev__pylint-4970      # pylint-dev/pylint 2.10, 2021-09-05, python 3.9
+pytest-dev__pytest-7571      # pytest-dev/pytest 6.0, 2020-07-29, python 3.9
+psf__requests-2931           # psf/requests 2.9, 2015-12-16, python 3.9
+pylint-dev__pylint-6386      # pylint-dev/pylint 2.14, 2022-04-19, python 3.9
+pytest-dev__pytest-7982      # pytest-dev/pytest 6.2, 2020-10-31, python 3.9
+pylint-dev__pylint-6528      # pylint-dev/pylint 2.14, 2022-05-06, python 3.9
+psf__requests-5414           # psf/requests 2.26, 2020-04-05, python 3.9
+pytest-dev__pytest-10051     # pytest-dev/pytest 7.2, 2022-06-15, python 3.9
+pylint-dev__pylint-7277      # pylint-dev/pylint 2.15, 2022-08-08, python 3.9
