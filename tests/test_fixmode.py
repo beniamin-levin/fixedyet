@@ -163,6 +163,8 @@ def test_broken_blocks_are_reported_not_guessed() -> None:
 
 def test_the_summary_is_cleaned_for_a_commit_subject() -> None:
     assert fm.clean_summary("**Fix `parse`** @everyone", "fallback") == "Fix parse everyone"
+    assert fm.clean_summary("Remove __html__ from ChainableUndefined", "f") == (
+        "Remove __html__ from ChainableUndefined")
     assert fm.clean_summary("", "Fix #42: parse drops") == "Fix #42: parse drops"
     assert len(fm.clean_summary("x" * 200, "f")) == 72
 

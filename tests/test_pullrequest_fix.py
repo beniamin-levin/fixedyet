@@ -95,6 +95,13 @@ def test_model_text_cannot_mention_anyone_or_break_the_layout() -> None:
     assert "@everyone" not in pr.fix_pr_title(result)
 
 
+def test_underscored_names_in_the_explanation_stay_code_not_bold() -> None:
+    body = pr.fix_pr_body(verified(explanation="It defines __html__ and calls _iter twice."),
+                          login="alice")
+    assert "It defines `__html__` and calls `_iter` twice." in body
+    assert "`` `" not in body
+
+
 def test_the_disclosure_has_no_switch_in_the_fix_functions() -> None:
     import inspect
 

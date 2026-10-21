@@ -813,8 +813,8 @@ def _dedupe_sentences(text: str) -> str:
 
 def clean_summary(text: str, fallback: str) -> str:
     """One line for a commit subject: no markdown, no mentions, at most 72 characters."""
-    line = " ".join((text or "").split()).strip("`*_ .")
-    line = re.sub(r"[`*_<>]", "", line).replace("@", "")
+    line = " ".join((text or "").split()).strip("`* .")
+    line = re.sub(r"[`<>]|\*\*", "", line).replace("@", "")  # underscores stay: __html__
     if len(line) < 8:
         line = " ".join(fallback.split())
     if len(line) > 72:

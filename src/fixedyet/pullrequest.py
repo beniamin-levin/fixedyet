@@ -700,6 +700,13 @@ def _no_mentions(text: str) -> str:
     return re.sub(r"(?<![\w`])@(?=[A-Za-z0-9])", "@\u200b", text)
 
 
+def _code_names(text: str) -> str:
+    """Dunder and snake_case-with-leading-underscore names in model prose as code spans, so that
+    markdown does not turn ``__html__`` into a bold "html"."""
+    return re.sub(r"(?<![`\w])(_{1,2}\w+?_{0,2})(?![`\w])",
+                  lambda m: f"`{m.group(1)}`" if m.group(1).startswith("_") else m.group(1), text)
+
+
 def fix_pr_title(result: FixResult) -> str:
     """The one-line summary of the change, or ``Fix #<n>: <issue title>``."""
     summary = " ".join(result.summary.split()) or f"Fix #{_issue_number(result)}: {result.title}"
@@ -753,7 +760,7 @@ def fix_pr_body(result: FixResult, *, login: str) -> str:
         "",
         "_The model's own account. The sandbox checked the behaviour, not this text._",
         "",
-        _no_mentions(_line(result.explanation)) or "(no explanation was given)",
+        _code_names(_no_mentions(_line(result.explanation))) or "(no explanation was given)",
         "",
         f"## Regression test on `{_cell(branch)}`",
         "",
