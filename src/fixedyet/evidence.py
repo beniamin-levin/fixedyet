@@ -182,6 +182,7 @@ class Terms:
     owner: str = ""
     repo: str = ""
     names: set[str] = field(default_factory=set)  # the project's names, lower case
+    spoken: set[str] = field(default_factory=set)  # strong names from the title, prose or spans
 
     def hits(self, text: str, *, own: bool = False) -> tuple[list[str], list[str]]:
         """``(strong, weak)`` names that ``text`` mentions as whole words, case-sensitive. A
@@ -249,7 +250,8 @@ def issue_terms(
     text = without_tracebacks(f"{issue.title}\n{issue.body}")
     text = re.sub(r"`[\w./-]+`", lambda m: " " if _FILE_NAME.search(m.group(0)[1:-1]) else
                   m.group(0), text)  # `setup.cfg` names a file, not code
-    found = list(distinctive_terms(text, test_code))
+    weights = distinctive_terms(text, test_code)
+    found = list(weights)
     title_spans = " ".join(re.findall(r"`([^`\n]+)`", issue.title))
     spans = " ".join(re.findall(r"`([^`\n]+)`", text))
     dotted = [d for d in _DOTTED.findall(spans)
@@ -275,8 +277,11 @@ def issue_terms(
     numbers = [issue.number]
     if pr_url and (match := re.search(r"/pull/(\d+)", pr_url)):
         numbers.append(int(match.group(1)))
+    # what the issue says in words or code spans, not what its code blocks or the test merely use
+    # (`BaseModel` in a pydantic snippet is on every pydantic page)
+    spoken = {t for t in strong + anchors if weights.get(t, 2.0) >= 2.0 or t in title_names}
     return Terms(strong=strong, anchors=anchors, weak=weak, title=title_names, numbers=numbers,
-                 owner=issue.owner, repo=issue.repo, names=names)
+                 owner=issue.owner, repo=issue.repo, names=names, spoken=spoken)
 
 
 _TITLE_STOP = frozenset({"str", "repr", "len", "int", "list", "dict", "set", "the", "and"})
@@ -404,9 +409,10 @@ def judge(
     elif page.place == "own_change":
         keep = cited or (s >= 1 and s + w >= 2)
     elif page.place == "own_notes":  # release notes list everything: a code name must be in them
-        keep = cited or any(t in terms.strong for t in strong)
-    elif page.place == "docs":
-        keep = cited or s >= 1 or (w >= 2 and bool(set(weak) & terms.title))
+        keep = cited or any(t in terms.strong and t in terms.spoken for t in strong)
+    elif page.place == "docs":  # every page of the docs names the project's main classes
+        keep = (cited or any(t in terms.spoken for t in strong) or s >= 2
+                or (w >= 2 and bool(set(weak) & terms.title)))
     elif page.place == "forum":  # another tracker or a Q&A site: it must name what the title does
         keep = cited or (s + w >= 2 and any(t in terms.title for t in strong))
     else:  # a blog post or a tutorial is evidence only when it cites the issue

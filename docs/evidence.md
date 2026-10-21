@@ -19,8 +19,8 @@ How much a page must name depends on where it lives:
 | an issue of the same repository | cites the issue, or names one strong name or two weak ones | **Similar issue**, or **Duplicate** when the thread says "duplicate of #N" (or the other issue says it is a duplicate of this one) |
 | a pull request, commit or discussion of the project | cites it, or names a strong name and one more | Related |
 | the project's release notes or changelog (GitHub releases, `CHANGES.rst`, a docs changelog page) | cites the issue or the pull request | Changelog |
-| | names a strong name (a changelog entry that changed the function at fault) | Related |
-| the project's documentation (a host or first path segment named after the project, PyPI) | cites it, names a strong name, or two names of which the title uses one | Related |
+| | names a strong name the issue says (a changelog entry that changed the function at fault) | Related |
+| the project's documentation (a host or first path segment named after the project, PyPI) | cites it, names a strong name the issue says in its title, prose or code spans (not one its snippet merely uses: `BaseModel` is on every pydantic page), two strong names, or two names of which the title uses one | Related |
 | another tracker, a Q&A site, another repository | cites `owner/repo#N` or the issue URL, or names a strong name the title uses and one more | Related |
 | anywhere else (blogs, tutorials, news) | cites the issue | Related |
 | a listing (a repository root, the issue or commit list, a source file, Sphinx's `_modules` copy of the source), a directory of companies or people | never | |

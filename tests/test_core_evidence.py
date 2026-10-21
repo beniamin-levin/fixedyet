@@ -587,3 +587,17 @@ async def test_look_for_fix_can_be_switched_off(issue: Issue) -> None:
         settings=Settings(), github=github, look_for_fix=False,
     )
     assert github.fix_calls == 0 and result.fixing_commit is None
+
+
+def test_docs_must_name_what_the_issue_says_not_what_its_snippet_uses(issue: Issue) -> None:
+    issue.title = "Generic models no longer pickle"
+    issue.body = (
+        "Since `create_generic_submodel` changed, this fails:\n"
+        "```python\nfrom pydantic import BaseModel\n\nclass Page(BaseModel):\n    pass\n```\n"
+    )
+    every_page = {"url": "https://widgets.readthedocs.io/models", "title": "Models",
+                  "content": "class Item(BaseModel): ..."}
+    the_page = {"url": "https://widgets.readthedocs.io/generics", "title": "Generics",
+                "content": "create_generic_submodel builds the parametrized class"}
+    found = web_results_to_evidence([every_page, the_page], issue)
+    assert [e.title for e in found] == ["Generics"]
