@@ -58,21 +58,28 @@ class DockerSandbox:
 
 # envbuild.py
 async def build_baseline(sb: Sandbox, *, repo: str, ref: str, python_version: str | None,
-                         progress: ProgressCallback | None = None) -> tuple[str, ExecResult]
+                         progress: ProgressCallback | None = None, extra_packages: Sequence[str] = (),
+                         project_extras: Sequence[str] = ()) -> tuple[str, ExecResult]
     # clones github.com/<repo> into /work/repo, checks out ref, installs editable with test extras
     # when available, installs pytest, then the project's test dependencies (testdeps.py: PEP 735
     # groups test/tests/testing, requirements/test*.txt and kin; `pip install --group` when pip has
-    # it, else tomllib + install by name; plain requirements only, never fatal), runs a short sanity
-    # import; returns (checkpoint_image, setup_result). installed_test_deps(setup_result) reads back
-    # what the dependency step did.
+    # it, else tomllib + install by name; plain requirements only, never fatal; requirements files
+    # named for another Python, like tests37.txt, are skipped), then project_extras (optional extras
+    # of the project itself, from project_extras_from_text(); testdeps.py adds the ones its console
+    # script asks for) and extra_packages, then a repair step that makes pytest able to load the
+    # project's conftest (testdeps.py repair), runs a short sanity import; returns
+    # (checkpoint_image, setup_result). installed_test_deps(setup_result), installed_project_extras()
+    # and repairs_made() read back what those steps did.
     # Raises EnvBuildError on failure.
 REPO_DIR = "/work/repo"
 async def run_test_on_side(sb: Sandbox, image: str, *, test_path: str, test_code: str,
                            checkout: str | None = None, patch: str | None = None,
-                           runs: int = 2) -> SideRun
+                           runs: int = 2, project_extras: Sequence[str] = ()) -> SideRun
     # optionally checks out another ref (git fetch + checkout + reinstall) or applies a patch,
     # writes the test file, runs `python -m pytest -x -q -p no:cacheprovider <test_path>` `runs` times
     # in ONE sandbox run, maps exit codes (0 PASS, 1 FAIL, else ERROR), returns SideRun with log excerpt.
+    # After a checkout it first reinstalls project_extras and repairs a conftest that cannot load
+    # (the other ref has its own test requirements), using the helper shipped with the test file.
 
 # llm.py
 class LLM:
@@ -135,6 +142,8 @@ def confirm_upstream(repo: str, *, assume_yes: bool = False) -> bool       # typ
 | runs disagree on either side | - | inconsistent, confidence low |
 
 Confidence is high only when every run on both sides agrees and neither side errored.
+
+An `unsupported` verdict caused by an errored side says why in its basis (`verdict.error_reason`: pytest could not load the project's conftest or a plugin, could not collect the test file, or the ref needs a newer Python than the sandbox has). `verdict.is_setup_error` is the same reading for the test-writing agent, which is told that such an error is not a failure of its test.
 
 ## Backport mode (verified backports and draft pull requests)
 

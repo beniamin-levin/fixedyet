@@ -453,3 +453,133 @@ async def test_tool_calls_queued_after_submit_are_not_run(
     fake_llm.queue(fake_llm.tool("run_test", code=GOOD_TEST), both)
     _, code, _ = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
     assert code == GOOD_TEST and len(fake_sandbox.calls) == 1
+
+
+# -- an errored run_test: the sandbox's problem or the test's own ---------------------------------
+
+CONFTEST_CRASH = ExecResult(
+    exit_code=4,
+    stdout=(
+        "ImportError while loading conftest '/work/repo/tests/conftest.py'.\n"
+        "tests/conftest.py:2: in <module>\n    from click.testing import CliRunner\n"
+        "E   ModuleNotFoundError: No module named 'click'\n"
+    ),
+)
+COLLECTION_ERROR = ExecResult(
+    exit_code=2,
+    stdout=(
+        "_____ ERROR collecting tests/test_fixedyet_repro.py _____\n"
+        "E   ModuleNotFoundError: No module named 'widgets_extra'\n"
+    ),
+)
+
+
+def test_explain_run_tells_a_setup_error_from_a_failing_test() -> None:
+    setup = agent.explain_run(4, CONFTEST_CRASH.stdout)
+    assert setup is not None and setup[1] is True
+    assert "SETUP ERROR, not a failure of your test" in setup[0]
+    assert "tests/conftest.py (ModuleNotFoundError: No module named 'click')" in setup[0]
+    assert "call submit now" in setup[0]
+
+    own = agent.explain_run(2, COLLECTION_ERROR.stdout)
+    assert own is not None and own[1] is False
+    assert "ERROR before any assertion ran" in own[0] and "widgets_extra" in own[0]
+    assert "Fix the test" in own[0]
+
+
+def test_explain_run_says_nothing_about_a_pass_or_a_real_failure() -> None:
+    assert agent.explain_run(0, "1 passed in 0.01s") is None
+    assert agent.explain_run(1, "E   AssertionError\n1 failed in 0.01s") is None
+    assert agent.explain_run(5, "no tests ran") is None  # no reason to give
+
+
+def test_explain_run_calls_exit_one_without_a_summary_a_crash() -> None:
+    note = agent.explain_run(1, "Traceback (most recent call last):\n  boom")
+    assert note is not None and note[1] is False and "crashed" in note[0]
+
+
+async def test_a_setup_error_is_labelled_for_the_model_and_does_not_invite_rewrites(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", CONFTEST_CRASH)
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="the best I can do"),
+    )
+    _, code, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    (shown,) = [m["content"] for m in tool_messages(fake_llm) if m["name"] == "run_test"]
+    assert shown.startswith("pytest exit code 4: ERROR (pytest usage error)")
+    assert "SETUP ERROR, not a failure of your test" in shown.split("\n\n")[1]  # before the output
+    assert "run_test -> ERROR (setup error)" in summary
+    assert code == GOOD_TEST
+
+
+async def test_two_setup_errors_in_a_row_end_the_loop_with_the_last_test(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    """Python-dotenv#697: 15 of 20 turns were spent rewriting a test for a conftest that could
+    not be imported."""
+    fake_sandbox.on("pytest", CONFTEST_CRASH)
+    other = GOOD_TEST.replace("keeps_last_item", "again")
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("run_test", code=other),
+        fake_llm.tool("run_test", code="must never be asked for"),
+    )
+    path, code, summary = await write_repro_test(
+        fake_llm, fake_sandbox, "img", sample_issue, CONTRACT
+    )
+    assert (path, code) == (TEST_PATH, other)
+    assert len(fake_llm.calls) == 2
+    assert "stopped after 2 setup errors in a row" in summary
+    assert "No module named 'click'" in summary
+
+
+async def test_a_setup_error_followed_by_a_good_run_resets_the_count(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    results = iter([CONFTEST_CRASH, PYTEST_FAIL, CONFTEST_CRASH])
+    fake_sandbox.on("pytest", lambda call: next(results))
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("run_test", code=GOOD_TEST.replace("keeps", "keeps2")),
+        fake_llm.tool("run_test", code=GOOD_TEST.replace("keeps", "keeps3")),
+        fake_llm.tool("submit", code=GOOD_TEST.replace("keeps", "keeps3"), rationale="r"),
+    )
+    _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    assert "stopped after" not in summary and "submitted: r" in summary
+
+
+async def test_an_error_in_the_models_own_test_is_not_a_setup_error(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", COLLECTION_ERROR)
+    fake_llm.queue(*[fake_llm.tool("run_test", code=GOOD_TEST) for _ in range(3)])
+    fake_llm.settings.max_turns = 3
+    _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    assert "turn limit (3) reached" in summary  # three of them, none stopped the loop early
+    (shown, *_) = [m["content"] for m in tool_messages(fake_llm) if m["name"] == "run_test"]
+    assert "ERROR before any assertion ran" in shown and "SETUP ERROR" not in shown
+
+
+async def test_an_empty_code_argument_names_what_the_model_sent(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    fake_llm.queue(
+        fake_llm.tool("run_test", content=GOOD_TEST),  # the wrong argument name
+        fake_llm.tool("run_test", code="   "),
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="r"),
+    )
+    await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    first, second, *_ = [m["content"] for m in tool_messages(fake_llm)]
+    assert first.startswith("not run: the `code` argument is missing or empty (you sent: content)")
+    assert "you sent: no arguments" not in second and "missing or empty" in second
+    assert len(fake_sandbox.calls) == 1
+
+
+def test_a_file_without_a_test_function_says_what_it_does_define() -> None:
+    problem = check_test_code("import os\n\ndef helper():\n    pass\n\ndef another():\n    pass\n")
+    assert problem is not None and "it defines: another, helper" in problem
+    assert "it is 5 characters long" in (check_test_code("x = 1") or "")

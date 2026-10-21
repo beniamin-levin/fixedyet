@@ -13,6 +13,10 @@ Order of the rules, first match wins:
        PASS      PASS   -> not_reproduced
        PASS      FAIL   -> inconsistent (a bad test, or a regression on main)
 
+When a side errors, the basis line names the reason the log gives (`error_reason`): the project's
+conftest or a plugin could not be imported, the test file could not be collected, or the ref needs
+a newer Python than the sandbox has.
+
 Rows of rule 4 are HIGH confidence: "high only when every run on both sides agrees and neither
 side errored" holds by construction once rules 2 and 3 have passed.
 
@@ -59,6 +63,55 @@ def failure_kind(log: str) -> str | None:
     return None
 
 
+# -- reading an errored run --------------------------------------------------------------------
+
+_LOADING_CONFTEST = re.compile(r"ImportError while loading conftest '(?P<path>[^']+)'")
+_LOADING_PLUGIN = re.compile(r"Error importing plugin ['\"]?(?P<name>[\w.-]+)")
+_COLLECTING = re.compile(r"ERROR collecting (?P<path>\S+)")
+_NEEDS_PYTHON = re.compile(r"requires a different Python: (?P<have>\S+) not in '(?P<need>[^']+)'")
+_LAST_EXCEPTION = re.compile(r"^E\s+(?P<what>\S.*)$", re.MULTILINE)
+_WORK_DIR = "/work/repo/"
+
+
+def _last_exception(log: str) -> str:
+    lines = _LAST_EXCEPTION.findall(log)
+    return lines[-1].strip() if lines else ""
+
+
+def is_setup_error(log: str) -> bool:
+    """True when pytest stopped while loading the project's own configuration (its conftest or a
+    plugin), or the ref cannot be installed here. The test file is not what failed, so editing it
+    cannot help."""
+    return bool(
+        _LOADING_CONFTEST.search(log) or _LOADING_PLUGIN.search(log) or _NEEDS_PYTHON.search(log)
+    )
+
+
+def error_reason(log: str) -> str | None:
+    """One line on why a pytest run errored before any test decided, from its log; None when the
+    log does not say.
+
+    Four causes are told apart: the ref needs a newer Python than the sandbox has, the project's
+    conftest cannot be imported, a pytest plugin cannot be imported, and the test file itself
+    cannot be collected. The reason names the exception pytest ended with.
+    """
+    if needs := _NEEDS_PYTHON.search(log):
+        return (
+            f"the code needs Python {needs['need']} and the sandbox has {needs['have']}, so it "
+            "cannot be installed there"
+        )
+    what = _last_exception(log)
+    suffix = f" ({what})" if what else ""
+    if conftest := _LOADING_CONFTEST.search(log):
+        path = conftest["path"].removeprefix(_WORK_DIR)
+        return f"pytest could not load the project's {path}{suffix}"
+    if plugin := _LOADING_PLUGIN.search(log):
+        return f"pytest could not import the plugin {plugin['name']}{suffix}"
+    if collecting := _COLLECTING.search(log):
+        return f"pytest could not collect {collecting['path']}{suffix}"
+    return None
+
+
 def decide(
     reported: SideRun | None,
     fix: SideRun | None,
@@ -92,6 +145,7 @@ def decide(
     assert reported is not None and fix is not None
     errored = [
         f"every run on the {label} side ({side.ref}) errored before the test could decide"
+        + (f": {reason}" if (reason := error_reason(side.log_excerpt)) else "")
         for label, side in sides
         if side.stable_outcome is Outcome.ERROR
     ]

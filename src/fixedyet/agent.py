@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from fixedyet.envbuild import PYTEST_SUMMARY_PATTERN
 from fixedyet.llm import LLM, ToolCall
 from fixedyet.models import (
     ExecResult,
@@ -29,6 +30,7 @@ from fixedyet.models import (
     ReproContract,
     Stage,
 )
+from fixedyet.verdict import error_reason, is_setup_error
 
 if TYPE_CHECKING:
     from fixedyet.sandbox.base import Sandbox
@@ -40,6 +42,8 @@ TEST_PATH = "tests/test_fixedyet_repro.py"
 MAX_TOOL_OUTPUT = 8_000
 AGENT_MAX_TOKENS = 8_192  # a reasoning model spends part of this on thinking before the code
 MAX_SANDBOX_FAILURES = 3
+MAX_SETUP_ERRORS = 2  # run_test results in a row that stop before the test, for the same reason
+_PYTEST_SUMMARY = re.compile(PYTEST_SUMMARY_PATTERN, re.MULTILINE)
 
 
 class AgentError(RuntimeError):
@@ -310,7 +314,9 @@ def check_test_code(code: str) -> str | None:
         return f"SyntaxError: {exc.msg} (line {exc.lineno})"
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
     if not any(f.name.startswith("test") for f in functions):
-        return "the file has no test function (a function whose name starts with test_)"
+        defined = ", ".join(sorted({f.name for f in functions})[:8])
+        seen = f"it defines: {defined}" if defined else f"it is {len(code)} characters long"
+        return f"the file has no test function (a function whose name starts with test_); {seen}"
     for node in ast.walk(tree):
         if isinstance(node, ast.Assert) and isinstance(node.test, ast.Constant):
             if not node.test.value:
@@ -334,6 +340,43 @@ def describe_pytest_exit(code: int, timed_out: bool = False) -> str:
         4: "ERROR (pytest usage error)",
         5: "ERROR (no tests were collected)",
     }.get(code, f"ERROR (exit code {code})")
+
+
+def explain_run(exit_code: int, output: str) -> tuple[str, bool] | None:
+    """Tell the model what an errored pytest run means: ``(note, is_setup_error)``, else None.
+
+    A run that stopped before any assertion is either the sandbox's problem (the project's own
+    conftest or a plugin cannot be imported: no edit of the test can help, and trying only burns
+    turns) or the test's own (it cannot be collected, a module it imports is missing: fix it).
+    Exit 1 without a pytest summary line is a crash, not a failed assertion; the side runs treat
+    it as an error too.
+    """
+    crashed = exit_code == 1 and not _PYTEST_SUMMARY.search(output)
+    if exit_code in (0,) or (exit_code == 1 and not crashed):
+        return None
+    reason = error_reason(output)
+    if reason and is_setup_error(output):
+        return (
+            f"SETUP ERROR, not a failure of your test: {reason}. Pytest stopped before it ran "
+            "any test, so nothing in your test file can fix this, and rewriting it is a waste of "
+            "turns. The harness sees the same problem and reports it. If your test is complete, "
+            "call submit now.",
+            True,
+        )
+    if reason:
+        return (
+            f"ERROR before any assertion ran: {reason}. This comes from your test file or what "
+            "it imports; the sandbox has only the project, its dependencies and pytest. Fix "
+            "the test so that it reaches its assertions.",
+            False,
+        )
+    if crashed:
+        return (
+            "ERROR: pytest exited with 1 but printed no summary, so it crashed instead of "
+            "running a failing test. Read the output for the traceback.",
+            False,
+        )
+    return None
 
 
 class ReproAgent:
@@ -362,6 +405,8 @@ class ReproAgent:
         self.submitted: tuple[str, str] | None = None  # (code, rationale)
         self.steps: list[str] = []
         self._sandbox_failures = 0
+        self._setup_errors = 0  # consecutive run_test results that were setup errors
+        self.stop_reason: str | None = None
 
     # -- the loop ----------------------------------------------------------------------------
 
@@ -405,7 +450,7 @@ class ReproAgent:
                 )
                 if self.submitted:
                     break  # ignore any tool calls the model queued after submit
-            if self.submitted:
+            if self.submitted or self.stop_reason:
                 break
         return self._finish()
 
@@ -416,7 +461,8 @@ class ReproAgent:
         elif self.last_code is not None:
             code = self.last_code
             self.steps.append(
-                f"turn limit ({self.max_turns}) reached without submit; using the last test run"
+                self.stop_reason
+                or f"turn limit ({self.max_turns}) reached without submit; using the last test run"
             )
         else:
             raise AgentError(f"no reproduction test was written in {self.max_turns} turns")
@@ -532,7 +578,12 @@ class ReproAgent:
         return text, f"search_code {pattern!r}" + (f" in {glob}" if glob else "")
 
     async def _run_test(self, args: dict[str, Any]) -> tuple[str, str]:
-        code = strip_code_fence(str(args.get("code") or ""))
+        raw = args.get("code")
+        if not isinstance(raw, str) or not raw.strip():
+            sent = ", ".join(sorted(args)) or "no arguments"
+            problem = f"the `code` argument is missing or empty (you sent: {sent}); pass the file"
+            return f"not run: {problem}", "run_test rejected: empty code"
+        code = strip_code_fence(raw)
         if problem := check_test_code(code):
             return f"not run: {problem}", f"run_test rejected: {problem}"
         # No network: the test must not need it, and the sandbox enforces that rule.
@@ -544,8 +595,27 @@ class ReproAgent:
         )
         self.last_code, self.last_exit = code, result.exit_code
         status = describe_pytest_exit(result.exit_code, result.timed_out)
-        output = f"pytest exit code {result.exit_code}: {status}\n\n{self._text(result)}"
-        return output, f"run_test -> {status.split(' (')[0]}"
+        text = self._text(result)
+        output = f"pytest exit code {result.exit_code}: {status}\n\n{text}"
+        label = f"run_test -> {status.split(' (')[0]}"
+        note = None if result.timed_out else explain_run(result.exit_code, text)
+        if note is None:
+            self._setup_errors = 0
+            return output, label
+        message, setup = note
+        # the note goes first: a long output is cut in the middle, and the model must see it
+        output = f"pytest exit code {result.exit_code}: {status}\n\n{message}\n\n{text}"
+        if not setup:
+            self._setup_errors = 0
+            return output, label
+        self._setup_errors += 1
+        label += " (setup error)"
+        if self._setup_errors >= MAX_SETUP_ERRORS:
+            self.stop_reason = (
+                f"stopped after {self._setup_errors} setup errors in a row; using the last test "
+                f"run: {error_reason(text) or 'pytest could not start'}"
+            )
+        return output, label
 
     async def _submit(self, args: dict[str, Any]) -> tuple[str, str]:
         rationale = str(args.get("rationale") or "").strip()

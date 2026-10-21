@@ -7,7 +7,7 @@ import itertools
 import pytest
 
 from fixedyet.models import Confidence, Outcome, SideRun, Verdict
-from fixedyet.verdict import decide, failure_kind
+from fixedyet.verdict import decide, error_reason, failure_kind, is_setup_error
 
 P, F, E = Outcome.PASS, Outcome.FAIL, Outcome.ERROR
 HIGH, LOW = Confidence.HIGH, Confidence.LOW
@@ -238,3 +238,87 @@ def test_failure_kinds_do_not_matter_when_a_side_passes() -> None:
         Verdict.FIXED_ON_MAIN,
         HIGH,
     )
+
+
+# -- why a run errored -------------------------------------------------------------------------
+
+CLICK_CONFTEST = """\
+ImportError while loading conftest '/work/repo/tests/conftest.py'.
+tests/conftest.py:2: in <module>
+    from click.testing import CliRunner
+E   ModuleNotFoundError: No module named 'click'
+"""
+TRIO_CONFTEST = """\
+ImportError while loading conftest '/work/repo/tests/conftest.py'.
+tests/conftest.py:5: in <module>
+    import trio
+/usr/local/lib/python3.13/site-packages/trio/_path.py:102: in generate_forwards
+    raise TypeError(attr_name, type(attr))
+E   TypeError: ('parser', <class 'module'>)
+"""
+
+
+@pytest.mark.parametrize(
+    ("log", "reason"),
+    [
+        (
+            CLICK_CONFTEST,
+            "pytest could not load the project's tests/conftest.py "
+            "(ModuleNotFoundError: No module named 'click')",
+        ),
+        (
+            TRIO_CONFTEST,
+            "pytest could not load the project's tests/conftest.py "
+            "(TypeError: ('parser', <class 'module'>))",
+        ),
+        (
+            "ImportError while loading conftest '/work/repo/conftest.py'.",
+            "pytest could not load the project's conftest.py",
+        ),
+        (
+            "Error importing plugin 'pytest_foo': nope\nE   ImportError: cannot import name 'x'",
+            "pytest could not import the plugin pytest_foo (ImportError: cannot import name 'x')",
+        ),
+        (
+            "_____ ERROR collecting tests/test_fixedyet_repro.py _____\nE   SyntaxError: bad",
+            "pytest could not collect tests/test_fixedyet_repro.py (SyntaxError: bad)",
+        ),
+        (
+            "ERROR: Package 'jinja2' requires a different Python: 3.9.18 not in '>=3.10'",
+            "the code needs Python >=3.10 and the sandbox has 3.9.18, "
+            "so it cannot be installed there",
+        ),
+        ("1 failed in 0.1s\nE   AssertionError", None),
+        ("", None),
+    ],
+)
+def test_error_reason(log: str, reason: str | None) -> None:
+    assert error_reason(log) == reason
+
+
+def test_a_conftest_plugin_or_python_problem_is_a_setup_error_and_a_broken_test_is_not() -> None:
+    assert is_setup_error(CLICK_CONFTEST) and is_setup_error(TRIO_CONFTEST)
+    assert is_setup_error("Error importing plugin 'x'")
+    assert is_setup_error("requires a different Python: 3.9.1 not in '>=3.10'")
+    assert not is_setup_error("ERROR collecting tests/t.py\nE   NameError: name 'x'")
+    assert not is_setup_error("1 failed")
+
+
+def test_unsupported_basis_gives_the_reason_each_side_errored() -> None:
+    reported = SideRun(ref="v1.2.3", outcomes=[E, E], log_excerpt=CLICK_CONFTEST)
+    fix = SideRun(ref="main", outcomes=[E, E], log_excerpt=TRIO_CONFTEST)
+    verdict, confidence, basis = run(reported, fix)
+    assert (verdict, confidence) == (Verdict.UNSUPPORTED, LOW)
+    assert basis == [
+        "every run on the reported side (v1.2.3) errored before the test could decide: "
+        "pytest could not load the project's tests/conftest.py "
+        "(ModuleNotFoundError: No module named 'click')",
+        "every run on the fix side (main) errored before the test could decide: "
+        "pytest could not load the project's tests/conftest.py "
+        "(TypeError: ('parser', <class 'module'>))",
+    ]
+
+
+def test_unsupported_basis_is_unchanged_when_the_log_says_nothing() -> None:
+    _, _, basis = run(side(E, E, ref="v1"), side(P, P))
+    assert basis == ["every run on the reported side (v1) errored before the test could decide"]

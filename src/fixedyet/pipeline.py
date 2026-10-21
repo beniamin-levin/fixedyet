@@ -16,7 +16,7 @@ import contextlib
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -348,14 +348,19 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
     fix_label = "gold_patch" if ctx.patch else (ctx.fix_ref or issue.default_branch)
 
     sb = _sandbox(ctx)
-    wanted = envbuild.extra_packages_from_steps(
-        contract.setup_steps, exclude=[issue.repo, contract.package or ""]
+    project_names = [issue.repo, contract.package or ""]
+    wanted = envbuild.extra_packages_from_steps(contract.setup_steps, exclude=project_names)
+    # `pip install "pkg[cli]"` in the thread, or "with pkg[cli] installed": optional extras of the
+    # project under test itself, which `extra_packages_from_steps` must never install by name.
+    thread = [issue.title, issue.body, *issue.comments]
+    asked_extras = envbuild.project_extras_from_text(
+        [*thread, *contract.setup_steps, contract.code_snippet or ""], project_names
     )
     await ctx.say("environment", f"Building the baseline for {repo_name} at {reported_ref}")
     image, setup = await envbuild.build_baseline(
         sb, repo=repo_name, ref=reported_ref,
         python_version=ctx.python_version or _clean_python_version(contract.python_version),
-        progress=ctx.progress, extra_packages=wanted,
+        progress=ctx.progress, extra_packages=wanted, project_extras=asked_extras,
     )
     installed, failed = envbuild.installed_extras(setup)
     if failed:
@@ -363,10 +368,18 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
             f"could not install {', '.join(failed)}, which the issue uses, so the test may not "
             "match the report"
         )
+    extras_ok, extras_failed = envbuild.installed_project_extras(setup)
+    if extras_failed:
+        ctx.caveats.append(
+            f"could not install the extras {', '.join(extras_failed)} of {repo_name}, which the "
+            "issue uses, so the test may not match the report"
+        )
+    project_label = contract.package or issue.repo
+    agent_packages = [*installed, *(f"{project_label}[{extra}]" for extra in extras_ok)]
 
     await ctx.say("agent", "Writing the reproduction test")
     test_path, test_code, ctx.transcript = await write_repro_test(
-        llm, sb, image, issue, contract, ctx.progress, installed_packages=installed
+        llm, sb, image, issue, contract, ctx.progress, installed_packages=agent_packages
     )
     ctx.reproduction.repro_test_path = test_path
     ctx.reproduction.repro_test_code = test_code
@@ -377,7 +390,7 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
         _run_side(
             ctx, sb, image, test_path, test_code, ref=fix_label,
             checkout=None if ctx.patch else (ctx.fix_ref or issue.default_branch),
-            patch=ctx.patch,
+            patch=ctx.patch, project_extras=extras_ok,
         ),
     )
     ctx.reproduction.reported_side, ctx.reproduction.fix_side = reported, fix
@@ -434,12 +447,13 @@ async def _run_side(
     ref: str,
     checkout: str | None = None,
     patch: str | None = None,
+    project_extras: Sequence[str] = (),
 ) -> SideRun:
     """One side of the experiment. A broken run becomes an ERROR outcome, not an exception."""
     try:
         return await envbuild.run_test_on_side(
             sb, image, test_path=test_path, test_code=test_code,
-            checkout=checkout, patch=patch, ref=ref,
+            checkout=checkout, patch=patch, ref=ref, project_extras=project_extras,
         )
     except (envbuild.EnvBuildError, SandboxError) as exc:
         return SideRun(

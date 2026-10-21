@@ -680,3 +680,60 @@ async def test_a_nonsense_python_version_from_the_model_is_not_passed_on(world) 
     )
     await world.run()
     assert world.env.build_calls[0]["python_version"] is None
+
+
+# -- the project's own optional extras -----------------------------------------------------------
+
+
+async def test_an_extra_of_the_project_named_in_the_thread_is_installed_and_told_to_the_agent(
+    world,
+) -> None:
+    """python-dotenv#697: 'With `python-dotenv[cli]` installed, run: ...' and no pip line."""
+    world.github.issue.body += "\nWith `widgets[cli]` installed, run the snippet."
+    happy_script(world.llm)
+    world.env.build_stdout = "__PROJECT_EXTRA_OK__=cli\n"
+    a = await world.run()
+    assert world.env.project_extra_calls == [["cli"]]
+    assert world.env.extra_calls == [[]]  # the project itself is never installed by name
+    first_message = world.llm.calls[1]["messages"][1]["content"]
+    assert "installed in the sandbox for this issue: widgets[cli]" in first_message
+    # the fix side reinstalls the extra after its checkout; the reported side has no checkout
+    fix_call = next(c for c in world.env.side_calls if c["checkout"])
+    assert fix_call["project_extras"] == ["cli"]
+    assert a.verdict is Verdict.FIXED_ON_MAIN and a.confidence is Confidence.HIGH
+
+
+async def test_an_extra_the_project_script_asked_for_reaches_the_fix_side_too(world) -> None:
+    happy_script(world.llm)
+    world.env.build_stdout = "__PROJECT_EXTRA_HINT__=cli\n__PROJECT_EXTRA_OK__=cli\n"
+    await world.run()
+    assert world.env.project_extra_calls == [[]]  # no one asked; the sandbox found it
+    assert next(c for c in world.env.side_calls if c["checkout"])["project_extras"] == ["cli"]
+
+
+async def test_a_project_extra_that_failed_to_install_caps_confidence(world) -> None:
+    world.github.issue.body += "\npip install 'widgets[cli]'"
+    happy_script(world.llm)
+    world.env.build_stdout = "__PROJECT_EXTRA_FAILED__=cli\n"
+    a = await world.run()
+    assert a.verdict is Verdict.FIXED_ON_MAIN and a.confidence is Confidence.LOW
+    assert any("could not install the extras cli of acme/widgets" in b for b in a.confidence_basis)
+
+
+async def test_an_errored_side_says_why_in_the_basis(world) -> None:
+    """Jinja main: every run errored while pytest loaded tests/conftest.py."""
+    from fixedyet.models import Outcome
+
+    world.env.fix = [Outcome.ERROR, Outcome.ERROR]
+    world.env.fix_log = (
+        "ImportError while loading conftest '/work/repo/tests/conftest.py'.\n"
+        "E   TypeError: ('parser', <class 'module'>)"
+    )
+    happy_script(world.llm)
+    a = await world.run()
+    assert a.verdict is Verdict.UNSUPPORTED
+    assert any(
+        "errored before the test could decide: pytest could not load the project's "
+        "tests/conftest.py (TypeError: ('parser', <class 'module'>))" in line
+        for line in a.confidence_basis
+    )

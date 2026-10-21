@@ -272,7 +272,10 @@ class FakeEnvBuild:
     fix: list[Outcome] = field(default_factory=lambda: [Outcome.PASS, Outcome.PASS])
     build_error: str | None = None
     build_stdout: str = ""  # what the baseline script printed, e.g. __EXTRA_OK__= markers
+    reported_log: str | None = None  # the log excerpt of the reported side (default: by outcome)
+    fix_log: str | None = None  # likewise for the fix side
     extra_calls: list[list[str]] = field(default_factory=list)
+    project_extra_calls: list[list[str]] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=lambda: {"1.2.0": "v1.2.0"})
     build_calls: list[dict[str, Any]] = field(default_factory=list)
     side_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -280,9 +283,10 @@ class FakeEnvBuild:
 
     async def build_baseline(self, sb: Any, *, repo: str, ref: str, python_version: str | None,
                              progress: Any = None, extra_packages: Any = (),
-                             **_: Any) -> tuple[str, ExecResult]:
+                             project_extras: Any = (), **_: Any) -> tuple[str, ExecResult]:
         self.build_calls.append({"repo": repo, "ref": ref, "python_version": python_version})
         self.extra_calls.append(list(extra_packages))
+        self.project_extra_calls.append(list(project_extras))
         if self.build_error:
             raise envbuild.EnvBuildError(self.build_error)
         return "baseline-image", ExecResult(
@@ -291,13 +295,18 @@ class FakeEnvBuild:
 
     async def run_test_on_side(self, sb: Any, image: str, *, test_path: str, test_code: str,
                                checkout: str | None = None, patch: str | None = None,
-                               runs: int = 2, ref: str | None = None, **_: Any) -> SideRun:
+                               runs: int = 2, ref: str | None = None,
+                               project_extras: Any = (), **_: Any) -> SideRun:
         self.side_calls.append({"checkout": checkout, "patch": patch, "ref": ref,
-                                "test_code": test_code, "test_path": test_path})
+                                "test_code": test_code, "test_path": test_path,
+                                "project_extras": list(project_extras)})
         fix_side = bool(checkout or patch)
         outcomes = self.fix if fix_side else self.reported
         failing = [o for o in outcomes if o is Outcome.FAIL]
         log = "E   AssertionError: assert ['a', 'b'] == ['a', 'b', 'c']" if failing else "1 passed"
+        override = self.fix_log if fix_side else self.reported_log
+        if override is not None:
+            log = override
         return SideRun(
             ref=ref or checkout or "HEAD", outcomes=list(outcomes),
             checkpoint_image=image, log_excerpt=log,
