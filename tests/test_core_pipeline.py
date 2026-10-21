@@ -22,11 +22,14 @@ from fixedyet.models import (
     Evidence,
     ExecResult,
     Issue,
+    IssueStatus,
+    LinkedPullRequest,
     Outcome,
     ProgressEvent,
     SweBenchInstance,
     Verdict,
 )
+from fixedyet.verdict import RULES_VERSION
 
 GOOD_TEST = (
     "from widgets import parse\n\n\n"
@@ -737,3 +740,61 @@ async def test_an_errored_side_says_why_in_the_basis(world) -> None:
         "tests/conftest.py (TypeError: ('parser', <class 'module'>))" in line
         for line in a.confidence_basis
     )
+
+
+# -- rules v2: the thread and the issue's GitHub status --------------------------------------------
+
+
+class StatusGitHubClient(FakeGitHubClient):
+    def __init__(self, issue: Issue, status: IssueStatus | None) -> None:
+        super().__init__(issue)
+        self.status = status
+        self.status_calls = 0
+
+    async def issue_status(self, issue: Issue) -> IssueStatus | None:
+        self.status_calls += 1
+        return self.status
+
+
+async def test_an_open_bug_closed_as_completed_on_github_gets_low_confidence(world) -> None:
+    status = IssueStatus(
+        state="closed", state_reason="completed", closed_at="2026-05-16T04:57:47Z",
+        closed_by="#3391",
+        linked_prs=[LinkedPullRequest(number=3400, url="https://github.com/acme/widgets/pull/3400",
+                                      state="open")],
+    )
+    github = StatusGitHubClient(world.github.issue, status)
+    world.env.fix = [Outcome.FAIL, Outcome.FAIL]
+    happy_script(world.llm)
+    a = await pipeline.reproduce(ISSUE_URL, settings=world.settings, llm=world.llm,
+                                 sandbox=world.sandbox, github=github)
+    assert (a.verdict, a.confidence) == (Verdict.OPEN_BUG, Confidence.LOW)
+    assert any(line.startswith("the issue was closed as completed on 2026-05-16 by pull request "
+                               "#3391") for line in a.confidence_basis)
+    assert a.issue_status == status and a.open_pr_warning() is not None
+    assert a.contract is not None and a.contract.runnable
+    assert a.rules == RULES_VERSION
+    saved = next(world.settings.runs_dir.glob("*/report.md")).read_text()
+    assert "## Open pull requests linked to the issue" in saved
+    assert "Issue state on GitHub: closed as completed on 2026-05-16" in saved
+
+
+async def test_a_fixed_on_main_verdict_keeps_high_confidence_whatever_github_says(world) -> None:
+    status = IssueStatus(state="closed", state_reason="completed", closed_at="2026-05-16T00:00:00Z")
+    github = StatusGitHubClient(world.github.issue, status)
+    happy_script(world.llm)
+    a = await pipeline.reproduce(ISSUE_URL, settings=world.settings, llm=world.llm,
+                                 sandbox=world.sandbox, github=github)
+    assert (a.verdict, a.confidence) == (Verdict.FIXED_ON_MAIN, Confidence.HIGH)
+    assert github.status_calls == 1 and a.issue_status == status
+
+
+async def test_an_exception_the_thread_never_names_lowers_an_open_bug(world) -> None:
+    log = "E   TypeError: 'NoneType' object is not callable"
+    world.env.fix = [Outcome.FAIL, Outcome.FAIL]
+    world.env.reported_log = world.env.fix_log = log
+    happy_script(world.llm)
+    a = await world.run()
+    assert (a.verdict, a.confidence) == (Verdict.OPEN_BUG, Confidence.LOW)
+    assert any("TypeError on both sides and the issue never names it" in line
+               for line in a.confidence_basis)

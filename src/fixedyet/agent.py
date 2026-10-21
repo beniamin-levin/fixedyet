@@ -58,9 +58,12 @@ class ContractError(AgentError):
 # -- shared helpers -----------------------------------------------------------------------------
 
 
-async def emit_progress(progress: ProgressCallback | None, stage: Stage, message: str) -> None:
-    """Call a progress callback that may be sync or async. A broken callback never kills a run."""
-    if progress is None:
+async def emit_progress(
+    progress: ProgressCallback | None, stage: Stage, message: str | None
+) -> None:
+    """Call a progress callback that may be sync or async. A broken callback never kills a run.
+    An empty or None message is not sent, so a caller can pass an optional warning as it is."""
+    if progress is None or not message:
         return
     try:
         outcome = progress(ProgressEvent(stage=stage, message=message))

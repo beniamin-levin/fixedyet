@@ -1382,3 +1382,19 @@ async def test_the_one_request_for_code_may_come_after_a_failed_attempt() -> Non
     result, _, llm = await run_fix([WRONG, "NEED: widgets/extra.py helper", GOOD], world)
     assert [a.outcome for a in result.attempts] == ["repro_still_fails", "verified"]
     assert '<data kind="file" path="widgets/extra.py"' in llm.prompts[2][-1]["content"]
+
+
+async def test_an_open_pull_request_for_the_issue_is_a_warning_up_front() -> None:
+    from fixedyet.models import IssueStatus, LinkedPullRequest
+
+    a = assessment().model_copy(update={"issue_status": IssueStatus(linked_prs=[
+        LinkedPullRequest(number=77, url="https://github.com/acme/widgets/pull/77", state="open",
+                          draft=True, closes=True)])})
+    events: list[ProgressEvent] = []
+    await run_fix([GOOD], a=a, events=events)
+    assert events[0].stage == "fix"
+    assert events[0].message.startswith(
+        "warning: open pull request(s) already linked to this issue: #77 (draft)")
+    quiet: list[ProgressEvent] = []
+    await run_fix([GOOD], events=quiet)
+    assert not any("pull request" in e.message for e in quiet[:1])

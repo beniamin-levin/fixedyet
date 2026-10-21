@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 
-from fixedyet import testdeps
+from fixedyet import testdeps, verdict
 from fixedyet.models import ExecResult, Outcome, ProgressCallback, ProgressEvent, SideRun
 from fixedyet.sandbox.base import Sandbox, SandboxError
 
@@ -751,12 +751,15 @@ def build_side_run(result: ExecResult, *, ref: str, image: str, runs: int) -> Si
     if result.timed_out:
         text = f"{text}\n[sandbox run timed out]"
     head = _HEAD_RE.search(result.stdout.split("__RUN_START__=", 1)[0])
+    _, sections = _run_sections(result.stdout)
     return SideRun(
         ref=ref,
         outcomes=outcomes,
         checkpoint_image=image,
         log_excerpt=text[-LOG_EXCERPT_CHARS:],
         commit=head.group(1) if head else None,
+        # the last run's whole log (its last RUN_LOG_TAIL_BYTES), not the excerpt above
+        failure_detail=verdict.failure_lines(sections[-1][1]) if sections else None,
     )
 
 

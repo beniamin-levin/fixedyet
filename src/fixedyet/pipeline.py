@@ -40,6 +40,7 @@ from fixedyet.models import (
     Evidence,
     ExecResult,
     Issue,
+    IssueStatus,
     NotReproducedReason,
     Outcome,
     ProgressCallback,
@@ -55,7 +56,7 @@ from fixedyet.report import render_markdown
 from fixedyet.sandbox import get_sandbox
 from fixedyet.sandbox.base import Sandbox, SandboxError
 from fixedyet.untrusted import UNTRUSTED_RULE
-from fixedyet.verdict import decide
+from fixedyet.verdict import RULES_VERSION, decide, issue_state_lines
 
 log = logging.getLogger(__name__)
 
@@ -399,7 +400,12 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
         "run_fix", f"{_outcomes(reported)} at {reported.ref}; {_outcomes(fix)} on {fix.ref}"
     )
 
-    return decide(reported, fix, runnable=True, env_ok=True)
+    return decide(reported, fix, runnable=True, env_ok=True, thread=thread_text(issue))
+
+
+def thread_text(issue: Issue) -> str:
+    """The issue as the rules read it: title, body and comments (what the agent was shown)."""
+    return "\n\n".join([issue.title, issue.body, *issue.comments])
 
 
 def _outcomes(side: SideRun) -> str:
@@ -470,6 +476,8 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
     """Evidence, analysis, usage, files: everything that cannot change the verdict."""
     verdict, confidence, basis = decision
     basis = list(basis)
+    status = await _issue_status(ctx, issue, verdict)
+    ctx.caveats += issue_state_lines(verdict, status)  # closed as fixed, a merged linked PR
     if ctx.caveats and confidence is Confidence.HIGH:
         confidence = Confidence.LOW
     basis += ctx.caveats
@@ -515,6 +523,9 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
         next_actions=next_actions,
         usage=usage,
         model=ctx.settings.model,
+        contract=ctx.contract,
+        issue_status=status,
+        rules=RULES_VERSION,
     )
     await ctx.say("report", "Writing the report")
     try:
@@ -531,6 +542,17 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
         log.warning("could not save the assessment: %s", exc)
     await ctx.say("done", f"{verdict.value} in {usage.wall_seconds:.0f} s, ${usage.cost_usd:.4f}")
     return assessment
+
+
+async def _issue_status(ctx: _Context, issue: Issue, verdict: Verdict) -> IssueStatus | None:
+    """Where a live issue stands on GitHub (state, linked pull requests). Best effort."""
+    if ctx.github is None or verdict not in ANALYSED or not issue.url.startswith("https://"):
+        return None
+    try:
+        return await ctx.github.issue_status(issue)
+    except Exception:  # never fails a run: the verdict stands without it
+        log.warning("issue status lookup failed", exc_info=True)
+        return None
 
 
 async def _collect_evidence(ctx: _Context, issue: Issue, verdict: Verdict) -> EvidenceResult:

@@ -57,6 +57,8 @@ class Issue(BaseModel):
     comments: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
     state: str = "open"
+    state_reason: str | None = None  # GitHub's: completed, not_planned, reopened, duplicate
+    closed_at: datetime | None = None
     created_at: datetime | None = None
     default_branch: str = "main"
 
@@ -109,6 +111,9 @@ class SideRun(BaseModel):
     checkpoint_image: str | None = None
     log_excerpt: str = ""
     commit: str | None = None  # `git rev-parse HEAD` where the test ran; None in older reports
+    # The `E` lines of the last run's failure report, read from the whole run log (not the
+    # excerpt): what the verdict compares between the sides. None when the run printed none.
+    failure_detail: str | None = None
 
     @property
     def stable_outcome(self) -> Outcome | None:
@@ -132,6 +137,47 @@ class Evidence(BaseModel):
     title: str
     url: str | None = None
     why: str = ""
+
+
+class LinkedPullRequest(BaseModel):
+    """A pull request of the issue's own repository that is linked to the issue."""
+
+    number: int
+    url: str
+    title: str = ""
+    state: Literal["open", "closed", "merged"] = "open"
+    draft: bool = False
+    merged_at: datetime | None = None
+    closes: bool = False  # linked in the Development sidebar, or a closing keyword: merging it
+    # closes the issue. False: the pull request only mentions the issue
+
+
+class IssueStatus(BaseModel):
+    """Where the issue stands on GitHub, read when the verdict was made (or re-scored)."""
+
+    state: str = "open"  # open | closed
+    state_reason: str | None = None  # completed | not_planned | reopened | duplicate
+    closed_at: datetime | None = None
+    closed_by: str | None = None  # "#123" (a pull request) or a commit sha, when GitHub names it
+    closed_by_url: str | None = None
+    linked_prs: list[LinkedPullRequest] = Field(default_factory=list)  # open and merged ones
+    source: Literal["graphql", "rest"] = "rest"  # GraphQL needs a token; REST sees less
+    checked_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def open_prs(self) -> list[LinkedPullRequest]:
+        return [pr for pr in self.linked_prs if pr.state == "open"]
+
+
+class Rescore(BaseModel):
+    """Set by `fixedyet rescore --write`: what the verdict was before the rules ran again."""
+
+    rules: str  # the rules version that re-scored it (verdict.RULES_VERSION)
+    at: datetime = Field(default_factory=utcnow)
+    original_verdict: Verdict
+    original_confidence: Confidence
+    original_basis: list[str] = Field(default_factory=list)
+    original_rules: str = ""  # the rules version of the original verdict ("" = v1)
 
 
 class Usage(BaseModel):
@@ -304,6 +350,22 @@ class Assessment(BaseModel):
     backport: BackportResult | None = None  # set when a verified backport was prepared
     fix: FixResult | None = None  # set when fix mode ran on an open bug
     created_at: datetime = Field(default_factory=utcnow)
+    # What the rules need to be run again later without a model call (`fixedyet rescore`).
+    contract: ReproContract | None = None  # what the model extracted from the issue at intake
+    issue_status: IssueStatus | None = None  # live issues only; None in eval mode
+    rules: str = ""  # the version of the rule table that decided the verdict; "" = v1
+    rescored: Rescore | None = None  # set when `fixedyet rescore --write` changed this file
+
+    def open_pr_warning(self) -> str | None:
+        """One line for fix mode: open pull requests that already address the issue."""
+        prs = self.issue_status.open_prs if self.issue_status else []
+        if not prs:
+            return None
+        listed = ", ".join(f"#{pr.number}{' (draft)' if pr.draft else ''}" for pr in prs[:5])
+        return (
+            f"warning: open pull request(s) already linked to this issue: {listed}. Read them "
+            "before proposing another fix"
+        )
 
 
 Stage = Literal[

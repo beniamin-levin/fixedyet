@@ -172,6 +172,32 @@ def _rerun_section(a: Assessment) -> list[str]:
     return out
 
 
+def _issue_state_facts(a: Assessment) -> list[str]:
+    status = a.issue_status
+    if status is None or status.state != "closed":
+        return []
+    reason = f" as {_cell(status.state_reason.replace('_', ' '))}" if status.state_reason else ""
+    when = f" on {status.closed_at:%Y-%m-%d}" if status.closed_at else ""
+    by = ""
+    if status.closed_by:
+        label = status.closed_by if status.closed_by.startswith("#") else status.closed_by[:12]
+        by = f" by {_link(label, status.closed_by_url)}"
+    return [f"- Issue state on GitHub: closed{reason}{when}{by}"]
+
+
+def _open_prs_section(a: Assessment) -> list[str]:
+    """Open pull requests linked to the issue: someone may be fixing it already."""
+    prs = a.issue_status.open_prs if a.issue_status else []
+    if not prs:
+        return []
+    out = ["", "## Open pull requests linked to the issue", ""]
+    for pr in prs:
+        notes = [n for n, on in (("draft", pr.draft), ("closes the issue", pr.closes)) if on]
+        suffix = f" ({', '.join(notes)})" if notes else " (mentions the issue)"
+        out.append(f"- {_link(f'#{pr.number} {pr.title}'.strip(), pr.url)}{suffix}")
+    return out
+
+
 def render_markdown(a: Assessment) -> str:
     rep = a.reproduction
     out: list[str] = [f"# {HEADLINES[a.verdict]}", ""]
@@ -191,8 +217,10 @@ def render_markdown(a: Assessment) -> str:
         facts.append(f"- Fixing commit: `{_cell(rep.fixing_commit)}`")
     if rep.fixed_in_release:
         facts.append(f"- Fixed in release: `{_cell(rep.fixed_in_release)}`")
+    facts += _issue_state_facts(a)
     if facts:
         out += [""] + facts
+    out += _open_prs_section(a)
 
     if rep.repro_test_code:
         out += ["", f"## Reproduction test (`{_cell(rep.repro_test_path or 'test.py')}`)", ""]

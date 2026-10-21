@@ -1654,6 +1654,7 @@ async def attempt_fix(
     async def say(message: str) -> None:
         await emit_progress(progress, "fix", message)
 
+    await emit_progress(progress, "fix", assessment.open_pr_warning())  # someone may be on it
     real: list[Sandbox] = []
     run = _FixRun(
         assessment=assessment, result=result, settings=settings, llm=llm, usage=usage, say=say,

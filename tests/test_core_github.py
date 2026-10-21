@@ -403,3 +403,112 @@ async def test_target_activity_is_none_when_nothing_can_be_read() -> None:
     respx.get(f"{API}/repos/acme/widgets/branches/8.4.x").respond(200, text="not json")
     respx.get(f"{API}/repos/acme/widgets/releases/latest").respond(200, text="<html>")
     assert await github.target_activity("acme/widgets", "8.4.x") is None
+
+
+# -- where the issue stands -----------------------------------------------------------------------
+
+
+def _pr_node(number: int, state: str, *, merged: bool = False, repo: str = "acme/widgets",
+             draft: bool = False) -> dict:
+    return {"__typename": "PullRequest", "number": number,
+            "url": f"https://github.com/{repo}/pull/{number}", "title": f"PR {number}",
+            "state": state, "merged": merged,
+            "mergedAt": "2026-10-17T16:11:24Z" if merged else None, "isDraft": draft,
+            "repository": {"nameWithOwner": repo}}
+
+
+@respx.mock
+async def test_issue_status_through_graphql_reads_the_sidebar_and_the_closer(issue: Issue) -> None:
+    route = respx.post(f"{API}/graphql").respond(json={"data": {"repository": {"issue": {
+        "state": "CLOSED", "stateReason": "COMPLETED", "closedAt": "2026-10-17T16:11:26Z",
+        "closedByPullRequestsReferences": {"nodes": [
+            _pr_node(643, "MERGED", merged=True), _pr_node(650, "CLOSED"),
+        ]},
+        "timelineItems": {"nodes": [
+            {"__typename": "CrossReferencedEvent", "willCloseTarget": False,
+             "source": _pr_node(642, "MERGED", merged=True)},
+            {"__typename": "CrossReferencedEvent", "willCloseTarget": False,
+             "source": _pr_node(12, "OPEN", repo="someone/else")},
+            {"__typename": "CrossReferencedEvent", "willCloseTarget": False,
+             "source": {"__typename": "Issue"}},
+            {"__typename": "ConnectedEvent", "subject": _pr_node(660, "OPEN", draft=True)},
+            {"__typename": "ClosedEvent", "closer": {"__typename": "PullRequest",
+                                                     "number": 643, "url": "https://x/643"}},
+        ]},
+    }}}})
+    async with GitHubClient("tok") as gh:
+        status = await gh.issue_status(issue)
+    assert status is not None and status.source == "graphql"
+    assert (status.state, status.state_reason) == ("closed", "completed")
+    assert status.closed_at is not None and status.closed_at.day == 17
+    assert (status.closed_by, status.closed_by_url) == ("#643", "https://x/643")
+    assert [(p.number, p.state, p.closes, p.draft) for p in status.linked_prs] == [
+        (643, "merged", True, False), (660, "open", True, True), (642, "merged", False, False),
+    ]  # closing ones first; closed-unmerged and other projects' pull requests left out
+    assert [p.number for p in status.open_prs] == [660]
+    body = route.calls[0].request.read().decode()
+    assert '"number": 42' in body or '"number":42' in body
+
+
+@respx.mock
+async def test_issue_status_falls_back_to_rest_when_graphql_fails(issue: Issue) -> None:
+    respx.post(f"{API}/graphql").respond(json={"errors": [{"message": "nope"}]})
+    respx.get(f"{API}/repos/acme/widgets/issues/42").respond(json={
+        "state": "open", "state_reason": "reopened", "closed_at": None})
+    respx.get(f"{API}/repos/acme/widgets/issues/42/timeline").respond(json=[
+        {"event": "cross-referenced", "source": {"issue": {
+            "number": 7, "html_url": "https://github.com/acme/widgets/pull/7", "title": "Fixes #42",
+            "body": "", "state": "closed", "pull_request": {"merged_at": "2026-10-01T00:00:00Z"},
+            "repository": {"full_name": "acme/widgets"}}}},
+        {"event": "cross-referenced", "source": {"issue": {
+            "number": 8, "html_url": "https://github.com/acme/widgets/pull/8", "title": "wip",
+            "state": "open", "draft": True, "pull_request": {"merged_at": None},
+            "repository": {"full_name": "acme/widgets"}}}},
+        {"event": "cross-referenced", "source": {"issue": {
+            "number": 9, "html_url": "https://github.com/acme/widgets/issues/9", "title": "dup",
+            "state": "open", "repository": {"full_name": "acme/widgets"}}}},
+        {"event": "closed", "commit_id": "abc123"},
+    ])
+    async with GitHubClient("tok") as gh:
+        status = await gh.issue_status(issue)
+    assert status is not None and status.source == "rest"
+    assert (status.state, status.state_reason, status.closed_by) == ("open", "reopened", None)
+    assert [(p.number, p.state, p.closes, p.draft) for p in status.linked_prs] == [
+        (7, "merged", True, False), (8, "open", False, True),
+    ]
+
+
+@respx.mock
+async def test_issue_status_without_a_token_uses_rest_only(issue: Issue) -> None:
+    graphql = respx.post(f"{API}/graphql").respond(json={})
+    respx.get(f"{API}/repos/acme/widgets/issues/42").respond(json={
+        "state": "closed", "state_reason": "completed", "closed_at": "2026-10-02T00:00:00Z"})
+    respx.get(f"{API}/repos/acme/widgets/issues/42/timeline").respond(json=[
+        {"event": "closed", "commit_id": "abc123def4567890"}])
+    async with GitHubClient() as gh:
+        status = await gh.issue_status(issue)
+    assert not graphql.called
+    assert status is not None and status.closed_by == "abc123def4567890"
+    assert status.closed_by_url == "https://github.com/acme/widgets/commit/abc123def4567890"
+
+
+@respx.mock
+async def test_issue_status_is_none_when_nothing_can_be_read(issue: Issue) -> None:
+    respx.post(f"{API}/graphql").respond(502)
+    respx.get(f"{API}/repos/acme/widgets/issues/42").respond(500)
+    respx.get(f"{API}/repos/acme/widgets/issues/42/timeline").respond(500)
+    async with GitHubClient("tok") as gh:
+        assert await gh.issue_status(issue) is None
+
+
+@respx.mock
+async def test_fetch_issue_reads_why_and_when_it_was_closed() -> None:
+    respx.get(f"{API}/repos/acme/widgets/issues/42").respond(json={
+        "title": "t", "state": "closed", "state_reason": "not_planned",
+        "closed_at": "2026-10-02T00:00:00Z"})
+    respx.get(f"{API}/repos/acme/widgets/issues/42/comments").respond(json=[])
+    respx.get(f"{API}/repos/acme/widgets").respond(json={})
+    async with GitHubClient() as gh:
+        got = await gh.fetch_issue("https://github.com/acme/widgets/issues/42")
+    assert (got.state, got.state_reason) == ("closed", "not_planned")
+    assert got.closed_at is not None and got.closed_at.month == 10
