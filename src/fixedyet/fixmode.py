@@ -32,6 +32,7 @@ import ast
 import base64
 import binascii
 import builtins
+import configparser
 import difflib
 import keyword
 import logging
@@ -39,6 +40,7 @@ import math
 import re
 import shlex
 import time
+import tomllib
 import warnings
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -189,18 +191,114 @@ def source_files(tracked: Iterable[str]) -> list[str]:
     return [p for p in tracked if path_problem(p, known) is None]
 
 
-def regression_test_path(tracked: Iterable[str], issue_number: int) -> str | None:
-    """``<test dir>/test_issue_<n>.py`` in the repository's top-level tests/, test/ or testing/
-    directory, or None when it has none (the pull request then carries no test)."""
+PYTEST_CONFIGS = ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")  # pytest's own order
+ISSUE_TEST_DIRS = ("issues", "test_issues", "regression", "regressions", "regression_tests",
+                   "test_regressions")
+
+
+def pytest_testpaths(configs: dict[str, str]) -> list[str]:
+    """The ``testpaths`` of the project's pytest configuration (``{file name: text}`` of the
+    top-level config files), from the first file that sets them, in pytest's order of lookup.
+    Text only: TOML and INI are parsed, nothing is run. Globs are left out."""
+    found: list[str] = []
+    for name in PYTEST_CONFIGS:
+        text = configs.get(name)
+        if not text:
+            continue
+        value: object = None
+        try:
+            if name == "pyproject.toml":
+                tool = tomllib.loads(text).get("tool", {})
+                pytest_table = tool.get("pytest", {}) if isinstance(tool, dict) else {}
+                if isinstance(pytest_table, dict):
+                    options = pytest_table.get("ini_options", {})
+                    value = (options.get("testpaths") if isinstance(options, dict) else None) \
+                        or pytest_table.get("testpaths")
+            else:
+                parser = configparser.ConfigParser(interpolation=None, strict=False)
+                parser.read_string(text)
+                section = "tool:pytest" if name == "setup.cfg" else "pytest"
+                if parser.has_option(section, "testpaths"):
+                    value = parser.get(section, "testpaths")
+        except (tomllib.TOMLDecodeError, configparser.Error, UnicodeError, AttributeError):
+            continue
+        if isinstance(value, str):
+            value = value.split()
+        if isinstance(value, list):
+            found = [str(v).strip().strip("/") for v in value if isinstance(v, str)]
+            found = [v for v in found if v and v != "." and not any(c in v for c in "*?[")
+                     and ".." not in v.split("/")]
+            if found:
+                return found
+    return found
+
+
+def _is_test_module(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+def test_directory(tracked: Iterable[str], testpaths: Sequence[str] = ()) -> str | None:
+    """Where the project keeps its tests: a directory ("" for the repository root), or None
+    when it has no tests at all.
+
+    The test modules (``test_*.py``, ``*_test.py``) are looked for under ``testpaths`` when the
+    pytest configuration sets them. Of the directories that hold test modules, the one with the
+    most of them in its tree wins (the shallowest on a tie), so ``tests/`` beats ``tests/unit/``
+    and a package that keeps its tests next to its code (``cogapp/test_cogapp.py``) gets its own
+    directory. A subdirectory for issues or regressions (``test/issues/``) is used when it holds
+    test modules too, since that is where such a project wants a test for one issue.
+    """
+    files = [p for p in tracked if p.endswith(".py")]
+    tests = [p for p in files if _is_test_module(p)]
+    roots = [r for r in testpaths if r]
+    if roots:
+        under = [p for p in tests if any(p == r or p.startswith(r + "/") for r in roots)]
+        if under:
+            tests = under
+        else:
+            existing = [r for r in roots if any(p.startswith(r + "/") for p in files)]
+            if existing:
+                return existing[0]
+    if not tests:
+        tops = {p.split("/", 1)[0] for p in files if "/" in p}
+        return next((d for d in TEST_DIRS if d in tops), None)
+    direct: dict[str, int] = {}
+    tree: dict[str, int] = {}
+    for path in tests:
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        direct[parent] = direct.get(parent, 0) + 1
+        parts = parent.split("/") if parent else []
+        for depth in range(1, len(parts) + 1):
+            ancestor = "/".join(parts[:depth])
+            tree[ancestor] = tree.get(ancestor, 0) + 1
+
+    def score(folder: str) -> tuple[int, int, str]:
+        size = direct[folder] if folder == "" else tree.get(folder, 0)  # the root: its own only
+        return (-size, folder.count("/") if folder else -1, folder)
+
+    best = min(direct, key=score)
+    for name in ISSUE_TEST_DIRS:
+        child = f"{best}/{name}" if best else name
+        if direct.get(child):
+            return child
+    return best
+
+
+def regression_test_path(
+    tracked: Iterable[str], issue_number: int, testpaths: Sequence[str] = ()
+) -> str | None:
+    """``<test directory>/test_issue_<n>.py`` (see `test_directory`), or None when the project
+    has no tests anywhere (the pull request then carries no test)."""
     files = list(tracked)
-    tops = {p.split("/", 1)[0] for p in files if "/" in p and p.endswith(".py")}
-    folder = next((d for d in TEST_DIRS if d in tops), None)
+    folder = test_directory(files, testpaths)
     if folder is None:
         return None
     known = set(files)
-    name, n = f"{folder}/test_issue_{int(issue_number)}.py", 2
+    prefix = f"{folder}/" if folder else ""
+    name, n = f"{prefix}test_issue_{int(issue_number)}.py", 2
     while name in known:
-        name, n = f"{folder}/test_issue_{int(issue_number)}_{n}.py", n + 1
+        name, n = f"{prefix}test_issue_{int(issue_number)}_{n}.py", n + 1
     return name
 
 
@@ -243,6 +341,7 @@ def survey_script(
         'echo "__HEAD__=$(git rev-parse HEAD)"',
         f"git -c core.quotepath=off ls-files | head -n {MAX_LISTING} "
         "| awk '{ print \"__LS__=\" $0 }'",
+        *(_print_file(name) for name in PYTEST_CONFIGS),  # where the project keeps its tests
     ]
     pattern = definition_pattern(names)
     if pattern:
@@ -272,6 +371,7 @@ class Survey:
     definitions: list[tuple[str, int, str]] = field(default_factory=list)  # (path, line, text)
     counts: dict[str, dict[str, int]] = field(default_factory=dict)  # term -> {path: mentions}
     quoted: dict[str, dict[str, int]] = field(default_factory=dict)  # term -> {path: as "term"}
+    configs: dict[str, str] = field(default_factory=dict)  # the pytest config files there are
     failed: str | None = None
 
 
@@ -294,10 +394,25 @@ def parse_survey(result: ExecResult) -> Survey:
         return found
 
     failed = _MARK["SETUP_FAILED"].findall(out)
+    configs = {k: v for k, v in parse_read(result).items() if k in PYTEST_CONFIGS}
     return Survey(
         head=heads[-1].strip() if heads else None, files=files, definitions=definitions,
-        counts=tally("CNT"), quoted=tally("QCNT"),
+        counts=tally("CNT"), quoted=tally("QCNT"), configs=configs,
         failed=failed[-1] if failed else (None if files else "listing"),
+    )
+
+
+def _print_file(path: str) -> str:
+    """Shell that prints ``path`` as base64 after a ``__FILE__=<path>`` line, or
+    ``__MISSING__=<path>`` when it is missing or very large (`parse_read` reads both)."""
+    if not _PATH_RE.match(path) or ".." in path.split("/"):
+        raise EnvBuildError(f"invalid path {path!r}")
+    q = shlex.quote(path)
+    return (
+        f'if [ -f {q} ] && [ "$(wc -c < {q})" -le {MAX_READ_BYTES} ]; then '
+        f"echo {shlex.quote('__FILE__=' + path)}; "
+        f"echo \"__B64__=$(base64 < {q} | tr -d '\\n')\"; "
+        f"else echo {shlex.quote('__MISSING__=' + path)}; fi"
     )
 
 
@@ -305,16 +420,7 @@ def read_script(paths: Sequence[str]) -> str:
     """Print each file as base64 after a ``__FILE__=<path>`` line; a missing or very large file
     gets ``__MISSING__=<path>`` instead."""
     lines = ["set -u", f"cd {REPO_DIR} || {{ echo __SETUP_FAILED__=cd; exit 20; }}"]
-    for path in paths:
-        if not _PATH_RE.match(path) or ".." in path.split("/"):
-            raise EnvBuildError(f"invalid path {path!r}")
-        q = shlex.quote(path)
-        lines.append(
-            f'if [ -f {q} ] && [ "$(wc -c < {q})" -le {MAX_READ_BYTES} ]; then '
-            f"echo {shlex.quote('__FILE__=' + path)}; "
-            f"echo \"__B64__=$(base64 < {q} | tr -d '\\n')\"; "
-            f"else echo {shlex.quote('__MISSING__=' + path)}; fi"
-        )
+    lines += [_print_file(path) for path in paths]
     lines += ["exit 0", ""]
     return "\n".join(lines)
 
@@ -1516,7 +1622,8 @@ class _FixRun:
             _conclude(result, FixStatus.ERROR, "the repository could not be listed in the sandbox")
             return
         tracked = set(survey.files)
-        result.regression_test_path = regression_test_path(survey.files, number)
+        testpaths = pytest_testpaths(survey.configs)
+        result.regression_test_path = regression_test_path(survey.files, number, testpaths)
         self.test_path = result.regression_test_path or rep.repro_test_path
         self.test_code = rep.repro_test_code
         result.repro_test_path = self.test_path

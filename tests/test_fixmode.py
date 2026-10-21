@@ -107,14 +107,72 @@ def test_paths_are_normalised_from_what_models_write() -> None:
         (FILES, "tests/test_issue_42.py"),
         ({"test/test_a.py": "", "pkg/a.py": ""}, "test/test_issue_42.py"),
         ({"testing/test_a.py": "", "pkg/a.py": ""}, "testing/test_issue_42.py"),
-        ({"pkg/a.py": "", "pkg/tests/test_a.py": ""}, None),  # only top-level directories count
+        ({"pkg/a.py": "", "pkg/tests/test_a.py": ""}, "pkg/tests/test_issue_42.py"),
         ({"tests/test_issue_42.py": "", "pkg/a.py": ""}, "tests/test_issue_42_2.py"),
+        # nedbat/cog keeps its tests inside the package
+        ({"cogapp/__init__.py": "", "cogapp/cogapp.py": "", "cogapp/test_cogapp.py": "",
+          "cogapp/test_makefiles.py": "", "docs/conf.py": ""}, "cogapp/test_issue_42.py"),
+        # the whole tree counts: tests/ beats tests/unit/, and a stray root test loses
+        ({"test_setup.py": "", "tests/test_a.py": "", "tests/unit/test_b.py": "",
+          "tests/unit/test_c.py": "", "pkg/a.py": ""}, "tests/test_issue_42.py"),
+        # a directory for issue tests is where a test for one issue goes (pySHACL, rdflib)
+        ({"test/test_a.py": "", "test/issues/test_008.py": "", "pkg/a.py": ""},
+         "test/issues/test_issue_42.py"),
+        ({"test/test_a.py": "", "test/test_issues/test_issue1003.py": "", "pkg/a.py": ""},
+         "test/test_issues/test_issue_42.py"),
+        ({"src/pkg/a.py": "", "src/pkg/a_test.py": ""}, "src/pkg/test_issue_42.py"),
+        ({"test_mod.py": "", "mod.py": ""}, "test_issue_42.py"),  # only a root test module
+        ({"tests/conftest.py": "", "pkg/a.py": ""}, "tests/test_issue_42.py"),  # no tests yet
+        ({"pkg/a.py": "", "setup.py": ""}, None),  # no tests anywhere
     ],
 )
-def test_the_regression_test_goes_into_the_existing_test_directory(
+def test_the_regression_test_goes_where_the_project_keeps_its_tests(
     files: dict[str, str], expected: str | None
 ) -> None:
     assert fm.regression_test_path(files, 42) == expected
+
+
+def test_testpaths_in_the_pytest_configuration_decide_the_directory() -> None:
+    files = ["pkg/a.py", "pkg/test_inline.py", "pkg/test_more.py", "qa/test_x.py"]
+    assert fm.regression_test_path(files, 7) == "pkg/test_issue_7.py"
+    assert fm.regression_test_path(files, 7, ["qa"]) == "qa/test_issue_7.py"
+    assert fm.regression_test_path(["pkg/a.py", "spec/helpers.py"], 7, ["spec"]) == \
+        "spec/test_issue_7.py"
+
+
+@pytest.mark.parametrize(
+    ("configs", "expected"),
+    [
+        ({"pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["test", "docs"]\n'},
+         ["test", "docs"]),
+        ({"pyproject.toml": '[tool.pytest]\ntestpaths = ["tests/"]\n'}, ["tests"]),
+        ({"pytest.ini": "[pytest]\ntestpaths = tests\n    integration\n"},
+         ["tests", "integration"]),
+        ({"setup.cfg": "[tool:pytest]\ntestpaths = t\n", "tox.ini": "[tox]\n"}, ["t"]),
+        ({"pytest.ini": "[pytest]\naddopts = -q\n",
+          "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = "spec"\n'}, ["spec"]),
+        ({"pyproject.toml": "[tool.pytest.ini_options\nbroken"}, []),
+        ({"pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["*/tests", "../x"]\n'},
+         []),
+        ({}, []),
+    ],
+)
+def test_testpaths_are_read_from_the_config_files(
+    configs: dict[str, str], expected: list[str]
+) -> None:
+    assert fm.pytest_testpaths(configs) == expected
+
+
+def test_the_survey_reads_the_pytest_config_files() -> None:
+    script = fm.survey_script(["parse"])
+    for name in fm.PYTEST_CONFIGS:
+        assert f"echo __FILE__={name};" in script
+    toml = '[tool.pytest.ini_options]\ntestpaths = ["test"]\n'
+    out = (f"__HEAD__={'a' * 40}\n__LS__=pyproject.toml\n__LS__=test/test_a.py\n"
+           f"__FILE__=pyproject.toml\n__B64__={b64(toml)}\n__MISSING__=pytest.ini\n")
+    survey = fm.parse_survey(ExecResult(exit_code=0, stdout=out))
+    assert survey.configs == {"pyproject.toml": toml}
+    assert survey.files == ["pyproject.toml", "test/test_a.py"]
 
 
 # -- the model's answer ------------------------------------------------------------------------

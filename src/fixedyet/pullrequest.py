@@ -777,8 +777,7 @@ def fix_pr_body(result: FixResult, *, login: str) -> str:
     else:
         lines.append(
             "The test was written by FixedYet (by the model) from the issue. The repository has "
-            "no `tests/`, `test/` or `testing/` directory, so it is **not** part of this pull "
-            "request; it is below for reviewers."
+            "no tests, so it is **not** part of this pull request; it is below for reviewers."
         )
     if result.repro_test_code:
         lines += [

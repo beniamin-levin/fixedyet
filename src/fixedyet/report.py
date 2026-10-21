@@ -385,8 +385,7 @@ def fix_section(r: FixResult, level: int = 2) -> list[str]:
     if r.regression_test_path:
         out.append(f"**Regression test in the pull request:** `{_cell(r.regression_test_path)}`  ")
     elif r.status is FixStatus.VERIFIED:
-        out.append("**Regression test in the pull request:** none (no tests/, test/ or testing/ "
-                   "directory)  ")
+        out.append("**Regression test in the pull request:** none (the repository has no tests)  ")
     out[-1] = out[-1].rstrip()
     if r.summary:
         out += ["", f"**Change:** {_line(r.summary)}"]
