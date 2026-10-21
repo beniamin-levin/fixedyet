@@ -207,13 +207,30 @@ I read the 22 reproduced tests (12 in A, 10 in B) against their issues and the s
 - pylint-7277 (A) calls `modify_sys_path()` directly instead of going through `runpy` as the issue does. It exercises the line the issue points at. B follows the issue.
 - pytest-10051 (A, B), pytest-7571 (A, B) and requests-2931 (A) are the issue's own snippet with an assertion added, so for those the agent mostly had to transcribe.
 
-### Live check on open issues
+### Live check on real issues
 
-Not done. The contamination check below is still open: no live run on an open issue was part of this evaluation.
+On 21 October 2026, ten real issues from ten pure-Python projects were run on the live demo (Docker backend on the 1 GB Oracle VM, Nemotron 3 Super). All ten were opened between July and October 2026. They were picked at random from recent bug reports, not from SWE-bench, and nobody had marked a fix for FixedYet to find. Each run took 1.5 to 5 minutes, and the ten together cost about $0.19 in model spend. The "Correct?" column is a judgement made afterwards against the issue thread and the project's history, by an AI (Claude), not by a person.
+
+| Issue | Opened | Verdict | Correct? |
+|---|---|---|---|
+| [pallets/werkzeug#3312](https://github.com/pallets/werkzeug/issues/3312) | 2026-09-29 | `fixed_on_main` | yes, closed as fixed |
+| [pypa/packaging#1315](https://github.com/pypa/packaging/issues/1315) | 2026-07-06 | `fixed_on_main` | yes, fixing commit `0a85b41` found |
+| [PyCQA/isort#2723](https://github.com/PyCQA/isort/issues/2723) | 2026-10-13 | `fixed_on_main` | yes, fixing commit `986b53f` found |
+| [r1chardj0n3s/parse#262](https://github.com/r1chardj0n3s/parse/issues/262) | 2026-10-20 | `fixed_on_main` | yes, fixing commit `4f76a3e` found |
+| [marshmallow-code/marshmallow#3072](https://github.com/marshmallow-code/marshmallow/issues/3072) | 2026-10-11 | `open_bug` | yes, still open (an unmerged PR exists) |
+| [dateutil/dateutil#1588](https://github.com/dateutil/dateutil/issues/1588) | 2026-09-30 | `open_bug` | yes, still open (an unmerged PR exists) |
+| [pytest-dev/pytest-mock#639](https://github.com/pytest-dev/pytest-mock/issues/639) | 2026-10-17 | `open_bug` | **no**: fixed the day it was opened; the model's test failed on both sides |
+| [pyparsing/pyparsing#693](https://github.com/pyparsing/pyparsing/issues/693) | 2026-10-13 | `open_bug` | **no as evidence**: the issue is open, but the test compares a `ParseResults` with a list, which is never equal, so the verdict rests on a broken test |
+| [theskumar/python-dotenv#697](https://github.com/theskumar/python-dotenv/issues/697) | 2026-09-08 | `unsupported` at first; `fixed_on_main` after the fix below | yes after the fix: fixing commit `e0310e5`, released in 1.2.4 |
+| [pallets/jinja#2244](https://github.com/pallets/jinja/issues/2244) | 2026-08-27 | `unsupported` at first; `open_bug` after the fix below | yes after the fix: still open (an unmerged PR exists) |
+
+**First pass: 6 correct, 2 wrong, 2 without a verdict.** The two `unsupported` runs were environment failures, not model failures. python-dotenv's tests need its `cli` extra (click), which was never installed. jinja ships a requirements file for Python 3.7 that downgraded `trio` below what Python 3.13 can import. Both were fixed in general terms (`6a5d38d`, `a952ec1`: a project's own extras, other Pythons' requirements files skipped, a conftest that cannot load repaired from the project's own declared requirements), and both issues were then rerun on the demo. **After those fixes: 8 correct and 2 wrong out of 10.** Both wrong verdicts are `open_bug` from a wrong model-written test, the same failure mode as the SWE-bench misses.
+
+Two of the open bugs went on to [fix mode](../README.md#fix-mode-open-bugs-to-verified-draft-prs), and jinja#2244 was verified on the demo server. One fixed-on-main report went on to a backport: pydantic#13991 was backported to `v2.14-fixes` and opened upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043).
 
 ### Contamination caveat
 
-Nemotron may have seen these public issues, their fixing pull requests and SWE-bench itself during training. Several of the reproduced tests are the issue's own snippet (pytest-10051, pytest-7571), which any model can transcribe whether or not it remembers the fix. These 22 reproductions therefore partly measure recall and snippet-copying, not the ability to reproduce a bug nobody has fixed yet. The live runs on open issues, which have no public fix, are the check against that, and they are not done.
+Nemotron may have seen these public issues, their fixing pull requests and SWE-bench itself during training. Several of the reproduced tests are the issue's own snippet (pytest-10051, pytest-7571), which any model can transcribe whether or not it remembers the fix. These 22 reproductions therefore partly measure recall and snippet-copying, not the ability to reproduce a bug nobody has fixed yet. The live check on real issues above is the counterweight: ten recent issues, none from SWE-bench, gave 8 correct verdicts out of 10 after the environment fixes, with the same failure mode (a wrong test, read as an open bug).
 
 ### Development runs
 
