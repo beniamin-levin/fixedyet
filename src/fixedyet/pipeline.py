@@ -16,7 +16,7 @@ import contextlib
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -159,11 +159,15 @@ _runs_in_flight = 0  # runs of this process that have started and not yet finish
 
 
 @contextlib.asynccontextmanager
-async def _run_scope(ctx: _Context) -> AsyncIterator[None]:
+async def run_scope(
+    settings: Settings, sandbox_of: Callable[[], Sandbox | None]
+) -> AsyncIterator[None]:
     """Count the run as in flight. When the last one ends, prune old checkpoint images.
 
     Waiting for the last run matters for evaluations, which run several instances at once: an
-    image a sibling run is still going to use must not be pruned from under it.
+    image a sibling run is still going to use must not be pruned from under it. ``sandbox_of`` is
+    asked at the end, because a run creates its sandbox only when it first needs one. Backports
+    use the same scope, so a backport and a reproduction never prune each other's images.
     """
     global _runs_in_flight
     _runs_in_flight += 1
@@ -172,25 +176,34 @@ async def _run_scope(ctx: _Context) -> AsyncIterator[None]:
     finally:
         _runs_in_flight -= 1
         if _runs_in_flight == 0:
-            await _prune_checkpoints(ctx)
+            await prune_checkpoints(settings, sandbox_of())
 
 
-async def _prune_checkpoints(ctx: _Context) -> None:
+def _run_scope(ctx: _Context) -> contextlib.AbstractAsyncContextManager[None]:
+    return run_scope(ctx.settings, lambda: ctx.metered.inner if ctx.metered else ctx.sandbox)
+
+
+async def prune_checkpoints(settings: Settings, sandbox: Sandbox | None) -> None:
     """Keep the newest `keep_checkpoints` local images (Docker backend only).
 
     Other backends have no `prune_checkpoints`. A failure here is logged and never fails a run.
     """
-    sandbox = ctx.metered.inner if ctx.metered else ctx.sandbox
     prune = getattr(sandbox, "prune_checkpoints", None)
     if prune is None:
         return
     try:
-        result = await prune(ctx.settings.keep_checkpoints)
+        result = await prune(settings.keep_checkpoints)
     except Exception:  # housekeeping: whatever went wrong, the run's result stands
         log.warning("could not prune checkpoint images", exc_info=True)
         return
     if result.removed:
         log.info("pruned %d old checkpoint(s), kept %d", len(result.removed), len(result.kept))
+
+
+async def _prune_checkpoints(ctx: _Context) -> None:
+    await prune_checkpoints(
+        ctx.settings, ctx.metered.inner if ctx.metered else ctx.sandbox
+    )
 
 
 def _clean_python_version(value: str | None) -> str | None:

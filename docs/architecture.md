@@ -157,6 +157,7 @@ Design decisions:
 - **Cheap gates first.** The suites (up to 900 s each) run after the conflict and reproduction gates, from forks of the untouched baseline image and of the cherry-picked image, so the baseline is still the branch as it was.
 - **Conservative about "verified".** A suite that did not finish, an unreadable summary, a failure count that rose without readable test ids, or a reproduction test that does not flip all stop short of `verified`.
 - **No model.** The model is not called after the reproduction; conflicts are never resolved by it.
+- **Housekeeping.** `backport()` runs inside `pipeline.run_scope`, the same in-flight counter the reproduction uses, so the two share one rule for pruning old Docker checkpoint images and never prune each other's.
 
 Pull requests (`pullrequest.py`) are a separate step that the CLI takes only with `--open-pr`, only for `verified`:
 

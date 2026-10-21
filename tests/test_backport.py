@@ -648,7 +648,9 @@ async def test_a_branch_listing_failure_is_an_error_result() -> None:
     async def broken(repo: str) -> dict[str, str]:
         raise EnvBuildError("git ls-remote failed for acme/widgets: no route to host")
 
-    result = await bp.backport(assessment(), sandbox=ScriptedSandbox(), list_branches=broken)
+    result = await bp.backport(
+        assessment(), sandbox=ScriptedSandbox(), list_branches=broken, settings=Settings()
+    )
     assert result.status is BackportStatus.ERROR and "no route to host" in result.reason
 
 
@@ -757,3 +759,61 @@ def test_result_models_have_the_documented_statuses() -> None:
     assert {s.value for s in BackportStatus} == {
         "verified", "conflicts", "regression", "already_fixed_on_branch", "not_applicable", "error",
     }
+
+
+# -- housekeeping --------------------------------------------------------------------------------
+
+
+class PruningSandbox(ScriptedSandbox):
+    """A scripted sandbox with the Docker backend's optional `prune_checkpoints`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pruned: list[int] = []
+
+    async def prune_checkpoints(self, keep: int):
+        from types import SimpleNamespace
+
+        self.pruned.append(keep)
+        return SimpleNamespace(removed=["old"], kept=["new"])
+
+
+async def test_old_checkpoint_images_are_pruned_when_a_backport_ends() -> None:
+    sandbox = PruningSandbox()
+    result = await bp.backport(
+        assessment(), sandbox=sandbox, list_branches=lister, settings=Settings(keep_checkpoints=3)
+    )
+    assert result.status is BackportStatus.VERIFIED and sandbox.pruned == [3]
+
+
+async def test_a_backport_that_stops_early_still_prunes_what_it_built() -> None:
+    sandbox = PruningSandbox()
+    sandbox.world = World(pick=pick_conflict())
+    result = await bp.backport(
+        assessment(), sandbox=sandbox, list_branches=lister, settings=Settings()
+    )
+    assert result.status is BackportStatus.CONFLICTS and sandbox.pruned == [6]
+
+
+async def test_a_backport_that_never_needed_a_sandbox_does_not_create_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(_: object) -> object:
+        raise AssertionError("no sandbox should be created for a not_applicable result")
+
+    monkeypatch.setattr(bp, "get_sandbox", forbidden)
+    result = await bp.backport(
+        assessment(commit=None), list_branches=lister, settings=Settings()
+    )
+    assert result.status is BackportStatus.NOT_APPLICABLE
+
+
+async def test_a_pruning_failure_never_changes_the_result() -> None:
+    class Broken(PruningSandbox):
+        async def prune_checkpoints(self, keep: int):
+            raise RuntimeError("docker is gone")
+
+    result = await bp.backport(
+        assessment(), sandbox=Broken(), list_branches=lister, settings=Settings()
+    )
+    assert result.status is BackportStatus.VERIFIED

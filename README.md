@@ -104,7 +104,7 @@ fixedyet gc --keep 2      # keep two
 fixedyet gc --dry-run     # list what would be removed, remove nothing
 ```
 
-A report's checkpoint image IDs stop resolving once pruning has removed them. Raise `FIXEDYET_KEEP_CHECKPOINTS` if you want to keep more of them.
+A backport makes two checkpoints (the branch as it was, and with the fix applied) and prunes the same way when it ends. A report's checkpoint image IDs stop resolving once pruning has removed them. Raise `FIXEDYET_KEEP_CHECKPOINTS` if you want to keep more of them.
 
 Useful options:
 

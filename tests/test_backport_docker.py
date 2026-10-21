@@ -19,6 +19,7 @@ import pytest_asyncio
 
 from fixedyet import envbuild
 from fixedyet.backport import backport, parse_pick, parse_suite, pick_script, suite_script
+from fixedyet.config import Settings
 from fixedyet.models import (
     Assessment,
     BackportStatus,
@@ -182,8 +183,10 @@ async def run_backport(world, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(envbuild, "build_baseline", prebuilt)
 
     async def go(commit_key: str, repro: str = REPRO_CODE):
+        # Pruning would delete the module-scoped repository image the next test needs.
         return await backport(
-            assessment_for(marks[commit_key], repro), sandbox=sandbox, list_branches=branches
+            assessment_for(marks[commit_key], repro), sandbox=sandbox, list_branches=branches,
+            settings=Settings(keep_checkpoints=1000),
         )
 
     return go

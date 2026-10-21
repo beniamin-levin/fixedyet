@@ -52,7 +52,7 @@ from fixedyet.models import (
     Usage,
     Verdict,
 )
-from fixedyet.pipeline import MeteredSandbox
+from fixedyet.pipeline import MeteredSandbox, run_scope
 from fixedyet.sandbox import get_sandbox
 from fixedyet.sandbox.base import Sandbox, SandboxError
 
@@ -453,13 +453,17 @@ async def backport(
     async def say(message: str) -> None:
         await emit_progress(progress, "backport", message)
 
+    settings = settings or get_settings()
+    real: list[Sandbox] = []  # the backend, once something needs one (not_applicable never does)
     try:
-        await _backport(
-            assessment, result, usage, say,
-            target_branch=target_branch, settings=settings, sandbox=sandbox,
-            list_branches=list_branches, python_version=python_version,
-            extra_packages=extra_packages, suite_timeout_s=suite_timeout_s, progress=progress,
-        )
+        async with run_scope(settings, lambda: real[0] if real else None):
+            await _backport(
+                assessment, result, usage, say,
+                target_branch=target_branch, settings=settings, sandbox=sandbox, real=real,
+                list_branches=list_branches, python_version=python_version,
+                extra_packages=extra_packages, suite_timeout_s=suite_timeout_s,
+                progress=progress,
+            )
     except (EnvBuildError, SandboxError) as exc:
         _conclude(result, BackportStatus.ERROR, f"the sandbox run could not be made: {exc}"[:600])
     usage.wall_seconds = round(time.monotonic() - started, 2)
@@ -480,8 +484,9 @@ async def _backport(
     say: Callable[[str], Awaitable[None]],
     *,
     target_branch: str | None,
-    settings: Settings | None,
+    settings: Settings,
     sandbox: Sandbox | None,
+    real: list[Sandbox],
     list_branches: BranchLister | None,
     python_version: str | None,
     extra_packages: Sequence[str],
@@ -554,8 +559,8 @@ async def _backport(
                   f"using {branch}")
 
     # -- the sandbox ------------------------------------------------------------------------
-    settings = settings or get_settings()
-    sb = MeteredSandbox(sandbox or get_sandbox(settings), usage)
+    real.append(sandbox or get_sandbox(settings))
+    sb = MeteredSandbox(real[0], usage)
     test_path, test_code = rep.repro_test_path, rep.repro_test_code
 
     await say(f"Building {branch} at {head[:10]} in the sandbox")
