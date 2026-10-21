@@ -558,8 +558,9 @@ async def _issue_status(ctx: _Context, issue: Issue, verdict: Verdict) -> IssueS
 async def _collect_evidence(ctx: _Context, issue: Issue, verdict: Verdict) -> EvidenceResult:
     if not ctx.with_evidence:
         return EvidenceResult()
-    await ctx.say("evidence", "Looking for duplicates, upstream reports and the fixing change")
+    await ctx.say("evidence", "Looking for similar reports, the fixing change and its release")
     reported = ctx.reproduction.reported_side
+    contract = ctx.contract
     return await gather_evidence(
         issue=issue,
         verdict=verdict,
@@ -567,6 +568,10 @@ async def _collect_evidence(ctx: _Context, issue: Issue, verdict: Verdict) -> Ev
         usage=ctx.llm.usage,
         settings=ctx.settings,
         github=ctx.github,
+        test_code=ctx.reproduction.repro_test_code or "",
+        package=contract.package if contract else None,
+        reported_version=(contract.reported_version if contract else None)
+        or (reported.ref if reported else None),
     )
 
 

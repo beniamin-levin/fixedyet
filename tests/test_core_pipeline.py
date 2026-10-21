@@ -166,7 +166,9 @@ async def test_fixed_on_main(world) -> None:
     assert a.next_actions == ["Close as fixed.", "Link the fix PR."]
     assert a.not_reproduced_reason is None
     kinds = [e.kind for e in a.evidence]
-    assert {"duplicate", "upstream", "log"} <= set(kinds)
+    assert {"upstream", "log"} <= set(kinds)
+    # "#17 same" names nothing of the issue: GitHub's search hit is not evidence
+    assert not any(e.url and e.url.endswith("/issues/17") for e in a.evidence)
     assert a.model == world.settings.model
     assert world.github.closed is False  # an injected client belongs to the caller
 

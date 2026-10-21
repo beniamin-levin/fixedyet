@@ -134,7 +134,10 @@ class Reproduction(BaseModel):
 
 
 class Evidence(BaseModel):
-    kind: Literal["duplicate", "upstream", "changelog", "log"]
+    # duplicate: the thread calls it the same bug; similar: an issue of the same repository that
+    # names the bug's identifiers; related: any other page that does (docs, a forum, another
+    # repository); upstream: the fix (its pull request or commit); changelog: the release notes.
+    kind: Literal["duplicate", "similar", "related", "upstream", "changelog", "log"]
     title: str
     url: str | None = None
     why: str = ""

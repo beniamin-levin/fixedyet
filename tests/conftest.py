@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from fixedyet import envbuild
+from fixedyet import envbuild, evidence
 from fixedyet.config import Settings
 from fixedyet.llm import BudgetExceeded, ChatResult, ToolCall, cost_usd
 from fixedyet.models import ExecResult, Issue, Outcome, SideRun, Usage
@@ -49,6 +49,17 @@ def _repositories_are_python(monkeypatch: pytest.MonkeyPatch) -> None:
         return "Python"
 
     monkeypatch.setattr(web_app, "fetch_repo_language", python)
+
+
+@pytest.fixture(autouse=True)
+def _no_changelog_downloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never fetch a project's changelog from GitHub: `evidence.fetch_text` finds nothing.
+    A test that wants a changelog passes its own ``fetch``."""
+
+    async def nothing(url: str) -> None:
+        return None
+
+    monkeypatch.setattr(evidence, "fetch_text", nothing)
 
 
 @pytest.fixture

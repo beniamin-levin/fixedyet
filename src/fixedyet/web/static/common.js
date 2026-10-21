@@ -458,7 +458,7 @@
   };
 
   const EVIDENCE_KINDS = {
-    duplicate: 'Duplicate', upstream: 'Upstream', changelog: 'Changelog', log: 'Log',
+    duplicate: 'Duplicate', similar: 'Similar issue', related: 'Related', upstream: 'Upstream', changelog: 'Changelog', log: 'Log',
   };
 
   // ---------- report ----------
