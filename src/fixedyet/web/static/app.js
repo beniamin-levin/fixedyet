@@ -239,6 +239,33 @@
     },
   };
 
+  const BACKPORT_STATUS = {
+    backport_verified: {
+      label: 'Verified backport', tone: 'good',
+      blurb: 'The fix from main applies cleanly to the maintenance branch of the reported version. The reproduction test fails there before it and passes after it, and the project\'s own tests show no new failures.',
+    },
+    backport_conflicts: {
+      label: 'Backport conflicts', tone: 'warn',
+      blurb: 'The fix does not apply cleanly to the maintenance branch. The cherry-pick was aborted and nothing was resolved by the model.',
+    },
+    backport_regression: {
+      label: 'Backport breaks tests', tone: 'bad',
+      blurb: 'The fix makes the reproduction test pass but newly breaks other tests of the project on that branch.',
+    },
+    backport_already_fixed_on_branch: {
+      label: 'Already fixed on branch', tone: 'neutral',
+      blurb: 'The reproduction test already passes on the maintenance branch, so there is nothing to backport.',
+    },
+    backport_not_applicable: {
+      label: 'No backport possible', tone: 'muted',
+      blurb: 'There is no maintenance branch for the reported version, or the fixing commit is unknown.',
+    },
+    backport_error: {
+      label: 'Backport not verified', tone: 'muted',
+      blurb: 'A step could not be completed, so the backport is not verified.',
+    },
+  };
+
   const OUTCOME_NOTE = {
     pass: 'The test passes here: the behaviour is as expected.',
     fail: 'The test fails here: the bug is present.',
@@ -378,6 +405,79 @@
     showReport();
   }
 
+  function suiteCell(suite, key) {
+    return suite && suite.ran ? String(suite[key]) : (suite ? 'did not finish' : 'not run');
+  }
+
+  function renderBackport(b, markdown, options = {}) {
+    const body = $('#report-body');
+    body.replaceChildren();
+    const meta = BACKPORT_STATUS[`backport_${b.status}`] || { label: b.status, tone: 'muted', blurb: '' };
+    const head = el('section', { class: `card verdict-card ${meta.tone}` });
+    head.append(el('div', { class: 'verdict-row' },
+      el('span', { class: `badge big ${meta.tone}`, text: meta.label }),
+      b.target_branch ? el('span', { class: 'badge outline', text: `branch ${b.target_branch}` }) : null));
+    head.append(el('h3', { class: 'issue-title', text: b.title || 'Untitled issue' }));
+    head.append(link(b.issue_url, b.issue_url, 'issue-link'));
+    if (meta.blurb) head.append(el('p', { class: 'blurb', text: meta.blurb }));
+    if (b.reason) head.append(el('p', { class: 'muted', text: b.reason }));
+    if (options.banner) head.append(el('div', { class: 'banner', text: options.banner }));
+    body.append(head);
+
+    const facts = [];
+    if (b.reported_version) facts.push(el('div', null, el('dt', { text: 'Reported version' }), el('dd', { text: b.reported_version })));
+    if (b.target_branch) facts.push(el('div', null, el('dt', { text: 'Target branch' }), el('dd', { text: b.target_branch })));
+    if (b.target_branch_head) facts.push(el('div', null, el('dt', { text: 'Branch head' }), el('dd', { text: b.target_branch_head.slice(0, 12) })));
+    if (b.fixing_commit) facts.push(el('div', null, el('dt', { text: 'Fix on main' }), el('dd', { text: b.fixing_commit.slice(0, 12) })));
+    if (facts.length) body.append(section('The backport', el('dl', { class: 'facts' }, facts)));
+
+    if (b.repro_before || b.repro_after) {
+      body.append(section(`Reproduction test on ${b.target_branch || 'the branch'}`, el('div', { class: 'sides' },
+        sideCard('Before the cherry-pick', b.repro_before, false),
+        sideCard('After the cherry-pick', b.repro_after, true))));
+    }
+
+    if (b.suite_before || b.suite_after) {
+      const rows = [['Passed', 'passed'], ['Failed', 'failed'], ['Errors', 'errors'], ['Skipped', 'skipped']]
+        .map(([label, key]) => el('tr', null,
+          el('td', { text: label }), el('td', { text: suiteCell(b.suite_before, key) }), el('td', { text: suiteCell(b.suite_after, key) })));
+      const newly = (b.newly_failing || []).length ? b.newly_failing.join(', ') : (b.suite_after && b.suite_after.ran ? 'none' : '-');
+      rows.push(el('tr', null, el('td', { text: 'Newly failing tests' }), el('td', { text: '-' }), el('td', { text: newly })));
+      body.append(section('The project\'s own test suite', el('div', { class: 'table-scroll md' },
+        el('table', null,
+          el('thead', null, el('tr', null, el('th', { text: '' }), el('th', { text: 'Before the cherry-pick' }), el('th', { text: 'After the cherry-pick' }))),
+          el('tbody', null, rows)))));
+    }
+
+    if ((b.conflicting_files || []).length) {
+      body.append(section('Conflicting files', el('ul', { class: 'plain' }, b.conflicting_files.map((f) => el('li', { text: f })))));
+    }
+    if (b.patch) {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy patch' });
+      copy.addEventListener('click', () => copyText(b.patch, copy));
+      body.append(section('Patch (git format-patch)',
+        el('div', { class: 'code-head' }, el('span', { class: 'code-path', text: 'git cherry-pick -x ' + (b.fixing_commit || '').slice(0, 12) }), copy),
+        codeBlock(b.patch, 'diff')));
+    }
+    if (b.log_excerpt && b.status !== 'verified') {
+      body.append(section('Output of the step that stopped it', codeBlock(b.log_excerpt, 'text')));
+    }
+    const u = b.usage || {};
+    body.append(section('Cost and time', el('dl', { class: 'facts' }, [
+      ['Model cost', formatCost(u.cost_usd)], ['Time', formatDuration(u.wall_seconds || 0)],
+      ['Sandbox runs', String(u.sandbox_runs ?? 0)],
+    ].map(([k, v]) => el('div', null, el('dt', { text: k }), el('dd', { text: v }))))));
+
+    if (markdown) {
+      const copy = el('button', { class: 'btn small', type: 'button', text: 'Copy markdown' });
+      copy.addEventListener('click', () => copyText(markdown, copy));
+      body.append(el('section', { class: 'card' },
+        el('div', { class: 'card-head' }, el('h3', { text: 'Markdown summary' }), copy),
+        el('details', null, el('summary', { text: 'Show the summary as rendered markdown' }), renderMarkdown(markdown))));
+    }
+    showReport();
+  }
+
   function showReport() {
     const report = $('#report');
     report.hidden = false;
@@ -493,7 +593,9 @@
       const hint = $('#form-hint');
       const button = $('#run-button');
       if (s.remaining <= 0) {
-        hint.textContent = 'Today\'s live runs are used up. The example reports below show what a run produces.';
+        hint.textContent = s.daily_limit <= 0
+          ? 'Live runs are paused while the demo has no sandbox backend. The example reports below show what a run produces.'
+          : 'Today\'s live runs are used up. The example reports below show what a run produces.';
         button.disabled = true;
       } else {
         hint.textContent = `${s.remaining} of ${s.daily_limit} live runs left today. One run at a time` +
@@ -512,7 +614,7 @@
     list.replaceChildren();
     $('#examples').hidden = examples.length === 0;
     for (const ex of examples) {
-      const meta = VERDICTS[ex.verdict] || { label: ex.verdict, tone: 'muted' };
+      const meta = VERDICTS[ex.verdict] || BACKPORT_STATUS[ex.verdict] || { label: ex.verdict, tone: 'muted' };
       const tags = el('div', { class: 'tags' },
         el('span', { class: `badge ${meta.tone}`, text: meta.label }),
         el('span', { class: 'badge outline', text: ex.illustrative ? 'Illustrative sample' : 'Real run' }));
@@ -533,6 +635,10 @@
     const banner = ex.illustrative
       ? (ex.note || 'Illustrative sample, written by hand to show the report format. It is not the output of a live run.')
       : (ex.note || 'Saved report from a real run of FixedYet.');
+    if (ex.backport) {
+      renderBackport(ex.backport, ex.markdown, { banner });
+      return;
+    }
     renderReport({ assessment: ex.assessment, markdown: ex.markdown }, { banner });
   }
 

@@ -10,6 +10,7 @@ from fixedyet.models import (
     Outcome,
     Reproduction,
     SideRun,
+    SuiteRun,
     Usage,
     Verdict,
 )
@@ -185,3 +186,122 @@ def test_the_root_cause_says_it_is_the_models_unverified_analysis() -> None:
     assert "## Root cause\n\nparse() slices off the last element.\n\n_Written by the model" in md
     assert "did not check it._" in md
     assert "Written by the model" not in render_markdown(assessment(root_cause=""))
+
+
+# -- verified backport section ------------------------------------------------------------------
+
+FIX_SHA = "d959898db264aaf07e70ad4eafa254286f9a5185"
+
+
+def backport_result(**overrides):
+    from fixedyet.models import BackportResult, BackportStatus
+
+    data = dict(
+        status=BackportStatus.VERIFIED,
+        reason="the reproduction test fails before and passes after",
+        issue_url="https://github.com/acme/widgets/issues/42", title="parse() drops the last item",
+        repo="acme/widgets", reported_version="8.1.3", target_branch="8.1.x",
+        target_branch_head="b" * 40, fixing_commit=FIX_SHA, cherry_picked_commit="c" * 40,
+        commit_message=f"Keep the last item\n\n(cherry picked from commit {FIX_SHA})",
+        patch="From x\n---\ndiff --git a/a.py b/a.py\n+x\n",
+        repro_before=SideRun(ref="8.1.x (before)", outcomes=[Outcome.FAIL, Outcome.FAIL]),
+        repro_after=SideRun(ref="8.1.x (after)", outcomes=[Outcome.PASS, Outcome.PASS]),
+        suite_before=SuiteRun(ran=True, passed=120, failed=1, failing_tests=["t::known"]),
+        suite_after=SuiteRun(ran=True, passed=121, failed=1, failing_tests=["t::known"]),
+        usage=Usage(sandbox_runs=6, wall_seconds=95.0),
+    )
+    data.update(overrides)
+    return BackportResult(**data)
+
+
+def test_a_report_without_a_backport_has_no_backport_section() -> None:
+    assert "Verified backport" not in render_markdown(assessment())
+
+
+def test_a_report_with_a_backport_gets_the_section_before_usage() -> None:
+    md = render_markdown(assessment(backport=backport_result()))
+    headings = [line for line in md.splitlines() if line.startswith("## ")]
+    assert headings.index("## Verified backport") == headings.index("## Usage") - 1
+    assert "**Status:** `verified`" in md and "**Target branch:** `8.1.x`" in md
+    assert f"https://github.com/acme/widgets/commit/{FIX_SHA}" in md
+
+
+def test_the_section_shows_the_test_before_and_after_and_the_suite() -> None:
+    md = render_markdown(assessment(backport=backport_result()))
+    assert "| Reproduction test on `8.1.x` | Run 1 | Run 2 |" in md
+    assert "| Before the cherry-pick | FAIL | FAIL |" in md
+    assert "| After the cherry-pick | PASS | PASS |" in md
+    assert "| Passed | 120 | 121 |" in md and "| Failed | 1 | 1 |" in md
+    assert "| Newly failing tests | - | none |" in md
+    assert "(cherry picked from commit" in md and "diff --git a/a.py b/a.py" in md
+    assert "6 sandbox runs, 95 s wall time, $0.0000 model cost." in md
+
+
+def test_newly_failing_tests_are_listed() -> None:
+    from fixedyet.report import render_backport_markdown
+
+    md = render_backport_markdown(backport_result(
+        status="regression", newly_failing=["tests/test_b.py::test_new"],
+    ))
+    assert "| Newly failing tests | - | `tests/test_b.py::test_new` |" in md
+    assert md.startswith("# Backport not safe: the fix breaks other tests on 8.1.x")
+
+
+def test_every_status_has_its_own_headline() -> None:
+    from fixedyet.models import BackportStatus
+    from fixedyet.report import render_backport_markdown
+
+    heads = {
+        status: render_backport_markdown(backport_result(status=status)).splitlines()[0]
+        for status in BackportStatus
+    }
+    assert len(set(heads.values())) == len(BackportStatus)
+    assert heads[BackportStatus.VERIFIED].startswith("# Verified backport")
+    assert heads[BackportStatus.CONFLICTS] == "# Backport blocked: the fix conflicts with 8.1.x"
+    assert heads[BackportStatus.NOT_APPLICABLE] == "# No backport possible"
+
+
+def test_conflicts_name_the_files_and_say_nothing_was_resolved() -> None:
+    from fixedyet.report import render_backport_markdown
+
+    md = render_backport_markdown(backport_result(
+        status="conflicts", conflicting_files=["CHANGES.rst", "src/a.py"], patch="",
+        repro_after=None, suite_before=None, suite_after=None,
+        log_excerpt="CONFLICT (content): Merge conflict in CHANGES.rst",
+    ))
+    assert "- `CHANGES.rst`" in md and "nothing was resolved" in md
+    assert "CONFLICT (content)" in md and "Patch (" not in md
+
+
+def test_a_suite_that_did_not_finish_is_not_shown_as_zero() -> None:
+    from fixedyet.report import render_backport_markdown
+
+    md = render_backport_markdown(backport_result(
+        status="error", suite_before=SuiteRun(ran=False, timed_out=True), suite_after=None,
+    ))
+    assert "| Passed | did not finish | not run |" in md
+    assert "| Newly failing tests | - | - |" in md
+
+
+def test_untrusted_text_in_a_backport_cannot_break_the_markdown() -> None:
+    from fixedyet.report import render_backport_markdown
+
+    md = render_backport_markdown(backport_result(
+        reason="line one\n## Fake heading\n| a | b |",
+        commit_message="```\nescape attempt\n```",
+        patch="+```\n+more\n",
+        reported_version="8.1|3",
+    ))
+    assert "\n## Fake heading" not in md
+    assert md.count("\n## ") == 1  # only the real section heading
+    assert "8.1\\|3" in md
+
+
+def test_a_long_patch_is_cut_in_the_markdown_but_not_in_the_result() -> None:
+    from fixedyet.report import PATCH_MARKDOWN_CHARS, render_backport_markdown
+
+    big = "diff --git a/a b/a\n" + "+line of added code\n" * 2_000
+    result = backport_result(patch=big)
+    md = render_backport_markdown(result)
+    assert "The patch is cut here" in md and len(md) < PATCH_MARKDOWN_CHARS + 6_000
+    assert result.patch == big

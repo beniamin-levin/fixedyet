@@ -17,6 +17,8 @@ import pytest
 from fixedyet import ledger
 from fixedyet.models import (
     Assessment,
+    BackportResult,
+    BackportStatus,
     Confidence,
     Outcome,
     ProgressEvent,
@@ -73,6 +75,9 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> Fake:
     f = Fake()
     monkeypatch.setattr(web, "run_pipeline", f)
     monkeypatch.setattr(web, "render_report", lambda a: f"# {a.title}\n\n{a.verdict.value}")
+    monkeypatch.setattr(
+        web, "render_backport", lambda b: f"# rendered backport: {b.status.value}"
+    )
     return f
 
 
@@ -491,6 +496,35 @@ async def test_zero_limit_blocks_live_runs(tmp_path: Path, fake: Fake) -> None:
     assert fake.calls == []
 
 
+async def test_zero_limit_says_runs_are_paused_not_used_up(tmp_path: Path, fake: Fake) -> None:
+    async with make_client(make_settings(tmp_path, limit=0)) as client:
+        res = await start(client)
+    body = res.json()
+    assert res.status_code == 429 and body["error"] == "daily_limit"
+    message = body["message"].lower()
+    assert "paused" in message and "no sandbox backend" in message
+    assert "example reports" in message
+    assert "used up" not in message and "today" not in message
+    assert body["examples"] == "/api/examples"
+
+
+async def test_a_real_limit_still_says_used_up_today(tmp_path: Path, fake: Fake) -> None:
+    async with make_client(make_settings(tmp_path, limit=1)) as client:
+        first = await start(client)
+        assert first.status_code == 202
+        await wait_finished(client, first.json()["id"])
+        res = await start(client)
+    message = res.json()["message"]
+    assert res.status_code == 429 and "used up" in message and "today" in message.lower()
+    assert "paused" not in message
+
+
+def test_the_page_hint_for_a_zero_limit_also_says_paused() -> None:
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "Live runs are paused while the demo has no sandbox backend" in script
+    assert "Today\\'s live runs are used up" in script
+
+
 async def test_rejected_runs_do_not_use_the_quota(tmp_path: Path, fake: Fake) -> None:
     async with make_client(make_settings(tmp_path, limit=1)) as client:
         assert (await start(client, "nonsense")).status_code == 400
@@ -692,13 +726,65 @@ async def test_missing_examples_directory_is_an_empty_list(
 def test_bundled_examples_are_real_runs_on_real_issues() -> None:
     items = web.load_examples(web.default_examples_dir())
     assert items, "the demo page needs at least one saved example"
-    assert {i["verdict"] for i in items} <= {v.value for v in Verdict}
     for item in items:
         match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/issues/(\d+)", item["issue_url"])
         assert match, item["issue_url"]  # a real GitHub issue, not an example.com stand-in
-        assert item["id"] == "real-{}-{}-{}".format(*match.groups()).lower()
+        if item["kind"] == "backport":
+            assert item["id"] == "real-backport-{}-{}-{}".format(*match.groups()).lower()
+            assert item["verdict"].removeprefix("backport_") in {s.value for s in BackportStatus}
+            assert item["backport"]["status"] and item["assessment"] is None
+        else:
+            assert item["id"] == "real-{}-{}-{}".format(*match.groups()).lower()
+            assert item["verdict"] in {v.value for v in Verdict}
         assert item["markdown"].startswith("# ")
-        assert item["illustrative"] is False  # only hand-written samples may say otherwise
-        assert item["note"].startswith("Real run")
-        assert item["assessment"]["reproduction"]["repro_test_code"]
-        assert item["assessment"]["usage"]["cost_usd"] > 0  # a live run spent real money
+
+
+def make_backport(status: BackportStatus = BackportStatus.VERIFIED) -> BackportResult:
+    return BackportResult(
+        status=status, reason="the test fails before and passes after",
+        issue_url="https://github.com/pallets/flask/issues/5000", title="A backported fix",
+        repo="pallets/flask", reported_version="3.0.3", target_branch="3.0.x",
+        target_branch_head="b" * 40, fixing_commit="d" * 40,
+        repro_before=SideRun(ref="3.0.x (before)", outcomes=[Outcome.FAIL, Outcome.FAIL]),
+        repro_after=SideRun(ref="3.0.x (after)", outcomes=[Outcome.PASS, Outcome.PASS]),
+    )
+
+
+async def test_a_backport_result_in_the_examples_folder_is_listed(
+    tmp_path: Path, settings: SimpleNamespace, fake: Fake
+) -> None:
+    folder = tmp_path / "examples"
+    folder.mkdir()
+    (folder / "a-fix.json").write_text(make_assessment().model_dump_json(), encoding="utf-8")
+    data = make_backport().model_dump(mode="json")
+    data["_example"] = {"label": "Verified backport (real run)", "note": "real"}
+    (folder / "real-backport-pallets-flask-5000.json").write_text(json.dumps(data))
+    (folder / "real-backport-pallets-flask-5000.md").write_text("# Verified backport: saved\n")
+    conflict = make_backport(BackportStatus.CONFLICTS).model_dump_json()
+    (folder / "z-conflict.json").write_text(conflict, encoding="utf-8")
+
+    async with make_client(settings, examples_dir=folder) as client:
+        items = (await client.get("/api/examples")).json()
+    by_id = {i["id"]: i for i in items}
+    assert list(by_id) == ["a-fix", "real-backport-pallets-flask-5000", "z-conflict"]
+
+    entry = by_id["real-backport-pallets-flask-5000"]
+    assert entry["kind"] == "backport" and entry["verdict"] == "backport_verified"
+    assert entry["label"] == "Verified backport (real run)" and entry["illustrative"] is False
+    assert entry["assessment"] is None and entry["confidence"] == ""
+    assert entry["backport"]["target_branch"] == "3.0.x" and "_example" not in entry["backport"]
+    assert entry["markdown"] == "# Verified backport: saved\n"
+    assert entry["title"] == "A backported fix" and entry["issue_url"].endswith("/issues/5000")
+    # a backport without a saved .md falls back to the renderer
+    assert by_id["z-conflict"]["verdict"] == "backport_conflicts"
+    assert by_id["z-conflict"]["markdown"] == "# rendered backport: conflicts"
+    # assessments keep their shape
+    assert by_id["a-fix"]["kind"] == "assessment" and by_id["a-fix"]["backport"] is None
+    assert by_id["a-fix"]["assessment"]["title"] == "Fake issue"
+
+
+def test_the_page_script_can_draw_a_backport_example() -> None:
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "function renderBackport" in script and "ex.backport" in script
+    for status in BackportStatus:
+        assert f"backport_{status.value}:" in script

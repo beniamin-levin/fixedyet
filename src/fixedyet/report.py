@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import re
 
-from fixedyet.models import Assessment, Evidence, SideRun, Verdict
+from fixedyet.models import (
+    Assessment,
+    BackportResult,
+    BackportStatus,
+    Evidence,
+    SideRun,
+    SuiteRun,
+    Verdict,
+)
 
 HEADLINES: dict[Verdict, str] = {
     Verdict.FIXED_ON_MAIN: "Fixed on main: fails at the reported version, passes on the fix side",
@@ -19,7 +27,16 @@ HEADLINES: dict[Verdict, str] = {
     Verdict.NEEDS_INFO: "Needs info: the issue has no runnable reproduction",
     Verdict.UNSUPPORTED: "Unsupported: the environment or the test could not be run",
 }
+BACKPORT_HEADLINES: dict[BackportStatus, str] = {
+    BackportStatus.VERIFIED: "Verified backport: the fix applies to {branch} and the tests agree",
+    BackportStatus.CONFLICTS: "Backport blocked: the fix conflicts with {branch}",
+    BackportStatus.REGRESSION: "Backport not safe: the fix breaks other tests on {branch}",
+    BackportStatus.ALREADY_FIXED_ON_BRANCH: "No backport needed: {branch} already has the fix",
+    BackportStatus.NOT_APPLICABLE: "No backport possible",
+    BackportStatus.ERROR: "Backport not verified: a step could not be completed",
+}
 LOG_EXCERPT_CHARS = 1_500
+PATCH_MARKDOWN_CHARS = 12_000
 ROOT_CAUSE_NOTE = (
     "Written by the model from the issue, the test and the logs. The sandbox runs did not check it."
 )
@@ -145,6 +162,9 @@ def render_markdown(a: Assessment) -> str:
         out += ["", "## Next actions", ""]
         out += [f"{i}. {_line(action)}" for i, action in enumerate(a.next_actions, 1)]
 
+    if a.backport is not None:
+        out += ["", *backport_section(a.backport)]
+
     out += ["", "## Usage", "", _usage_line(a)]
 
     images = [
@@ -164,4 +184,111 @@ def render_markdown(a: Assessment) -> str:
             "",
             f"Or repeat the whole assessment: `fixedyet run {_cell(a.issue_url)}`",
         ]
+    return "\n".join(out).rstrip() + "\n"
+
+
+# -- verified backport ----------------------------------------------------------------------------
+
+
+def _suite_cell(suite: SuiteRun | None, field_name: str) -> str:
+    if suite is None or not suite.ran:
+        return "not run" if suite is None else "did not finish"
+    return str(getattr(suite, field_name))
+
+
+def _suite_table(r: BackportResult) -> str | None:
+    if r.suite_before is None and r.suite_after is None:
+        return None
+    rows = [
+        "| Project test suite | Before the cherry-pick | After the cherry-pick |",
+        "|---|---|---|",
+    ]
+    for label, name in (("Passed", "passed"), ("Failed", "failed"), ("Errors", "errors"),
+                        ("Skipped", "skipped")):
+        before, after = _suite_cell(r.suite_before, name), _suite_cell(r.suite_after, name)
+        rows.append(f"| {label} | {before} | {after} |")
+    both_ran = bool(r.suite_before and r.suite_before.ran and r.suite_after and r.suite_after.ran)
+    rows.append(
+        "| Newly failing tests | - | "
+        + (", ".join(f"`{_cell(t)}`" for t in r.newly_failing) if r.newly_failing
+           else ("none" if both_ran else "-"))
+        + " |"
+    )
+    return "\n".join(rows)
+
+
+def _repro_table(r: BackportResult) -> str | None:
+    sides = [("Before the cherry-pick", r.repro_before), ("After the cherry-pick", r.repro_after)]
+    sides = [(label, side) for label, side in sides if side is not None]
+    if not sides:
+        return None
+    runs = max(len(side.outcomes) for _, side in sides) or 1
+    header = f"| Reproduction test on `{_cell(r.target_branch or '?')}` | " + " | ".join(
+        f"Run {i}" for i in range(1, runs + 1)) + " |"
+    rows = [header, "|---|" + "---|" * runs]
+    for label, side in sides:
+        cells = [o.value.upper() for o in side.outcomes] + ["-"] * (runs - len(side.outcomes))
+        rows.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(rows)
+
+
+def backport_section(r: BackportResult, level: int = 2) -> list[str]:
+    """The "Verified backport" section as markdown lines.
+
+    It is shown whatever the status, so a conflict or a regression is reported just as plainly as
+    a success; the first line says which one it was.
+    """
+    hashes = "#" * level
+    out = [f"{hashes} Verified backport", "", f"**Status:** `{r.status.value}`  "]
+    if r.reason:
+        out.append(f"**Result:** {_line(r.reason)}  ")
+    if r.target_branch:
+        head = f" (head `{_cell(r.target_branch_head[:12])}`)" if r.target_branch_head else ""
+        out.append(f"**Target branch:** `{_cell(r.target_branch)}`{head}  ")
+    if r.reported_version:
+        out.append(f"**Reported version:** `{_cell(r.reported_version)}`  ")
+    if r.fixing_commit:
+        url = (
+            f"https://github.com/{r.repo}/commit/{r.fixing_commit}"
+            if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", r.repo or "") else None
+        )
+        out.append(f"**Fixing commit on main:** {_link(r.fixing_commit[:12], url)}  ")
+    out[-1] = out[-1].rstrip()
+
+    repro = _repro_table(r)
+    if repro:
+        out += ["", repro]
+    suite = _suite_table(r)
+    if suite:
+        out += ["", suite]
+    if r.conflicting_files:
+        out += ["", "Conflicting files (the cherry-pick was aborted, nothing was resolved):", ""]
+        out += [f"- `{_cell(name)}`" for name in r.conflicting_files]
+    if r.commit_message:
+        out += ["", "Cherry-picked commit message:", "", _fence(r.commit_message)]
+    if r.patch:
+        patch = r.patch
+        note = ""
+        if len(patch) > PATCH_MARKDOWN_CHARS:
+            patch = patch[:PATCH_MARKDOWN_CHARS].rsplit("\n", 1)[0]
+            note = f"\n\n_The patch is cut here; the whole patch is {len(r.patch):,} characters._"
+        out += ["", "Patch (`git format-patch` of the cherry-pick):", "", _fence(patch, "diff")]
+        out[-1] += note
+    if r.log_excerpt and r.status not in (BackportStatus.VERIFIED,):
+        out += ["", "Output of the step that stopped it (end of the log):", "",
+                _fence(_log_tail(r.log_excerpt))]
+    u = r.usage
+    out += ["", f"_{u.sandbox_runs} sandbox runs, {u.wall_seconds:.0f} s wall time, "
+            f"${u.cost_usd:.4f} model cost._"]
+    return out
+
+
+def render_backport_markdown(r: BackportResult) -> str:
+    """A standalone markdown summary of a backport run (what `fixedyet backport` prints)."""
+    headline = BACKPORT_HEADLINES[r.status].format(branch=r.target_branch or "the branch")
+    out = [f"# {headline}", ""]
+    if r.issue_url:
+        out.append(f"**Issue:** {_link(r.title or r.issue_url, r.issue_url)}")
+        out.append("")
+    out += backport_section(r)
     return "\n".join(out).rstrip() + "\n"

@@ -141,6 +141,63 @@ class Usage(BaseModel):
     wall_seconds: float = 0.0
 
 
+class BackportStatus(StrEnum):
+    VERIFIED = "verified"  # reproduction fails before and passes after; no newly failing tests
+    CONFLICTS = "conflicts"  # the cherry-pick does not apply cleanly (aborted, never resolved)
+    REGRESSION = "regression"  # the cherry-pick fixed the bug but newly broke other tests
+    ALREADY_FIXED_ON_BRANCH = "already_fixed_on_branch"  # the test passes on the branch already
+    NOT_APPLICABLE = "not_applicable"  # no branch, no known fixing commit, or not fixed on main
+    ERROR = "error"  # something could not be run or did not give a usable answer
+
+
+class SuiteRun(BaseModel):
+    """The project's own test suite, run once on one side of the cherry-pick."""
+
+    ran: bool = False  # True only when pytest reached its summary line and exited 0 or 1
+    exit_code: int | None = None
+    timed_out: bool = False
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+    skipped: int = 0
+    failing_tests: list[str] = Field(default_factory=list)  # ids of FAILED and ERROR entries
+    duration_s: float = 0.0
+    log_excerpt: str = ""
+
+    @property
+    def total(self) -> int:
+        return self.passed + self.failed + self.errors + self.skipped
+
+
+class BackportResult(BaseModel):
+    """A fix from main, cherry-picked onto the maintenance branch of the reported version."""
+
+    status: BackportStatus
+    reason: str = ""  # one sentence: why the status is not `verified`, or what was checked
+    issue_url: str = ""
+    title: str = ""  # the issue title
+    repo: str = ""  # "owner/name"
+    reported_version: str | None = None
+    target_branch: str | None = None
+    target_branch_head: str | None = None  # commit the verification started from
+    fixing_commit: str | None = None  # the commit on main that was cherry-picked
+    cherry_picked_commit: str | None = None  # its copy on the target branch (sandbox only)
+    commit_message: str = ""  # of the cherry-picked commit, including the `-x` trailer
+    patch: str = ""  # `git format-patch` of the cherry-pick
+    repro_test_path: str | None = None
+    repro_test_code: str | None = None
+    repro_before: SideRun | None = None  # on the target branch, before the cherry-pick
+    repro_after: SideRun | None = None  # on the target branch, after the cherry-pick
+    suite_before: SuiteRun | None = None
+    suite_after: SuiteRun | None = None
+    newly_failing: list[str] = Field(default_factory=list)  # failing after but not before
+    conflicting_files: list[str] = Field(default_factory=list)
+    candidate_branches: list[str] = Field(default_factory=list)  # maintenance branches seen
+    log_excerpt: str = ""  # git or pip output for the step that went wrong
+    usage: Usage = Field(default_factory=Usage)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Assessment(BaseModel):
     issue_url: str
     title: str
@@ -154,12 +211,13 @@ class Assessment(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     model: str = ""
+    backport: BackportResult | None = None  # set when a verified backport was prepared
     created_at: datetime = Field(default_factory=utcnow)
 
 
 Stage = Literal[
     "intake", "environment", "agent", "run_reported", "run_fix",
-    "verdict", "evidence", "report", "done", "error",
+    "verdict", "evidence", "report", "backport", "done", "error",
 ]
 
 

@@ -1,6 +1,6 @@
 """MCP server for FixedYet (stdio transport).
 
-Two tools:
+Three tools:
 
 ``reproduce_issue(issue_url, fix_ref=None)``
     Runs the full pipeline on a public GitHub issue and returns the markdown report followed
@@ -9,6 +9,12 @@ Two tools:
 ``check_fixed(issue_url, ref)``
     Runs the same pipeline with ``ref`` (a branch, tag or commit) as the fix side and returns
     ``{"fixed": bool | None, "verdict", "confidence", "summary"}``.
+
+``propose_backport(issue_url, target_branch=None)``
+    Dry run only: reproduces the issue, and when it is fixed on main cherry-picks the fix onto
+    the maintenance branch of the reported version in a sandbox. Returns the markdown summary and
+    a JSON block with the BackportResult (status, patch, test results before and after). It
+    never pushes anything and never opens a pull request; that is `fixedyet backport --open-pr`.
 
 A run takes a few minutes and spends Token Factory, Sandboxes and Tavily credits, so clients
 should call these tools on purpose. The server reads its keys from the environment or from a
@@ -36,7 +42,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fixedyet.models import Assessment, Verdict
+from fixedyet.models import Assessment, BackportResult, Verdict
 from fixedyet.web import parse_issue_url
 
 try:  # mcp >= 2 renamed FastMCP to MCPServer
@@ -52,7 +58,8 @@ mcp = _Server(
         "FixedYet reproduces a public GitHub bug report in a sandbox at the reported "
         "version, runs the same test against a fix side (main by default), and returns a "
         "rule-based verdict with evidence. Runs take a few minutes and cost money, so call "
-        "the tools only when the user wants a bug checked."
+        "the tools only when the user wants a bug checked. propose_backport is a dry run: it never "
+        "pushes or opens a pull request."
     ),
 )
 
@@ -70,6 +77,18 @@ def render_report(assessment: Assessment) -> str:
     from fixedyet.report import render_markdown
 
     return render_markdown(assessment)
+
+
+async def run_backport(assessment: Assessment, target_branch: str | None) -> BackportResult:
+    from fixedyet.backport import backport
+
+    return await backport(assessment, target_branch=target_branch)
+
+
+def render_backport(result: BackportResult) -> str:
+    from fixedyet.report import render_backport_markdown
+
+    return render_backport_markdown(result)
 
 
 # --- helpers --------------------------------------------------------------------------
@@ -191,6 +210,35 @@ async def check_fixed(issue_url: str, ref: str) -> dict[str, Any]:
         "confidence": assessment.confidence.value,
         "summary": summarise(assessment, checked_ref),
     }
+
+
+@mcp.tool()
+async def propose_backport(issue_url: str, target_branch: str | None = None) -> str:
+    """Prepare a verified backport of a fix, as a dry run (nothing is pushed or opened).
+
+    Reproduces the issue; if the bug is fixed on main and the fixing commit is known, finds the
+    maintenance branch of the reported version (for example 8.1.x, stable/8.1, release-8.1), and
+    in a sandbox checks that the reproduction test fails there, cherry-picks the fix (conflicts
+    are reported, never resolved), checks that the test passes, and compares the project's own
+    test suite before and after. Takes several minutes and costs money.
+
+    Args:
+        issue_url: URL of a public GitHub issue, like https://github.com/owner/repo/issues/123.
+        target_branch: Branch to backport onto. Default: found from the repository's branches.
+
+    Returns:
+        The markdown summary, then a fenced JSON block with the BackportResult. Its status is
+        one of verified, conflicts, regression, already_fixed_on_branch, not_applicable, error.
+    """
+    url = _clean_url(issue_url)
+    branch = _clean_ref(target_branch) if target_branch and target_branch.strip() else None
+    assessment = await run_pipeline(url, None)
+    result = await run_backport(assessment, branch)
+    try:
+        report = render_backport(result)
+    except Exception:  # a rendering bug must not hide the status
+        report = f"# Backport: {result.status.value}\n\n{result.reason}"
+    return f"{report.rstrip()}\n\n```json\n{result.model_dump_json(indent=2)}\n```\n"
 
 
 def main() -> None:

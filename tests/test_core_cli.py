@@ -387,3 +387,295 @@ async def test_the_sandbox_probe_runs_echo_ok(
     fake_sandbox.on("echo ok", ExecResult(exit_code=3, stderr="denied"))
     with pytest.raises(RuntimeError, match="exited 3"):
         await cli._probe_sandbox(Settings())
+
+
+# -- backport -----------------------------------------------------------------------------------
+
+FIX_SHA = "d959898db264aaf07e70ad4eafa254286f9a5185"
+
+
+def fixed_assessment() -> Assessment:
+    from fixedyet.models import Outcome, Reproduction, SideRun, Usage
+
+    return Assessment(
+        issue_url=URL, title="parse() drops the last item", verdict=Verdict.FIXED_ON_MAIN,
+        confidence=Confidence.HIGH,
+        reproduction=Reproduction(
+            repro_test_path="tests/test_repro.py", repro_test_code="def test_x(): ...\n",
+            reported_side=SideRun(ref="8.1.3", outcomes=[Outcome.FAIL, Outcome.FAIL]),
+            fix_side=SideRun(ref="main", outcomes=[Outcome.PASS, Outcome.PASS]),
+            fixing_commit=FIX_SHA,
+        ),
+        usage=Usage(llm_calls=8, input_tokens=900, output_tokens=100, cost_usd=0.0123,
+                    sandbox_runs=7, search_credits=2, wall_seconds=30.0),
+    )
+
+
+def backport_result(status: str = "verified"):
+    from fixedyet.models import BackportResult, BackportStatus, Outcome, SideRun, Usage
+
+    return BackportResult(
+        status=BackportStatus(status), reason=f"it is {status}", issue_url=URL,
+        title="parse() drops the last item", repo="acme/widgets", reported_version="8.1.3",
+        target_branch="8.1.x", target_branch_head="b" * 40, fixing_commit=FIX_SHA,
+        patch="From x\n" if status == "verified" else "",
+        repro_before=SideRun(ref="8.1.x (before)", outcomes=[Outcome.FAIL, Outcome.FAIL]),
+        repro_after=SideRun(ref="8.1.x (after)", outcomes=[Outcome.PASS, Outcome.PASS]),
+        usage=Usage(sandbox_runs=6, wall_seconds=12.0),
+    )
+
+
+class BackportSpy:
+    """Replaces `fixedyet.backport.backport`; records what the CLI asked for."""
+
+    def __init__(self, status: str = "verified") -> None:
+        self.status = status
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, assessment: Assessment, **kwargs: Any):
+        self.calls.append({"assessment": assessment, **kwargs})
+        return backport_result(self.status)
+
+
+class PrSpy:
+    def __init__(self, error: str | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, result: Any, **kwargs: Any):
+        from fixedyet.pullrequest import PullRequest, PullRequestError
+
+        self.calls.append({"result": result, **kwargs})
+        if self.error:
+            raise PullRequestError(self.error)
+        base = "alice/widgets" if kwargs["target"] == "fork" else "acme/widgets"
+        return PullRequest(
+            url=f"https://github.com/{base}/pull/5", number=5, draft=True, base_repo=base,
+            base_branch="8.1.x", head="alice:fixedyet/backport-42-8.1.x", fork="alice/widgets",
+            login="alice", created=True,
+        )
+
+
+@pytest.fixture
+def bp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """No model key, a GitHub token, a saved assessment, spies for the backport and the PR."""
+    settings = Settings(nebius_api_key="", github_token="ghp_TOKEN_NEVER_PRINT")
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    saved = tmp_path / "assessment.json"
+    saved.write_text(fixed_assessment().model_dump_json(), encoding="utf-8")
+    spy, pr_spy = BackportSpy(), PrSpy()
+    monkeypatch.setattr("fixedyet.backport.backport", spy)
+    monkeypatch.setattr("fixedyet.pullrequest.open_backport_pr", pr_spy)
+
+    def no_gh() -> str:
+        raise AssertionError("gh auth token must not run in tests")
+
+    monkeypatch.setattr("fixedyet.pullrequest._gh_auth_token", no_gh)
+    return SimpleNamespace(settings=settings, saved=saved, spy=spy, pr=pr_spy, tmp=tmp_path)
+
+
+def test_parser_accepts_every_documented_backport_flag() -> None:
+    args = cli.build_parser().parse_args([
+        "backport", URL, "--target-branch", "8.1.x", "--open-pr", "--pr-target", "upstream",
+        "--yes-upstream", "--from-assessment", "a.json", "--json", "r.json", "--md", "r.md",
+        "--python-version", "3.9", "--pip", "attrs", "--pip", "hypothesis",
+    ])
+    assert (args.command, args.issue_url, args.target_branch) == ("backport", URL, "8.1.x")
+    assert (args.open_pr, args.pr_target, args.yes_upstream) == (True, "upstream", True)
+    assert (args.from_assessment, args.json, args.md) == ("a.json", "r.json", "r.md")
+    assert (args.python_version, args.pip) == ("3.9", ["attrs", "hypothesis"])
+    bare = cli.build_parser().parse_args(["backport", URL])
+    assert (bare.open_pr, bare.pr_target, bare.yes_upstream, bare.target_branch) == (
+        False, None, False, None,
+    )
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["backport", URL, "--pr-target", "elsewhere"])
+
+
+def test_backport_from_an_assessment_needs_no_model_key(
+    bp_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    json_path, md_path = bp_env.tmp / "r.json", bp_env.tmp / "r.md"
+    code = cli.main([
+        "backport", URL, "--from-assessment", str(bp_env.saved), "--target-branch", "8.1.x",
+        "--python-version", "3.9", "--pip", "attrs", "--json", str(json_path), "--md", str(md_path),
+    ])
+    out, err = capsys.readouterr()
+    assert code == 0
+    (call,) = bp_env.spy.calls
+    assert call["assessment"].verdict is Verdict.FIXED_ON_MAIN
+    assert call["target_branch"] == "8.1.x" and call["python_version"] == "3.9"
+    assert call["extra_packages"] == ["attrs"] and call["settings"] is bp_env.settings
+    assert out.lstrip().startswith("# Verified backport: the fix applies to 8.1.x")
+    assert "## Verified backport" in out and "`verified`" in out
+    from fixedyet.models import BackportResult
+
+    assert BackportResult.model_validate_json(json_path.read_text()).target_branch == "8.1.x"
+    assert md_path.read_text().startswith("# Verified backport")
+    assert bp_env.pr.calls == []  # no --open-pr, nothing is pushed
+    assert "ghp_TOKEN_NEVER_PRINT" not in out + err
+
+
+def test_backport_without_an_assessment_reproduces_first_and_adds_that_cost(
+    bp_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keyed_settings = Settings(nebius_api_key="KEY", github_token="")
+    monkeypatch.setattr(cli, "get_settings", lambda: keyed_settings)
+    seen: dict[str, Any] = {}
+
+    async def fake_reproduce(url: str, *, settings: Settings, progress: Any, **_: Any):
+        seen.update(url=url, settings=settings)
+        progress(ProgressEvent(stage="intake", message="Fetching the issue"))
+        return fixed_assessment()
+
+    monkeypatch.setattr("fixedyet.pipeline.reproduce", fake_reproduce)
+    code = cli.main(["backport", URL])
+    out, err = capsys.readouterr()
+    assert code == 0 and seen == {"url": URL, "settings": keyed_settings}
+    assert "intake: Fetching the issue" in err and "reproduced now" in err
+    result = bp_env.spy.calls[0]
+    assert result["target_branch"] is None
+    assert "$0.0123" in out  # the model cost of the reproduction this run paid for
+
+
+def test_backport_without_a_key_or_an_assessment_explains(
+    bp_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["backport", URL]) == 2
+    err = capsys.readouterr().err
+    assert "NEBIUS_API_KEY" in err and "--from-assessment" in err
+    assert bp_env.spy.calls == []
+
+
+def test_backport_for_a_bad_url_or_the_wrong_assessment_is_a_usage_error(
+    bp_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["backport", "https://example.com/nope"]) == 2
+    other = "https://github.com/acme/widgets/issues/43"
+    assert cli.main(["backport", other, "--from-assessment", str(bp_env.saved)]) == 2
+    assert "not of" in capsys.readouterr().err
+    broken = bp_env.tmp / "broken.json"
+    broken.write_text("{not json")
+    assert cli.main(["backport", URL, "--from-assessment", str(broken)]) == 2
+    assert cli.main(["backport", URL, "--from-assessment", str(bp_env.tmp / "missing.json")]) == 2
+    assert bp_env.spy.calls == []
+
+
+def test_pr_flags_without_open_pr_are_a_usage_error(
+    bp_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = ["backport", URL, "--from-assessment", str(bp_env.saved)]
+    assert cli.main([*base, "--pr-target", "upstream"]) == 2
+    assert cli.main([*base, "--yes-upstream"]) == 2
+    assert cli.main([*base, "--open-pr", "--yes-upstream"]) == 2  # fork is the default target
+    assert bp_env.spy.calls == [] and bp_env.pr.calls == []
+
+
+@pytest.mark.parametrize(("status", "code"), [("conflicts", 1), ("regression", 1), ("error", 1),
+                                              ("not_applicable", 1), ("verified", 0)])
+def test_the_exit_code_is_zero_only_for_a_verified_backport(
+    bp_env, status: str, code: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bp_env.spy.status = status
+    assert cli.main(["backport", URL, "--from-assessment", str(bp_env.saved)]) == code
+    assert f"`{status}`" in capsys.readouterr().out
+
+
+def test_open_pr_defaults_to_the_fork_and_never_asks_a_question(
+    bp_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_input(_: str = "") -> str:
+        raise AssertionError("the fork target must not ask anything")
+
+    monkeypatch.setattr("builtins.input", no_input)
+    code = cli.main(["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    (call,) = bp_env.pr.calls
+    assert call["target"] == "fork" and call["confirmed_upstream"] is False
+    assert call["token"] == "ghp_TOKEN_NEVER_PRINT" and call["result"].status.value == "verified"
+    assert "Draft pull request opened: https://github.com/alice/widgets/pull/5" in out
+    assert "draft: true" in out
+    assert "ghp_TOKEN_NEVER_PRINT" not in out + err
+
+
+def test_open_pr_is_skipped_for_a_backport_that_is_not_verified(
+    bp_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bp_env.spy.status = "conflicts"
+    code = cli.main(["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr"])
+    assert code == 1 and bp_env.pr.calls == []
+    assert "No pull request was opened" in capsys.readouterr().err
+
+
+def test_upstream_target_asks_for_the_repo_name_before_the_long_run(
+    bp_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prompts: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return "widgets"
+
+    monkeypatch.setattr("builtins.input", typed)
+    args = ["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr",
+            "--pr-target", "upstream"]
+    assert cli.main(args) == 0
+    (call,) = bp_env.pr.calls
+    assert call["target"] == "upstream" and call["confirmed_upstream"] is True
+    assert "acme/widgets" in prompts[0] and "UPSTREAM" in prompts[0]
+
+
+def test_a_wrong_answer_stops_everything_before_any_sandbox_work(
+    bp_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("builtins.input", lambda _="": "yes")
+    args = ["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr",
+            "--pr-target", "upstream"]
+    assert cli.main(args) == 2
+    assert "not confirmed" in capsys.readouterr().err
+    assert bp_env.spy.calls == [] and bp_env.pr.calls == []
+
+
+def test_yes_upstream_skips_the_question(bp_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_input(_: str = "") -> str:
+        raise AssertionError("--yes-upstream must not ask")
+
+    monkeypatch.setattr("builtins.input", no_input)
+    args = ["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr",
+            "--pr-target", "upstream", "--yes-upstream"]
+    assert cli.main(args) == 0
+    assert bp_env.pr.calls[0]["confirmed_upstream"] is True
+
+
+def test_open_pr_without_any_token_stops_before_the_run(
+    bp_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(nebius_api_key="", github_token=""))
+
+    def gh_not_logged_in() -> str:
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr("fixedyet.pullrequest._gh_auth_token", gh_not_logged_in)
+    code = cli.main(["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr"])
+    assert code == 2 and "GITHUB_TOKEN" in capsys.readouterr().err
+    assert bp_env.spy.calls == [] and bp_env.pr.calls == []
+
+
+def test_open_pr_falls_back_to_the_gh_login(
+    bp_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(nebius_api_key="", github_token=""))
+    monkeypatch.setattr("fixedyet.pullrequest._gh_auth_token", lambda: "gho_FROM_GH\n")
+    assert cli.main(["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr"]) == 0
+    assert bp_env.pr.calls[0]["token"] == "gho_FROM_GH"
+
+
+def test_a_failed_pull_request_is_reported_with_exit_1(
+    bp_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bp_env.pr.error = "the fork was not ready after 180 s"
+    code = cli.main(["backport", URL, "--from-assessment", str(bp_env.saved), "--open-pr"])
+    out, err = capsys.readouterr()
+    assert code == 1 and "the fork was not ready" in err
+    assert "# Verified backport" in out  # the verified result is still printed

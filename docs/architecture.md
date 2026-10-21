@@ -16,7 +16,9 @@ Read this before writing code. `src/fixedyet/models.py` is the shared data model
 | `src/fixedyet/evidence.py` | core | Tavily search and extract, fixing-commit and release lookup |
 | `src/fixedyet/report.py` | core | markdown rendering of an `Assessment` |
 | `src/fixedyet/pipeline.py` | core | `reproduce()` and `reproduce_instance()` |
-| `src/fixedyet/cli.py` | core | `fixedyet run|doctor|eval|serve|mcp|gc` |
+| `src/fixedyet/backport.py` | backport | branch detection, cherry-pick and suite gates, `backport()` and `BackportResult` |
+| `src/fixedyet/pullrequest.py` | backport | fork, push of the sandbox patch, draft pull request (`--open-pr` only) |
+| `src/fixedyet/cli.py` | core | `fixedyet run|backport|doctor|eval|serve|mcp|gc` |
 | `src/fixedyet/sandbox/*` | sandbox | `Sandbox` protocol, Nebius and Docker backends |
 | `src/fixedyet/envbuild.py` | sandbox | baseline checkpoint builder |
 | `src/fixedyet/web/*` | web | FastAPI demo app and static page |
@@ -88,7 +90,30 @@ async def reproduce_instance(instance: SweBenchInstance, *, settings: Settings |
     # fix side = base_commit + instance.patch. The agent never sees patch or test_patch.
 
 # report.py
-def render_markdown(a: Assessment) -> str
+def render_markdown(a: Assessment) -> str     # adds "## Verified backport" when a.backport is set
+def render_backport_markdown(r: BackportResult) -> str
+def backport_section(r: BackportResult, level: int = 2) -> list[str]
+
+# backport.py
+async def backport(assessment: Assessment, *, target_branch: str | None = None,
+                   settings: Settings | None = None, sandbox: Sandbox | None = None,
+                   progress: ProgressCallback | None = None, list_branches: BranchLister | None = None,
+                   python_version: str | None = None, extra_packages: Sequence[str] = (),
+                   suite_timeout_s: int = 900) -> BackportResult
+    # never raises for anything the world can do: the answer is a BackportResult whose
+    # status/reason say what happened. No model call. See "Backport mode" below.
+def find_target_branch(version: str | None, branches: Sequence[str]) -> BranchMatch   # pure
+def pick_script(commit: str) -> str ; def parse_pick(result: ExecResult) -> PickOutcome
+def suite_script(timeout_s: int = 900) -> str ; def parse_suite(result: ExecResult) -> SuiteRun
+
+# pullrequest.py
+async def open_backport_pr(result: BackportResult, *, token: str, target: "fork"|"upstream" = "fork",
+                           confirmed_upstream: bool = False, ...) -> PullRequest
+    # only for status == verified; target="upstream" raises unless confirmed_upstream is True;
+    # draft=True is hard-wired; there is no ready-for-review, comment or force-push call at all
+def pr_title(result) -> str ; def pr_body(result, *, login: str) -> str   # ends with DISCLOSURE
+def resolve_token(configured: str | None) -> str      # GITHUB_TOKEN, else `gh auth token`
+def confirm_upstream(repo: str, *, assume_yes: bool = False) -> bool       # type the repo name
 ```
 
 ## Decision matrix (verdict.py)
@@ -105,6 +130,51 @@ def render_markdown(a: Assessment) -> str
 | runs disagree on either side | - | inconsistent, confidence low |
 
 Confidence is high only when every run on both sides agrees and neither side errored.
+
+## Backport mode (verified backports and draft pull requests)
+
+Input: an `Assessment` with verdict `fixed_on_main` and `reproduction.fixing_commit`. Output: a `BackportResult` (models.py: `status`, `reason`, `target_branch`, `target_branch_head`, `fixing_commit`, `cherry_picked_commit`, `commit_message`, `patch`, `repro_before`/`repro_after` as `SideRun`, `suite_before`/`suite_after` as `SuiteRun`, `newly_failing`, `conflicting_files`, `log_excerpt`, `usage`). `Assessment.backport` is an optional field that `report.py` renders as the "Verified backport" section.
+
+```
+assessment --> not fixed_on_main / no fixing commit / no branch for the version --> not_applicable
+           --> branch head (git ls-remote --heads; the only thing that runs on the host)
+sandbox:   baseline checkout of that head (envbuild.build_baseline, pinned to the commit)
+  a. repro test x2 (envbuild.run_test_on_side)   PASS -> already_fixed_on_branch
+                                                  not a clean FAIL -> error
+  c. git cherry-pick -x [-m 1] <commit>          (fork of the baseline image, keep=True)
+  d. conflict -> abort, list files -> conflicts   (no model, no retry)
+  e. reinstall, repro test x2 on the picked image  not PASS -> error
+  b. project suite on the baseline image, then on the picked image
+     (pytest -q --maxfail=0 --continue-on-collection-errors, 900 s each, network off)
+  f. newly failing ids (or a higher failure count) -> regression; suite did not run -> error
+  g. git format-patch -1 --stdout -> patch        all clear -> verified
+```
+
+Design decisions:
+
+- **Pure scripts, pure parsers.** `pick_script`, `suite_script`, `parse_pick` and `parse_suite` are plain functions, so unit tests check the exact commands and feed canned output through the parsers (`tests/test_backport.py`, with a scripted sandbox), and `tests/test_backport_docker.py` runs the same scripts for real on a small repository in Docker (clean pick, conflict, merge commit, regression, already fixed).
+- **Markers cannot be forged.** The scripts print machine-readable lines (`__PICKED__=...`, `__RC__=...`) on their own, and prefix every line of git or pytest output with `| `, the way `envbuild` does for the reproduction runs. The patch and the commit message travel as base64.
+- **Cheap gates first.** The suites (up to 900 s each) run after the conflict and reproduction gates, from forks of the untouched baseline image and of the cherry-picked image, so the baseline is still the branch as it was.
+- **Conservative about "verified".** A suite that did not finish, an unreadable summary, a failure count that rose without readable test ids, or a reproduction test that does not flip all stop short of `verified`.
+- **No model.** The model is not called after the reproduction; conflicts are never resolved by it.
+
+Pull requests (`pullrequest.py`) are a separate step that the CLI takes only with `--open-pr`, only for `verified`:
+
+```
+token (GITHUB_TOKEN | gh auth token) -> GET /user (login = the token's owner)
+  -> fork upstream (reuse an existing fork, wait until it has git data)        POST /repos/{o}/{r}/forks
+  -> fork target: fast-forward the fork's branch                               POST .../merge-upstream
+  -> an open PR for fixedyet/backport-<issue>-<branch> already? return it      GET  .../pulls
+  -> host: temp dir, `git fetch --depth 1` of the verified base commit, `git am` of the patch,
+           `git push` of the branch to the FORK (HTTPS; token only in the push's environment)
+  -> POST /repos/{base}/pulls  with "draft": true     base = the fork (default) or upstream
+```
+
+- `--pr-target fork` (default) opens the draft against the fork's copy of the maintenance branch. `--pr-target upstream` raises in `open_backport_pr` unless the caller passes `confirmed_upstream=True`; the CLI gets that by making the person type the repository name (or `--yes-upstream`) before the sandbox work starts.
+- The module has no ready-for-review call, no comment call, no force-push and no push to upstream; `tests/test_pullrequest.py` asserts the set of requests a run makes, and that every `POST /pulls` carries `draft: true`.
+- The body ends with `DISCLOSURE` ("Prepared with FixedYet (AI-assisted: NVIDIA Nemotron via Nebius Token Factory); reviewed and submitted by @<login>."). It is a constant, not an option.
+- The host runs only `git` (`init`, `fetch`, `checkout`, `am`, `push`, `rev-parse`) with hooks off and without the user's git config. Nothing from the project is executed on the host.
+- The MCP tool `propose_backport` and the web page never import `pullrequest`.
 
 ## Rules for everyone
 

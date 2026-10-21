@@ -1,4 +1,4 @@
-"""Command line: `fixedyet run | doctor | eval | serve | mcp | gc`.
+"""Command line: `fixedyet run | backport | doctor | eval | serve | mcp | gc`.
 
 Progress goes to stderr and the report to stdout, so `fixedyet run URL > report.md` works.
 The eval, web and MCP modules are imported only when their command is used.
@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 from fixedyet.config import Settings, get_settings, normalize_root_path
-from fixedyet.models import Assessment, ProgressEvent
+from fixedyet.models import Assessment, BackportResult, ProgressEvent
 
 OK, FAIL, SKIP = "ok", "FAIL", "skip"
 
@@ -34,6 +34,52 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fix-ref", help="branch, tag or commit for the fix side (default: main)")
     run.add_argument("--json", metavar="PATH", help="also write the assessment as JSON")
     run.add_argument("--md", metavar="PATH", help="also write the markdown report")
+
+    backport = commands.add_parser(
+        "backport",
+        help="prepare a verified backport of the fix onto the maintenance branch of the "
+        "reported version, and optionally open a DRAFT pull request",
+        description="Cherry-pick the fix that closed the issue on main onto the maintenance "
+        "branch of the version the reporter used, prove it in the sandbox (the reproduction "
+        "test fails before and passes after; the project's own tests show no new failures) and "
+        "print a markdown summary. Nothing is pushed unless --open-pr is given.",
+    )
+    backport.add_argument("issue_url", help="https://github.com/<owner>/<repo>/issues/<number>")
+    backport.add_argument(
+        "--target-branch", metavar="B",
+        help="the branch to backport onto (default: found from the repo's branch names, "
+        "for example 8.1.x, stable/8.1, release-8.1)",
+    )
+    backport.add_argument(
+        "--from-assessment", metavar="PATH",
+        help="reuse a saved assessment JSON instead of reproducing the issue again (no model "
+        "calls, so no NEBIUS_API_KEY is needed)",
+    )
+    backport.add_argument(
+        "--open-pr", action="store_true",
+        help="after a VERIFIED backport, push it to your fork and open a DRAFT pull request "
+        "(token: GITHUB_TOKEN, else `gh auth token`)",
+    )
+    backport.add_argument(
+        "--pr-target", choices=("fork", "upstream"), default=None,
+        help="where the draft pull request goes: your fork's copy of the branch (default, "
+        "nothing reaches the project) or the upstream branch (asks you to type the repo name)",
+    )
+    backport.add_argument(
+        "--yes-upstream", action="store_true",
+        help="skip the typed confirmation for --pr-target upstream",
+    )
+    backport.add_argument(
+        "--python-version", metavar="X.Y",
+        help="Python for the sandbox (default: the sandbox's own, 3.12); old branches may need "
+        "an older one",
+    )
+    backport.add_argument(
+        "--pip", action="append", default=[], metavar="REQ",
+        help="a package the reproduction test needs besides the project (repeatable)",
+    )
+    backport.add_argument("--json", metavar="PATH", help="also write the result as JSON")
+    backport.add_argument("--md", metavar="PATH", help="also write the markdown summary")
 
     doctor = commands.add_parser("doctor", help="check keys, model access and the sandbox")
     doctor.add_argument("--tavily", action="store_true", help="also test Tavily (uses 1 credit)")
@@ -81,6 +127,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.command == "run":
         return _run(args)
+    if args.command == "backport":
+        return _backport(args)
     if args.command == "doctor":
         return asyncio.run(_doctor(get_settings(), tavily=args.tavily))
     if args.command == "serve":
@@ -133,6 +181,157 @@ async def _reproduce(args: argparse.Namespace, settings: Settings) -> Assessment
         print(f"[{elapsed:5.0f}s] {event.stage}: {event.message}", file=sys.stderr, flush=True)
 
     return await reproduce(args.issue_url, fix_ref=args.fix_ref, settings=settings, progress=show)
+
+
+def _progress_printer() -> Callable[[ProgressEvent], None]:
+    started = time.monotonic()
+
+    def show(event: ProgressEvent) -> None:
+        elapsed = time.monotonic() - started
+        print(f"[{elapsed:5.0f}s] {event.stage}: {event.message}", file=sys.stderr, flush=True)
+
+    return show
+
+
+# -- backport ----------------------------------------------------------------------------------
+
+
+def _backport(args: argparse.Namespace) -> int:
+    from fixedyet.github import parse_issue_url
+    from fixedyet.pullrequest import PullRequestError, confirm_upstream, resolve_token
+    from fixedyet.report import render_backport_markdown
+
+    def fail(message: str) -> int:
+        print(f"error: {message}", file=sys.stderr)
+        return 2
+
+    try:
+        owner, repo, _ = parse_issue_url(args.issue_url)  # fail on a typo before anything else
+    except ValueError as exc:
+        return fail(str(exc))
+    if args.pr_target and not args.open_pr:
+        return fail("--pr-target only applies together with --open-pr")
+    pr_target = args.pr_target or "fork"
+    if args.yes_upstream and not (args.open_pr and pr_target == "upstream"):
+        return fail("--yes-upstream only applies to --open-pr --pr-target upstream")
+
+    settings = get_settings()
+    assessment = None
+    if args.from_assessment:
+        try:
+            assessment = _load_assessment(args.from_assessment, args.issue_url)
+        except ValueError as exc:
+            return fail(str(exc))
+    elif not settings.nebius_api_key:
+        return fail(
+            "NEBIUS_API_KEY is not set, and the issue has to be reproduced first. Copy "
+            ".env.example to .env and fill it in, or pass --from-assessment PATH."
+        )
+
+    # Everything that can stop a pull request is checked before the long sandbox work.
+    token = ""
+    confirmed = False
+    if args.open_pr:
+        try:
+            token = resolve_token(settings.github_token)
+        except PullRequestError as exc:
+            return fail(str(exc))
+        if pr_target == "upstream":
+            confirmed = confirm_upstream(f"{owner}/{repo}", assume_yes=args.yes_upstream)
+            if not confirmed:
+                return fail("not confirmed: no pull request was opened on the upstream project")
+
+    result = asyncio.run(_run_backport(args, settings, assessment))
+    markdown = render_backport_markdown(result)
+    if args.json:
+        Path(args.json).write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    if args.md:
+        Path(args.md).write_text(markdown, encoding="utf-8")
+    print()
+    print(markdown)
+
+    if args.open_pr:
+        if result.status.value != "verified":
+            print(
+                f"No pull request was opened: the backport is {result.status.value}, "
+                "and only a verified one gets a draft pull request.",
+                file=sys.stderr,
+            )
+        else:
+            code = asyncio.run(_open_pr(result, token, pr_target, confirmed))
+            if code:
+                return code
+    return 0 if result.status.value == "verified" else 1
+
+
+def _load_assessment(path: str, issue_url: str) -> Assessment:
+    from pydantic import ValidationError
+
+    from fixedyet.github import parse_issue_url
+
+    try:
+        assessment = Assessment.model_validate_json(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"cannot read {path}: {exc.strerror or exc}") from exc
+    except ValidationError as exc:
+        raise ValueError(f"{path} is not an assessment JSON written by `fixedyet run`") from exc
+    try:
+        same = parse_issue_url(assessment.issue_url) == parse_issue_url(issue_url)
+    except ValueError:
+        same = False
+    if not same:
+        raise ValueError(
+            f"{path} is an assessment of {assessment.issue_url}, not of {issue_url}"
+        )
+    return assessment
+
+
+async def _run_backport(
+    args: argparse.Namespace, settings: Settings, assessment: Assessment | None
+) -> BackportResult:
+    from fixedyet.backport import backport
+
+    show = _progress_printer()
+    reproduced = assessment is None
+    if assessment is None:
+        from fixedyet.pipeline import reproduce
+
+        assessment = await reproduce(args.issue_url, settings=settings, progress=show)
+        show(ProgressEvent(stage="verdict", message=f"{assessment.verdict.value}, reproduced now"))
+    result = await backport(
+        assessment, target_branch=args.target_branch, settings=settings, progress=show,
+        python_version=args.python_version, extra_packages=args.pip,
+    )
+    if reproduced:  # this invocation paid for the reproduction too
+        used = assessment.usage
+        result.usage.llm_calls += used.llm_calls
+        result.usage.input_tokens += used.input_tokens
+        result.usage.output_tokens += used.output_tokens
+        result.usage.cost_usd += used.cost_usd
+        result.usage.search_credits += used.search_credits
+        result.usage.sandbox_runs += used.sandbox_runs
+        result.usage.wall_seconds = round(result.usage.wall_seconds + used.wall_seconds, 2)
+    return result
+
+
+async def _open_pr(result: BackportResult, token: str, target: str, confirmed: bool) -> int:
+    from fixedyet.pullrequest import PullRequestError, open_backport_pr
+
+    def say(message: str) -> None:
+        print(f"pull request: {message}", file=sys.stderr, flush=True)
+
+    try:
+        pr = await open_backport_pr(
+            result, token=token, target="upstream" if target == "upstream" else "fork",
+            confirmed_upstream=confirmed, say=say,
+        )
+    except PullRequestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    state = "opened" if pr.created else "already open"
+    print(f"Draft pull request {state}: {pr.url}")
+    print(f"  base {pr.base_repo}:{pr.base_branch}, head {pr.head}, draft: {str(pr.draft).lower()}")
+    return 0
 
 
 # -- doctor ------------------------------------------------------------------------------------

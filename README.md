@@ -88,7 +88,7 @@ Keys in `.env` (never committed):
 |---|---|
 | `NEBIUS_API_KEY` | Token Factory inference, and Sandboxes unless `CONTREE_TOKEN` is set |
 | `TAVILY_API_KEY` | evidence. Without it that step is skipped |
-| `GITHUB_TOKEN` | optional, a read-only fine-grained token for public repositories, to lift the API rate limit. Without it GitHub allows 60 requests an hour and one run makes about 5 to 8, so a handful of runs empty the hour (a run that hits the limit still finishes, but cannot look up the fixing pull request) |
+| `GITHUB_TOKEN` | optional for `run`: a read-only fine-grained token for public repositories, to lift the API rate limit. Without it GitHub allows 60 requests an hour and one run makes about 5 to 8, so a handful of runs empty the hour (a run that hits the limit still finishes, but cannot look up the fixing pull request). Required only for `fixedyet backport --open-pr`, which also falls back to `gh auth token`: see [Verified backports](#verified-backports-draft-prs) for what that token may do |
 | `FIXEDYET_SANDBOX` | `nebius` (default) or `docker` for a local Docker daemon |
 | `FIXEDYET_KEEP_CHECKPOINTS` | Docker backend only: how many of the newest checkpoint images to keep (default 6) |
 
@@ -111,6 +111,8 @@ Useful options:
 ```bash
 fixedyet run URL --fix-ref v2.4.0     # fix side is a tag, branch or commit instead of main
 fixedyet run URL --md report.md --json assessment.json
+fixedyet backport URL                 # prove the fix on the maintenance branch (dry run)
+fixedyet backport URL --open-pr       # ... and open a DRAFT pull request on your fork
 fixedyet serve --port 8090            # the demo web app, on http://127.0.0.1:8090
 fixedyet serve --root-path /fixedyet  # the same, behind a proxy that serves it under /fixedyet/
 fixedyet mcp                          # the MCP server on stdio
@@ -119,12 +121,13 @@ fixedyet gc                           # prune old Docker checkpoint images now
 
 ## Use it from an AI assistant (MCP)
 
-The MCP server exposes two tools:
+The MCP server exposes three tools:
 
 | Tool | Returns |
 |---|---|
 | `reproduce_issue(issue_url, fix_ref=None)` | the markdown report followed by a JSON block with the full assessment |
 | `check_fixed(issue_url, ref)` | `{"fixed": true/false/null, "verdict", "confidence", "summary"}` |
+| `propose_backport(issue_url, target_branch=None)` | a dry run of [a verified backport](#verified-backports-draft-prs): the markdown summary followed by a JSON block with the result. It never pushes and never opens a pull request |
 
 `fixed` is `true` when the bug reproduces at the reported version and not at `ref`, `false` when it still reproduces at `ref`, and `null` when that cannot be said.
 
@@ -150,13 +153,81 @@ Or in any MCP client with a stdio entry:
 
 A run takes a few minutes and spends credits, so the assistant should call it on purpose.
 
+## Verified backports (draft PRs)
+
+A bug that is fixed on `main` is still broken for everyone on the release they use. When a run ends `fixed_on_main` and the fixing commit is known, `fixedyet backport` prepares that fix for the **maintenance branch of the reported version** and proves it there, so that a maintainer reviews a tested patch instead of a promise.
+
+```bash
+fixedyet backport https://github.com/OWNER/REPO/issues/123            # reproduce, then backport (dry run)
+fixedyet backport URL --from-assessment assessment.json              # reuse a saved run: no model calls
+fixedyet backport URL --target-branch 8.1.x --json r.json --md r.md  # choose the branch, save the result
+fixedyet backport URL --open-pr                                      # also open a DRAFT pull request on your fork
+fixedyet backport URL --open-pr --pr-target upstream                 # ... on the upstream project (asks first)
+```
+
+Without `--open-pr` nothing leaves your machine except the sandbox's own clone of the public repository. The command prints a markdown summary and exits 0 only for a verified backport.
+
+### The gates
+
+Each gate runs in the sandbox, from a fresh checkout of the head of the target branch. The model is not involved after the reproduction: a backport costs sandbox time, not tokens.
+
+1. **Find the branch.** From the repository's branch names (`git ls-remote --heads`): `8.1.x`, `v8.1.x`, `8.1`, `stable/8.1`, `release-8.1`, `maint/8.1`, `8.1-maintenance` and similar match a reported `8.1.3`. A line for another minor (`8.2.x`) never matches, and an unversioned `stable` is not guessed at; use `--target-branch` for those. No branch means `not_applicable`, with the reason and the branches that were seen.
+2. **The reproduction test must fail on the branch.** If it passes, the branch already has the fix (`already_fixed_on_branch`). If it errors or flips between runs, nothing can be judged (`error`).
+3. **`git cherry-pick -x <fixing commit>`**, with `-m 1` for a merge commit. A fix whose commit is unknown (a squashed pull request that could not be traced) is reported as such.
+4. **Conflicts stop it.** The pick is aborted and the conflicting files are listed (`conflicts`). The model never resolves conflicts: a resolved conflict is new code that nobody has reviewed.
+5. **Reinstall, and the reproduction test must pass.** If it still fails, the fix depends on other changes the branch does not have (`error`).
+6. **The project's own test suite, before and after** (pytest, every test, no `-x`, 900 s each, no network). A test that fails after the cherry-pick and did not fail before is a `regression`. Tests that already failed on the branch are the baseline and are not blamed on the patch. If the suite cannot run (timeout, collection crash) the backport cannot be called verified (`error`), and the patch is attached unverified.
+7. **`git format-patch`** of the cherry-pick is the result's `patch`.
+
+| Status | Meaning |
+|---|---|
+| `verified` | the test fails before and passes after, and no test newly fails |
+| `conflicts` | the cherry-pick does not apply; files listed, nothing resolved |
+| `regression` | the fix works but newly breaks other tests; they are named |
+| `already_fixed_on_branch` | the branch passes the reproduction test already |
+| `not_applicable` | not fixed on main, no known fixing commit, or no branch for that version |
+| `error` | a step could not be completed; the reason says which |
+
+The result (`BackportResult`) also carries the cherry-picked commit message, the reproduction test's outcomes before and after, the suite counts and failing test ids before and after, log excerpts, cost and wall time. When one is attached to an assessment, the markdown report gains a "Verified backport" section.
+
+### The draft pull request
+
+`--open-pr` works only on a `verified` result, and only as the owner of the token (`GITHUB_TOKEN`, or `gh auth token` when that is empty):
+
+1. fork the upstream repository into the token's account if there is no fork yet, and wait for it;
+2. on the host, apply the sandbox's patch to a throwaway clone of the verified base commit and push the branch `fixedyet/backport-<issue number>-<target branch>` to the **fork**, over HTTPS. Only git runs on the host (`fetch`, `am`, `push`, with hooks off): project code never does;
+3. open a **draft** pull request titled `Backport <short summary of fix> to <target branch>`. The body links the issue and the original commit, tabulates the reproduction test before and after the cherry-pick, gives the suite results and a patch summary.
+
+Where the pull request goes:
+
+| `--pr-target` | Base of the pull request |
+|---|---|
+| `fork` (default) | the fork's own copy of the maintenance branch. Nothing reaches the upstream project |
+| `upstream` | the upstream maintenance branch. FixedYet asks you to type the repository name first (skipped by `--yes-upstream`), before any sandbox work starts |
+
+What it never does: mark a pull request ready for review, comment on the upstream issue or pull request, push to the upstream repository, force-push (a rerun finds the open pull request and returns it instead of opening a second one), or print the token (it travels in a request header and in the environment of one git process, never in a URL or on a command line, and error messages are scrubbed of it).
+
+Every pull request body ends with this line, which cannot be turned off:
+
+> Prepared with FixedYet (AI-assisted: NVIDIA Nemotron via Nebius Token Factory); reviewed and submitted by @&lt;token owner login&gt;.
+
+The line says the pull request was prepared with AI, and that a named person is responsible for it. Read the patch before you submit one: a green suite is evidence, not a review.
+
+The token needs to create a fork, push to it and open pull requests: a fine-grained token with *Contents* and *Pull requests* write access on the fork (plus the permission to fork), or a classic token with `public_repo`.
+
+### Limits
+
+- Pytest projects that install with pip, like the rest of FixedYet. A project whose tests need a dependency group or a service the installer does not provide cannot be verified (`error`).
+- The suite runs without network, so a test that needs one fails before and after alike and sits in the baseline. A test that is flaky can still be reported as a regression; the failing ids are listed so that you can see.
+- Projects that keep one rolling branch (`stable`) instead of one branch per minor release give `not_applicable` unless you pass `--target-branch`. `pallets/click` is such a project at the time of writing.
+
 ## Web demo
 
 https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at saved example reports.
 
 Run it locally with `fixedyet serve`. The page uses only relative URLs, so it works at the root of a host and under a prefix: behind nginx's `location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }` (which strips the prefix), start it with `--root-path /fixedyet` or `FIXEDYET_ROOT_PATH=/fixedyet` so redirects carry the prefix. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](deploy/README.md).
 
-The reports in [`examples/`](examples) are saved output of real runs on real GitHub issues (Docker sandbox backend, Nemotron 3 Super through Token Factory). Each file names the issue it ran on, and the page marks them as real runs.
+The reports in [`examples/`](examples) are saved output of real runs on real GitHub issues (Docker sandbox backend, Nemotron 3 Super through Token Factory). Each file names the issue it ran on, and the page marks them as real runs. A saved `fixedyet backport --json` result in that folder (`real-backport-<owner>-<repo>-<number>.json` and `.md`) is listed and drawn as a backport report.
 
 ## Evaluation
 
@@ -206,7 +277,7 @@ As of a market check on 21 October 2026, to our knowledge no tool combines a pin
 
 - **Issue text and web content are untrusted data.** The model is told so, snippets are only ever run inside a sandbox, and nothing from an issue is run on the host.
 - **Code runs only in sandboxes.** The host process never executes code from an issue.
-- **It never posts to other people's repositories.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels, comments or pull requests are created.
+- **It never posts to other people's repositories by default.** The GitHub client only reads. Reports go to a file, to the terminal or to the demo page, so no labels or comments are created. The one write path is `fixedyet backport --open-pr`: it pushes to your own fork and opens a *draft* pull request, by default against the fork itself, and it never comments on an issue ([details](#verified-backports-draft-prs)).
 - **Secrets stay in the environment.** They are read from `.env` or the process environment, masked when settings are printed, and never returned by the web API or the MCP server. Web errors are short messages, never stack traces.
 - **The demo is rate limited,** to one run at a time and a daily total, so it cannot be used to spend the owner's credits without limit.
 
@@ -221,6 +292,8 @@ src/fixedyet/
   sandbox/         Nebius Sandboxes and Docker backends
   evidence.py      Tavily search and extract
   report.py        markdown rendering
+  backport.py      verified backports: branch detection, cherry-pick and suite gates in the sandbox
+  pullrequest.py   fork, push from the sandbox result, draft pull request (only with --open-pr)
   web/             the FastAPI demo and its static page
   mcp_server.py    the MCP server
   eval/            the SWE-bench loader and runner

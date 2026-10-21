@@ -197,7 +197,7 @@ async def test_ordinary_refs_are_accepted(pipeline: FakePipeline, ref: str) -> N
 
 async def test_both_tools_are_registered_with_descriptions() -> None:
     tools = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
-    assert set(tools) == {"reproduce_issue", "check_fixed"}
+    assert set(tools) == {"reproduce_issue", "check_fixed", "propose_backport"}
     assert "sandbox" in tools["reproduce_issue"].description.lower()
     assert "fixed" in tools["check_fixed"].description.lower()
 
@@ -218,3 +218,110 @@ def test_main_runs_the_stdio_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp_server.mcp, "run", fake_run)
     mcp_server.main()
     assert seen == ["stdio"]
+
+
+# --- propose_backport ---------------------------------------------------------------------
+
+
+def make_backport(status: str = "verified"):
+    from fixedyet.models import BackportResult, BackportStatus
+
+    return BackportResult(
+        status=BackportStatus(status), reason=f"it is {status}", issue_url=ISSUE,
+        title="Fake issue", repo="psf/requests", reported_version="2.31.0",
+        target_branch="2.31.x", fixing_commit="d959898db264aaf07e70ad4eafa254286f9a5185",
+    )
+
+
+class FakeBackport:
+    def __init__(self, status: str = "verified") -> None:
+        self.status = status
+        self.calls: list[tuple[Assessment, str | None]] = []
+
+    async def __call__(self, assessment: Assessment, target_branch: str | None):
+        self.calls.append((assessment, target_branch))
+        return make_backport(self.status)
+
+
+@pytest.fixture
+def backports(monkeypatch: pytest.MonkeyPatch, pipeline: FakePipeline) -> FakeBackport:
+    fake = FakeBackport()
+    monkeypatch.setattr(mcp_server, "run_backport", fake)
+    return fake
+
+
+async def test_propose_backport_reproduces_then_returns_markdown_and_json(
+    pipeline: FakePipeline, backports: FakeBackport
+) -> None:
+    out = await mcp_server.propose_backport(ISSUE, "2.31.x")
+
+    assert out.startswith("# Verified backport: the fix applies to 2.31.x")
+    data = json_block(out)
+    assert data["status"] == "verified" and data["target_branch"] == "2.31.x"
+    assert pipeline.calls == [(ISSUE, None)]  # the fix side is the default branch
+    (assessment, branch) = backports.calls[0]
+    assert assessment.verdict is Verdict.FIXED_ON_MAIN and branch == "2.31.x"
+
+
+async def test_propose_backport_without_a_branch_lets_the_detection_choose(
+    pipeline: FakePipeline, backports: FakeBackport
+) -> None:
+    await mcp_server.propose_backport(ISSUE)
+    await mcp_server.propose_backport(ISSUE, "  ")
+    assert [branch for _, branch in backports.calls] == [None, None]
+
+
+@pytest.mark.parametrize("status", ["conflicts", "regression", "not_applicable", "error"])
+async def test_propose_backport_reports_every_status(
+    pipeline: FakePipeline, backports: FakeBackport, status: str
+) -> None:
+    backports.status = status
+    out = await mcp_server.propose_backport(ISSUE)
+    assert json_block(out)["status"] == status and f"`{status}`" in out
+
+
+async def test_propose_backport_validates_before_any_run(
+    pipeline: FakePipeline, backports: FakeBackport
+) -> None:
+    with pytest.raises(ValueError):
+        await mcp_server.propose_backport("https://example.com/x")
+    with pytest.raises(ValueError):
+        await mcp_server.propose_backport(ISSUE, "../etc")
+    with pytest.raises(ValueError):
+        await mcp_server.propose_backport(ISSUE, "a b")
+    assert pipeline.calls == [] and backports.calls == []
+
+
+async def test_propose_backport_is_a_dry_run_that_never_touches_github(
+    pipeline: FakePipeline, backports: FakeBackport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*_: object, **__: object) -> None:
+        raise AssertionError("the MCP tool must never open a pull request")
+
+    monkeypatch.setattr("fixedyet.pullrequest.open_backport_pr", forbidden)
+    monkeypatch.setattr("fixedyet.pullrequest.PullRequestClient", forbidden)
+    await mcp_server.propose_backport(ISSUE)
+
+
+def test_the_mcp_server_has_no_way_to_reach_the_pull_request_code() -> None:
+    from pathlib import Path
+
+    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
+    assert "fixedyet.pullrequest" not in source and "open_backport_pr" not in source
+
+
+async def test_propose_backport_is_described_as_a_dry_run() -> None:
+    tools = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
+    text = tools["propose_backport"].description.lower()
+    assert "dry run" in text and "nothing is pushed" in text
+
+
+async def test_a_broken_backport_renderer_does_not_hide_the_status(
+    pipeline: FakePipeline, backports: FakeBackport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_: object) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mcp_server, "render_backport", broken)
+    out = await mcp_server.propose_backport(ISSUE)
+    assert out.startswith("# Backport: verified") and json_block(out)["status"] == "verified"

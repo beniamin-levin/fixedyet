@@ -44,7 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from fixedyet.models import Assessment, ProgressEvent
+from fixedyet.models import Assessment, BackportResult, ProgressEvent
 from fixedyet.web import parse_issue_url
 
 logger = logging.getLogger("fixedyet.web")
@@ -56,6 +56,11 @@ KEEPALIVE_S = 15.0
 MAX_RUNS_IN_MEMORY = 100
 DEFAULT_DAILY_LIMIT = 5
 DEFAULT_RUN_BUDGET_USD = 0.60
+
+PAUSED_MESSAGE = (
+    "Live runs are paused while the demo has no sandbox backend, so nothing can be reproduced "
+    "right now. Read the example reports instead, or run FixedYet yourself."
+)
 
 SECURITY_HEADERS = [
     (b"x-content-type-options", b"nosniff"),
@@ -88,6 +93,12 @@ def render_report(assessment: Assessment) -> str:
     from fixedyet.report import render_markdown
 
     return render_markdown(assessment)
+
+
+def render_backport(result: BackportResult) -> str:
+    from fixedyet.report import render_backport_markdown
+
+    return render_backport_markdown(result)
 
 
 def budget_remaining(settings: Any) -> float:
@@ -302,14 +313,18 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
     """Read ``*.json`` Assessments (optional ``*.md`` next to each). Bad files are skipped.
 
     A file may carry an ``_example`` object with ``label``, ``note`` and ``illustrative``
-    (true for hand-written samples that are not the output of a real run).
+    (true for hand-written samples that are not the output of a real run). A file holding a
+    BackportResult (`fixedyet backport --json`, recognised by its ``status`` and no ``verdict``)
+    becomes an example of ``kind`` "backport" with ``verdict`` "backport_<status>".
     """
     examples: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             meta = data.pop("_example", None) if isinstance(data, dict) else None
-            assessment = Assessment.model_validate(data)
+            is_backport = isinstance(data, dict) and "status" in data and "verdict" not in data
+            backport = BackportResult.model_validate(data) if is_backport else None
+            assessment = None if is_backport else Assessment.model_validate(data)
         except (OSError, ValueError):
             logger.warning("skipping unreadable example %s", path.name)
             continue
@@ -319,10 +334,33 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
             markdown = path.with_suffix(".md").read_text(encoding="utf-8")
         except OSError:
             with contextlib.suppress(Exception):
-                markdown = render_report(assessment)
+                if backport is not None:
+                    markdown = render_backport(backport)
+                elif assessment is not None:
+                    markdown = render_report(assessment)
+        if backport is not None:
+            examples.append(
+                {
+                    "id": path.stem,
+                    "kind": "backport",
+                    "label": str(meta.get("label") or backport.title),
+                    "note": str(meta.get("note") or ""),
+                    "illustrative": bool(meta.get("illustrative", False)),
+                    "issue_url": backport.issue_url,
+                    "title": backport.title,
+                    "verdict": f"backport_{backport.status.value}",
+                    "confidence": "",
+                    "assessment": None,
+                    "backport": backport.model_dump(mode="json"),
+                    "markdown": markdown,
+                }
+            )
+            continue
+        assert assessment is not None
         examples.append(
             {
                 "id": path.stem,
+                "kind": "assessment",
                 "label": str(meta.get("label") or assessment.title),
                 "note": str(meta.get("note") or ""),
                 "illustrative": bool(meta.get("illustrative", False)),
@@ -331,6 +369,7 @@ def load_examples(directory: Path) -> list[dict[str, Any]]:
                 "verdict": assessment.verdict.value,
                 "confidence": assessment.confidence.value,
                 "assessment": assessment.model_dump(mode="json"),
+                "backport": None,
                 "markdown": markdown,
             }
         )
@@ -471,13 +510,15 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
         store = get_store()
         examples_url = f"{request.scope.get('root_path', '')}/api/examples"
         if store.runs_today() >= daily_limit():
-            return _error(
-                429,
-                "daily_limit",
-                "Today's live runs are used up. Each run costs real compute, so the demo has a "
-                "daily limit. Read the example reports instead, or run FixedYet yourself.",
-                examples=examples_url,
-            )
+            if daily_limit() <= 0:  # a limit of 0 is "paused", not "used up today"
+                message = PAUSED_MESSAGE
+            else:
+                message = (
+                    "Today's live runs are used up. Each run costs real compute, so the demo "
+                    "has a daily limit. Read the example reports instead, or run FixedYet "
+                    "yourself."
+                )
+            return _error(429, "daily_limit", message, examples=examples_url)
         if budget_remaining(get_settings()) + 1e-9 < run_budget():  # tolerance: float sums
             return _error(
                 429,
