@@ -29,10 +29,10 @@
       <h1>Reproduce before you answer</h1>
       <p class="lead">
         Paste a public GitHub issue. An agent on NVIDIA Nemotron writes a pytest reproduction,
-        runs it in a Docker sandbox at the reported version and again on main, and fixed rules,
+        runs it in a Nebius sandbox at the reported version and again on main, and fixed rules,
         not the model, decide the verdict.
       </p>
-      <p class="seen-one">A live run takes 1.5 to 5 minutes.
+      <p class="seen-one">A live run takes 1 to 4 minutes.
         <a href="reports#real-pallets-jinja-2244">See a finished one first</a>: an open bug in
         Jinja, reproduced, then a one-line fix verified against its 911 tests.</p>
 
@@ -123,8 +123,8 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <p>Built on NVIDIA Nemotron via Nebius Token Factory, and Tavily. Code runs in a Docker
-        sandbox; a Nebius Sandboxes backend is implemented and waiting for beta access.</p>
+      <p>Built on NVIDIA Nemotron and Sandboxes on Nebius Token Factory, and Tavily. Code runs in
+        Nebius Sandboxes; a Docker backend with the same interface runs FixedYet locally.</p>
       <p><a href="https://github.com/beniamin-levin/fixedyet">github.com/beniamin-levin/fixedyet</a>
         <span aria-hidden="true">·</span> MIT licence
         <span aria-hidden="true">·</span> Nebius x NVIDIA Global AI Hackathon 2026</p>

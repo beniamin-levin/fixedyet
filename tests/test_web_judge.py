@@ -458,5 +458,5 @@ def test_no_page_claims_a_microvm_sandbox() -> None:
         assert "microvm" not in text.lower(), name
     for name in ("index.html", "reports.html"):
         text = " ".join((web.STATIC_DIR / name).read_text(encoding="utf-8").split())
-        assert "Docker sandbox" in text, name
-        assert "waiting for beta access" in text, name
+        assert "Code runs in Nebius Sandboxes" in text, name
+        assert "Docker backend" in text, name
