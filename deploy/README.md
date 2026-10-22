@@ -161,7 +161,7 @@ FIXEDYET_UPSTREAM=<docker-vm-private-ip>:8090 deploy/deploy.sh <proxy-vm-public-
 
 Inside each sandbox container the project's tests run as an unprivileged user (`fixedyet`, created by the baseline step; setup steps stay root), so the host needs no change for it. Checkpoint images built by an older version have no such user, and runs from them fall back to root; every run builds a fresh baseline, so there is nothing to clear.
 
-Also allow TCP 8090 from the proxy VM's private IP in the cloud security list. The second command points the nginx snippet at the Docker VM, stops and disables the local service on the proxy VM, and checks the upstream's `/healthz`. To go back, run a plain `deploy/deploy.sh <proxy-vm-public-ip>`.
+Also allow TCP 8090 from the proxy VM's private IP in the cloud security list. The Docker VM's drop-in (`fixedyet-docker-host.conf`) sets `FORWARDED_ALLOW_IPS` to that same IP, so uvicorn takes the scheme and the client address from nginx's `X-Forwarded-Proto` and `X-Forwarded-For` and a redirect stays on https; if the proxy VM's address changes, change it there or put a `FORWARDED_ALLOW_IPS=` line in `/etc/fixedyet.env`. Check: `curl -sI https://fixedyet.benlevin.fyi/reports/` answers `location: https://fixedyet.benlevin.fyi/reports`. The second command points the nginx snippet at the Docker VM, stops and disables the local service on the proxy VM, and checks the upstream's `/healthz`. To go back, run a plain `deploy/deploy.sh <proxy-vm-public-ip>`.
 
 ## Operating it
 

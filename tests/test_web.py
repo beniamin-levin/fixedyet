@@ -256,6 +256,43 @@ async def test_error_bodies_point_at_the_prefixed_examples_url(
     assert res.json()["examples"] == "/fixedyet/api/examples"
 
 
+# --- behind the proxy on another VM -----------------------------------------------------
+
+DEPLOY_DIR = Path(__file__).resolve().parents[1] / "deploy"
+
+
+@pytest.mark.parametrize(("peer", "scheme"), [("proxy", "https"), ("10.9.9.9", "http")])
+async def test_behind_the_proxy_a_redirect_stays_on_https(
+    tmp_path: Path, peer: str, scheme: str
+) -> None:
+    """https://fixedyet.benlevin.fyi/reports/ redirects to /reports. uvicorn takes the scheme
+    from X-Forwarded-Proto only when the request comes from an address in FORWARDED_ALLOW_IPS,
+    which the Docker host's drop-in sets to the nginx VM; from anywhere else it is ignored."""
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    drop_in = (DEPLOY_DIR / "fixedyet-docker-host.conf").read_text(encoding="utf-8")
+    found = re.search(r"^Environment=FORWARDED_ALLOW_IPS=(\S+)$", drop_in, re.MULTILINE)
+    assert found, "the Docker host must trust the forwarded headers of the nginx VM"
+    proxy = found.group(1)
+    nginx = (DEPLOY_DIR / "fixedyet.nginx.conf").read_text(encoding="utf-8")
+    assert "proxy_set_header X-Forwarded-Proto $scheme;" in nginx
+    assert "proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;" in nginx
+
+    app = web.create_app(make_settings(tmp_path), examples_dir=tmp_path / "no-examples")
+    transport = httpx.ASGITransport(
+        app=ProxyHeadersMiddleware(app, trusted_hosts=proxy),
+        client=(proxy if peer == "proxy" else peer, 51000),
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://fixedyet.benlevin.fyi"
+    ) as client:
+        res = await client.get(
+            "/reports/", headers={"X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9"}
+        )
+    assert res.status_code in (307, 308)
+    assert res.headers["location"] == f"{scheme}://fixedyet.benlevin.fyi/reports"
+
+
 def test_route_path_strips_only_a_whole_leading_segment() -> None:
     assert web.route_path({"path": "/fixedyet/api/x", "root_path": "/fixedyet"}) == "/api/x"
     assert web.route_path({"path": "/fixedyet", "root_path": "/fixedyet"}) == "/"
