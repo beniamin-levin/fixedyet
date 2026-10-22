@@ -79,6 +79,8 @@ flowchart LR
 | the issue has no runnable reproduction | not run | `needs_info` |
 | runs disagree on either side | | `inconsistent`, confidence low |
 
+An `inconsistent` result puts the test in doubt, not the code, so FixedYet then writes one more, independent test from the issue alone (nothing from the first attempt or the fix side reaches the model) and reports that second test's verdict, whatever it is, with the first test kept in the report.
+
 ## Quickstart
 
 Python 3.12 or newer, and a running Docker daemon (Docker Desktop, or Colima on a Mac).

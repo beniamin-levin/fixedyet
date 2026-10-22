@@ -259,11 +259,60 @@ async def test_an_invalid_reason_is_ignored(world) -> None:
     assert (await world.run()).not_reproduced_reason is None
 
 
+def two_attempts_script(llm, analysis: Any = ANALYSIS) -> None:
+    """An inconsistent first test, then the second, independent one."""
+    llm.queue(
+        CONTRACT,
+        llm.tool("run_test", code=GOOD_TEST),
+        llm.tool("submit", code=GOOD_TEST, rationale="note one"),
+        llm.tool("run_test", code=GOOD_TEST),
+        llm.tool("submit", code=GOOD_TEST, rationale="note two"),
+        analysis,
+    )
+
+
 async def test_flaky_runs_are_inconsistent_with_low_confidence(world) -> None:
     world.env.reported = [Outcome.FAIL, Outcome.PASS]
-    happy_script(world.llm)
+    two_attempts_script(world.llm)
     a = await world.run()
     assert (a.verdict, a.confidence) == (Verdict.INCONSISTENT, Confidence.LOW)
+    assert "this verdict comes from a second, independent test" in a.confidence_basis[-1]
+
+
+async def test_an_inconsistent_first_test_gets_a_second_independent_one(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Most inconsistent results in the SWE-bench runs were tests with a wrong expected value."""
+    from fixedyet import envbuild
+
+    original = world.env.run_test_on_side
+
+    async def first_flaky(*args: Any, **kwargs: Any) -> Any:
+        if len(world.env.side_calls) >= 2:  # the second attempt's two sides
+            world.env.reported = [Outcome.FAIL, Outcome.FAIL]
+        return await original(*args, **kwargs)
+
+    world.env.reported = [Outcome.FAIL, Outcome.PASS]
+    monkeypatch.setattr(envbuild, "run_test_on_side", first_flaky)
+    two_attempts_script(world.llm)
+    a = await world.run()
+    assert (a.verdict, a.confidence) == (Verdict.FIXED_ON_MAIN, Confidence.HIGH)
+    assert len(world.env.side_calls) == 4
+    assert "independent test written from the issue alone" in a.confidence_basis[-1]
+    (first,) = [e for e in a.evidence if e.title.startswith("The first test, inconsistent")]
+    assert first.why.startswith("Inconsistent (") and "def test_parse_keeps_last_item" in first.why
+    # the second agent saw nothing of the first attempt: a fresh conversation
+    second_start = [c for c in world.llm.calls if c["tools"]][2]["messages"]
+    assert len(second_start) == 2 and "note one" not in str(second_start)
+    analysis = world.llm.calls[-1]["messages"][1]["content"]
+    assert "note two" in analysis and "note one" not in analysis
+
+
+async def test_a_clear_first_verdict_is_not_tried_again(world) -> None:
+    happy_script(world.llm)
+    a = await world.run()
+    assert a.verdict is Verdict.FIXED_ON_MAIN and len(world.env.side_calls) == 2
+    assert not any("second" in line for line in a.confidence_basis)
 
 
 async def test_a_side_that_errors_is_unsupported(world) -> None:

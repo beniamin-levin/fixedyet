@@ -150,6 +150,7 @@ class _Context:
     stage: Stage = "intake"
     contract: ReproContract | None = None
     transcript: str = ""
+    first_test: str = ""  # the test of a first attempt that came out inconsistent, and why
     reproduction: Reproduction = field(default_factory=Reproduction)
     caveats: list[str] = field(default_factory=list)  # facts that cap confidence at LOW
 
@@ -390,29 +391,49 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
     project_label = contract.package or issue.repo
     agent_packages = [*installed, *(f"{project_label}[{extra}]" for extra in extras_ok)]
 
-    await ctx.say("agent", f"{model_label(llm.settings.model)} writes the reproduction test; "
-                  "every tool call runs in a fork of the checkpoint")
-    test_path, test_code, ctx.transcript = await write_repro_test(
-        llm, sb, image, issue, contract, ctx.progress, installed_packages=agent_packages
-    )
-    ctx.reproduction.repro_test_path = test_path
-    ctx.reproduction.repro_test_code = test_code
+    # An inconsistent result puts the test in doubt, not the code: one more, independent test is
+    # written from the issue alone (nothing from the first attempt or the fix side reaches the
+    # model), and its verdict is the one reported, whatever it is. In the SWE-bench runs of
+    # 22 October 2026 most inconsistent results were tests with a wrong expected value.
+    for attempt in (1, 2):
+        await ctx.say("agent", (
+            f"{model_label(llm.settings.model)} writes the reproduction test; every tool call "
+            "runs in a fork of the checkpoint"
+        ) if attempt == 1 else (
+            f"The first test was inconsistent, so the test is in doubt: "
+            f"{model_label(llm.settings.model)} writes a second, independent one"
+        ))
+        test_path, test_code, transcript = await write_repro_test(
+            llm, sb, image, issue, contract, ctx.progress, installed_packages=agent_packages
+        )
+        ctx.transcript = f"{ctx.transcript}\n{transcript}".strip()
+        ctx.reproduction.repro_test_path = test_path
+        ctx.reproduction.repro_test_code = test_code
 
-    await ctx.say("run_reported", f"Running the test at {reported_ref} and on {fix_label}")
-    reported, fix = await asyncio.gather(
-        _run_side(ctx, sb, image, test_path, test_code, ref=reported_ref),
-        _run_side(
-            ctx, sb, image, test_path, test_code, ref=fix_label,
-            checkout=None if ctx.patch else (ctx.fix_ref or issue.default_branch),
-            patch=ctx.patch, project_extras=extras_ok,
-        ),
-    )
-    ctx.reproduction.reported_side, ctx.reproduction.fix_side = reported, fix
-    await ctx.say(
-        "run_fix", f"{_outcomes(reported)} at {reported.ref}; {_outcomes(fix)} on {fix.ref}"
-    )
-
-    return decide(reported, fix, runnable=True, env_ok=True, thread=thread_text(issue))
+        await ctx.say("run_reported", f"Running the test at {reported_ref} and on {fix_label}")
+        reported, fix = await asyncio.gather(
+            _run_side(ctx, sb, image, test_path, test_code, ref=reported_ref),
+            _run_side(
+                ctx, sb, image, test_path, test_code, ref=fix_label,
+                checkout=None if ctx.patch else (ctx.fix_ref or issue.default_branch),
+                patch=ctx.patch, project_extras=extras_ok,
+            ),
+        )
+        ctx.reproduction.reported_side, ctx.reproduction.fix_side = reported, fix
+        await ctx.say(
+            "run_fix", f"{_outcomes(reported)} at {reported.ref}; {_outcomes(fix)} on {fix.ref}"
+        )
+        decision = decide(reported, fix, runnable=True, env_ok=True, thread=thread_text(issue))
+        if decision[0] is not Verdict.INCONSISTENT or attempt == 2:
+            break
+        why = "; ".join(decision[2])
+        ctx.first_test = f"Inconsistent ({why}).\n\n{test_code}"
+    if ctx.first_test:
+        verdict, confidence, basis = decision
+        basis = [*basis, "the first test was inconsistent; this verdict comes from a second, "
+                 "independent test written from the issue alone"]
+        decision = (verdict, confidence, basis)
+    return decision
 
 
 def model_label(model: str) -> str:
@@ -540,6 +561,11 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
     if ctx.transcript:
         steps = truncate(ctx.transcript.replace("\n", " | "), 1_500)
         log_evidence = [Evidence(kind="log", title="How the test was written", why=steps)]
+    if ctx.first_test:
+        log_evidence.append(Evidence(
+            kind="log", title="The first test, inconsistent, replaced by a second one",
+            why=truncate(ctx.first_test, 1_500),
+        ))
 
     usage = ctx.llm.usage.model_copy()
     usage.wall_seconds = round(time.monotonic() - started, 2)
@@ -755,8 +781,8 @@ async def _write_analysis(
     ]
     # The test writer's own account of the test (model text, unchecked, but it has read the code
     # this call has not). The submit line of the transcript.
-    note = next(
-        (line.removeprefix("submitted: ") for line in ctx.transcript.splitlines()
+    note = next(  # the last submit: the test that decided, after a second attempt too
+        (line.removeprefix("submitted: ") for line in reversed(ctx.transcript.splitlines())
          if line.startswith("submitted: ")), "",
     )
     if note.strip():
