@@ -142,7 +142,7 @@ Behaviour worth knowing:
 
 ## Results, the agent of 22 October 2026
 
-**Three full runs of the 15 instances on the final agent (commit `cdde69b`): 13, 12 and 11 reproduced** (87%, 80% and 73%; mean 12 of 15). 14 of the 15 instances were reproduced in at least one of the three runs; pylint-4970 never was. Same setup as before: SWE-bench Verified, local Docker (Colima on an Apple-silicon Mac), Nemotron 3 Super with Nemotron 3 Nano for intake, concurrency 2.
+**Three full runs of the 15 instances on the final agent (commit `e6f2f25`): 13, 12 and 11 reproduced** (87%, 80% and 73%; mean 12 of 15). 14 of the 15 instances were reproduced in at least one of the three runs; pylint-4970 never was. Same setup as before: SWE-bench Verified, local Docker (Colima on an Apple-silicon Mac), Nemotron 3 Super with Nemotron 3 Nano for intake, concurrency 2.
 
 | Run | Results file | `fixed_on_main` | Wrong `open_bug` (high confidence) | `not_reproduced` | `inconsistent` | `unsupported` | Mean / median cost | Mean wall time | Total |
 |---|---|---|---|---|---|---|---|---|---|
@@ -185,19 +185,19 @@ Every run is kept in `eval/results/`. These ran on intermediate commits that a l
 
 | Run | Commit | Reproduced | Why it was replaced |
 |---|---|---|---|
-| `20261022T053836Z` | `e7969d0` | 10 of 15 | first agent changes; the misses showed the scripts sent as tests (requests-5414: six refusals) |
-| `20261022T055757Z` | `987d2d9` (`run_python`) | 7 of the first 10, stopped | stopped to add the import check, the network note and the turn-limit fallback |
-| `20261022T061444Z` | `df12609` | 11 of 15, 3 `unsupported` | a regression of `run_python`: three instances ran scripts for all 20 turns and wrote no test (fixed in `85a9536`) |
-| `20261022T062307Z` | `df12609` | 6 of the first 8, stopped | the same regression |
-| `20261022T062753Z` | `85a9536` | 11 of the first 14, stopped | stopped when psf/black#5468 showed the one-input test |
-| `20261022T065113Z`, `070406Z`, `071715Z` | `194fc16` | 10, 9, 11 | requests-2317 tested the quoted helper, requests-2931 sent a request to example.com |
-| `20261022T073005Z`, `073855Z`, `074708Z` | `cb1c27b` | 10, 10, 10 | most misses were `inconsistent` tests with a wrong expected value |
+| `20261022T053836Z` | `bac67f8` | 10 of 15 | first agent changes; the misses showed the scripts sent as tests (requests-5414: six refusals) |
+| `20261022T055757Z` | `198102a` (`run_python`) | 7 of the first 10, stopped | stopped to add the import check, the network note and the turn-limit fallback |
+| `20261022T061444Z` | `1bdd64f` | 11 of 15, 3 `unsupported` | a regression of `run_python`: three instances ran scripts for all 20 turns and wrote no test (fixed in `5fd17d9`) |
+| `20261022T062307Z` | `1bdd64f` | 6 of the first 8, stopped | the same regression |
+| `20261022T062753Z` | `5fd17d9` | 11 of the first 14, stopped | stopped when psf/black#5468 showed the one-input test |
+| `20261022T065113Z`, `070406Z`, `071715Z` | `ff21320` | 10, 9, 11 | requests-2317 tested the quoted helper, requests-2931 sent a request to example.com |
+| `20261022T073005Z`, `073855Z`, `074708Z` | `703f4b1` | 10, 10, 10 | most misses were `inconsistent` tests with a wrong expected value |
 
 Total model spend of the day's evaluation, development runs included: about $6.55 at list price.
 
 ### Model choice, 22 October 2026
 
-A check of the model choice: two variants of the final agent, two full runs each on the same 15 instances, against F1 to F3 above. In the first, Super runs the agent with its reasoning off (`FIXEDYET_AGENT_THINKING=off`, commit `0f3eec2`; the root cause analysis keeps its reasoning). In the second, Nano is the main model (`FIXEDYET_MODEL=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`), so it runs the agent, the analysis and the check of a "not runnable" contract. The results files are in `eval/results/ablations/`.
+A check of the model choice: two variants of the final agent, two full runs each on the same 15 instances, against F1 to F3 above. In the first, Super runs the agent with its reasoning off (`FIXEDYET_AGENT_THINKING=off`, commit `a6a9edf`; the root cause analysis keeps its reasoning). In the second, Nano is the main model (`FIXEDYET_MODEL=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`), so it runs the agent, the analysis and the check of a "not runnable" contract. The results files are in `eval/results/ablations/`.
 
 | Main model | Runs | Reproduced | Instance runs reproduced (95% interval) | Instances reproduced in either of the first two runs | Wrong `open_bug` (high confidence) | `unsupported` | Mean cost per issue | Mean wall time | Output tokens per issue |
 |---|---|---|---|---|---|---|---|---|---|
@@ -213,7 +213,7 @@ Two runs per variant is a small sample. The spread between runs of one agent is 
 
 ## Results, rules v2
 
-Measured on 2026-10-21 (UTC, evening), after the first measurement further down. Every wrong verdict of that first measurement, on SWE-bench and on the live issues, was an `open_bug` from a model-written test that failed on both sides for a reason other than the bug. Rules v2 (`verdict.RULES_VERSION`, commits `5032c35` to `1341466`) changes two things.
+Measured on 2026-10-21 (UTC, evening), after the first measurement further down. Every wrong verdict of that first measurement, on SWE-bench and on the live issues, was an `open_bug` from a model-written test that failed on both sides for a reason other than the bug. Rules v2 (`verdict.RULES_VERSION`, commits `1aed881` to `8b6b8b1`) changes two things.
 
 The verdict rules (no model, see [the decision matrix](architecture.md#decision-matrix-verdictpy)):
 
@@ -250,7 +250,7 @@ What did not move, and cannot by rule: pylint-6528 (four of the five saved runs)
 
 ### New live runs
 
-Same setup as the first measurement: SWE-bench Verified, local Docker (Colima on an Apple-silicon Mac), Nemotron 3 Super with Nemotron 3 Nano for intake, concurrency 2. The seven-id runs used commit `ec644cb`, run C `cb2d662` (the same code plus a re-score input). Three runs, in this order: the seven instances that ever came out `open_bug` (in any of the five saved runs), twice, and then the full fifteen once, to check that the new rules and notes did not cost reproductions.
+Same setup as the first measurement: SWE-bench Verified, local Docker (Colima on an Apple-silicon Mac), Nemotron 3 Super with Nemotron 3 Nano for intake, concurrency 2. The seven-id runs used commit `bcf670e`, run C `b931b20` (the same code plus a re-score input). Three runs, in this order: the seven instances that ever came out `open_bug` (in any of the five saved runs), twice, and then the full fifteen once, to check that the new rules and notes did not cost reproductions.
 
 | Run | Results file | Instances | `fixed_on_main` | Wrong `open_bug` | of which high confidence | `inconsistent` | Other | Cost |
 |---|---|---|---|---|---|---|---|---|
@@ -282,13 +282,13 @@ Read per instance:
 - pylint-4604 in run C is the same test as run B: it names `variables.UnusedImportChecker`, which does not exist, and pytest cannot collect it on either side. The agent was told so after its run (an error before any assertion) and submitted it anyway. In the other runs the model kept sending files without a test function (rejected before a run), which is not new.
 - requests-2317 in run C is `needs_info`: Nemotron Nano read the issue as having no runnable reproduction, which it did not do in the other seven runs.
 
-The agent's notes, as the transcripts show them: the type-mismatch or API note appeared in 2 of the 29 new instance runs (requests-2317 run 1, pylint-7277 run C), and the symptom check sent a test back 4 times (requests-5414 three times, pytest-10051 once). For requests-5414 the issue reports a `UnicodeError` that this environment does not raise (urllib3 raises `LocationParseError`); the model said so and resubmitted, and the instance was reproduced each time. For pytest-10051 the bounce was a false alarm: a failed plain `assert` does not print the word AssertionError. That was fixed after run C (`1341466`); the runs above were made before it.
+The agent's notes, as the transcripts show them: the type-mismatch or API note appeared in 2 of the 29 new instance runs (requests-2317 run 1, pylint-7277 run C), and the symptom check sent a test back 4 times (requests-5414 three times, pytest-10051 once). For requests-5414 the issue reports a `UnicodeError` that this environment does not raise (urllib3 raises `LocationParseError`); the model said so and resubmitted, and the instance was reproduced each time. For pytest-10051 the bounce was a false alarm: a failed plain `assert` does not print the word AssertionError. That was fixed after run C (`8b6b8b1`); the runs above were made before it.
 
 Total model spend of the three runs and the four controls: $1.05 at list price, counted in the spend ledger.
 
 ### Controls on real open bugs
 
-Run with `fixedyet run` on the local Docker backend at commit `ec644cb`, with a GitHub token (for the linked pull requests).
+Run with `fixedyet run` on the local Docker backend at commit `bcf670e`, with a GitHub token (for the linked pull requests).
 
 | Issue | What is true | Before (demo, rules v1) | Now (rules v2) | Cost |
 |---|---|---|---|---|
@@ -455,13 +455,13 @@ On 21 October 2026, ten real issues from ten pure-Python projects were run on th
 
 **First pass: 6 correct, 2 wrong, 2 without a verdict.** The two `unsupported` runs were environment failures, not model failures. python-dotenv's tests need its `cli` extra (click), which was never installed. jinja ships a requirements file for Python 3.7 that downgraded `trio` below what Python 3.13 can import. Both were fixed in general terms (`6a5d38d`, `a952ec1`: a project's own extras, other Pythons' requirements files skipped, a conftest that cannot load repaired from the project's own declared requirements), and both issues were then rerun on the demo. **After those fixes: 8 correct and 2 wrong out of 10.** Both wrong verdicts are `open_bug` from a wrong model-written test, the same failure mode as the SWE-bench misses. Re-scored by rules v2 (above, no model call), both become `inconsistent`, so none of the ten is wrong any more, and none of the eight correct verdicts changed.
 
-**Rerun on the final agent, 22 October 2026** (commit `cdde69b`, deployed on the demo; all ten again, one after another, 29 minutes and $0.15 in all):
+**Rerun on the final agent, 22 October 2026** (commit `e6f2f25`, deployed on the demo; all ten again, one after another, 29 minutes and $0.15 in all):
 
 | Issue | Verdict | Correct? |
 |---|---|---|
 | werkzeug#3312, packaging#1315, isort#2723, parse#262, python-dotenv#697 | `fixed_on_main`, high; the fixing commit found for each (`7ad32e8`, `0a85b41`, `986b53f`, `4f76a3e`, `e0310e5`) | yes |
 | marshmallow#3072, dateutil#1588, jinja#2244 | `open_bug`, high | yes: all three still open, each with an unmerged pull request |
-| pyparsing#693 | `fixed_on_main`, **low**: "the reported version is not in the history of master" | the test is right this time (the issue's snippet: the comment leaks into the result at 3.3.3 and not on master), but 3.3.3 was released from its own branch, `3.3.3_work`, which master never merged, so nothing was fixed on master. That is what the new history check (`e21fd10`) says; the issue is still open |
+| pyparsing#693 | `fixed_on_main`, **low**: "the reported version is not in the history of master" | the test is right this time (the issue's snippet: the comment leaks into the result at 3.3.3 and not on master), but 3.3.3 was released from its own branch, `3.3.3_work`, which master never merged, so nothing was fixed on master. That is what the new history check (`e62601d`) says; the issue is still open |
 | pytest-mock#639 | `inconsistent`, low, after a second test | no: fixed the day it was opened. The bug is in the wording of the failure message, and both tests asserted only that the call fails, not what the message says |
 
 **8 of 10 correct, the other two flagged at low confidence with the reason, none wrong at high confidence.** The ten assessments are saved in `eval/live/20261022/`. pyparsing#693 is the run that led to the history check: before it, the same result said `fixed_on_main` at high confidence.
