@@ -170,6 +170,8 @@ def test_failure_cause_by_verdict() -> None:
     assert "reason environment" in cause
     regress = assessment(Verdict.INCONSISTENT, reported=ok, fix=fail)
     assert "fails with the gold patch" in failure_cause(regress, None)
+    text_differs = assessment(Verdict.INCONSISTENT, reported=fail, fix=fail)  # rules v2
+    assert failure_cause(text_differs, None).startswith("fails on both sides, with different")
     flaky = assessment(Verdict.INCONSISTENT, reported=side(Outcome.FAIL, Outcome.PASS), fix=ok)
     assert "runs disagree" in failure_cause(flaky, None)
     unsupported = assessment(Verdict.UNSUPPORTED, basis=["pip install failed"])

@@ -175,6 +175,9 @@ def failure_cause(assessment: Assessment | None, error: str | None) -> str:
         reported, fix = repro.reported_side, repro.fix_side
         if (reported and reported.stable_outcome is None) or (fix and fix.stable_outcome is None):
             return f"runs disagree on a side ({sides})"
+        if reported and fix and reported.stable_outcome is fix.stable_outcome:
+            # rules v2: both sides fail, with different failure text
+            return f"fails on both sides, with different failure text ({sides})"
         return f"passes at base but fails with the gold patch ({sides})"
     if verdict is Verdict.UNSUPPORTED:
         return basis or f"environment or test errored ({sides})"
