@@ -1203,8 +1203,22 @@ def clean_summary(text: str, fallback: str) -> str:
     if len(line) < 8:
         line = " ".join(fallback.split())
     if len(line) > 72:
-        line = line[:69].rstrip() + "..."
+        line = _shorten(line, 72)
     return line
+
+
+_DANGLING = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the",
+             "to", "with"}
+
+
+def _shorten(line: str, limit: int) -> str:
+    """At most `limit` characters, cut at a word boundary and without a dangling small word: a
+    subject cut mid-word ("...upper bound f...") read as broken in a pull request title."""
+    head = line[: limit + 1]
+    words = head.rsplit(" ", 1)[0].split() if " " in head else [line[:limit]]
+    while len(words) > 3 and words[-1].lower() in _DANGLING:
+        words.pop()
+    return " ".join(words).rstrip(",;:-")
 
 
 # -- validating and applying the edits on the host (text only) -----------------------------------

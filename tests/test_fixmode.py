@@ -341,6 +341,12 @@ def test_the_summary_is_cleaned_for_a_commit_subject() -> None:
         "Remove __html__ from ChainableUndefined")
     assert fm.clean_summary("", "Fix #42: parse drops") == "Fix #42: parse drops"
     assert len(fm.clean_summary("x" * 200, "f")) == 72
+    long = (
+        "Fix compatible-release constraint stripping to preserve upper bound for three-part specs"
+    )
+    assert fm.clean_summary(long, "f") == (
+        "Fix compatible-release constraint stripping to preserve upper bound"
+    )
 
 
 # -- validating the edits ----------------------------------------------------------------------
