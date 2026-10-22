@@ -618,6 +618,25 @@ async def test_run_python_runs_a_plain_script_offline_as_the_tester(
     assert "run_python -> exit code 0" in summary and code == GOOD_TEST  # a script is no test
 
 
+async def test_run_python_is_refused_once_a_first_test_is_due(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("fixedyet_try.py", ExecResult(exit_code=0, stdout="ok\n"))
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    fake_llm.settings.max_turns = 10  # a first test is due on turn 4
+    fake_llm.queue(
+        *[fake_llm.tool("run_python", code="print(1)") for _ in range(4)],
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("run_python", code="print(2)"),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="r"),
+    )
+    _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    shown = [m["content"] for m in tool_messages(fake_llm) if m["name"] == "run_python"]
+    assert [s.startswith("python exit code 0") for s in shown] == [True, True, True, False, True]
+    assert shown[3].startswith("not run: 3 of 10 turns used and no test run yet")
+    assert "turn 4: run_python refused (no test run yet)" in summary
+
+
 async def test_a_script_sent_to_run_test_is_pointed_at_run_python(
     fake_llm, fake_sandbox, sample_issue
 ) -> None:

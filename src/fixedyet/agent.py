@@ -615,6 +615,8 @@ class ReproAgent:
         self.progress = progress
         self.installed_packages = list(installed_packages)
         self.max_turns = llm.settings.max_turns
+        self.first_run_by = max(4, self.max_turns * 2 // 5)  # the turn a first test is due
+        self.turn = 0
         self.last_code: str | None = None
         self.last_exit: int | None = None
         self.last_output = ""
@@ -638,9 +640,9 @@ class ReproAgent:
             {"role": "system", "content": AGENT_SYSTEM},
             {"role": "user", "content": self._first_message()},
         ]
-        first_run_by = max(4, self.max_turns * 2 // 5)
         for turn in range(1, self.max_turns + 1):
-            if turn == first_run_by and self.last_code is None:
+            self.turn = turn
+            if turn == self.first_run_by and self.last_code is None:
                 # Reading without running wastes the turn limit: on SWE-bench pylint-4970 (run C)
                 # the first and only test ran on turn 20 of 20, and it passed.
                 messages.append(
@@ -826,6 +828,14 @@ class ReproAgent:
         raw = args.get("code")
         if not isinstance(raw, str) or not raw.strip():
             return "not run: the `code` argument is missing or empty", "run_python rejected"
+        if self.last_code is None and self.turn >= self.first_run_by:
+            # Scripts instead of a test ran three SWE-bench instances into the turn limit with
+            # no test at all (pylint-4604, pytest-7432, pylint-4970, the first run with this tool).
+            return (
+                f"not run: {self.turn - 1} of {self.max_turns} turns used and no test run yet. "
+                "run_python opens again after your first run_test: write the test now.",
+                "run_python refused (no test run yet)",
+            )
         code = strip_code_fence(raw)
         result = await self._exec(
             f"{TESTER_FUNCTIONS}\nir_own\nir_as_tester python {SCRIPT_PATH} 2>&1",
