@@ -140,7 +140,7 @@ Hackathon judges must be able to use the demo until the judging period ends, and
 2. Optionally keep budget back from the public: `FIXEDYET_JUDGE_RESERVE_USD=6` refuses public runs once less than $6 plus one run's budget is left under `FIXEDYET_TOTAL_BUDGET_USD`. Judges and the maintainer can still spend it.
 3. Restart, then check: `curl -s -H "X-Judge-Code: <code>" http://127.0.0.1:8090/api/judge/check` answers `{"ok": true, ...}`, and without the header `api/status` shows `"judge_access": true`.
 
-Put the code in the private testing instructions of the submission, never in the repository. A judge types it under the run form ("Hackathon judge? Enter your code"); the browser keeps it in localStorage and sends it as `X-Judge-Code`. Every run, public or judge, first reads the repository's language from the GitHub API and is refused with 422 (and counted nowhere) when GitHub lists it as anything but Python.
+Put the code in the private testing instructions of the submission, never in the repository. A judge types it under the run form ("Hackathon judge? Enter your code"); the browser keeps it in localStorage and sends it as `X-Judge-Code`. Every run, public or judge, first reads the repository's language from the GitHub API and is refused with 422 (and counted nowhere) when GitHub lists it as anything but Python. Every run, the maintainer's too, also reads the issue: a pull request's number, or a number with no issue behind it, is refused with 422 the same way.
 
 ## Live runs on a second VM (Docker sandbox)
 

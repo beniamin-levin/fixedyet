@@ -264,8 +264,10 @@ def test_route_path_strips_only_a_whole_leading_segment() -> None:
         "",
         "   ",
         "not a url",
-        "http://github.com/psf/requests/issues/1",
+        "ftp://github.com/psf/requests/issues/1",
         "https://gitlab.com/psf/requests/issues/1",
+        "github.com.evil.example/psf/requests/issues/1",
+        "https://user@github.com/psf/requests/issues/1",
         "https://github.com.evil.example/psf/requests/issues/1",
         "https://github.com/psf/requests/pull/1",
         "https://github.com/psf/requests/issues/abc",
@@ -301,6 +303,54 @@ def test_parse_issue_url_normalises() -> None:
     assert ref.url == ISSUE
     assert parse_issue_url(f"{ISSUE}?notification_referrer_id=x").url == ISSUE
     assert parse_issue_url("https://github.com/a-b/c.d_e/issues/12").number == 12
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/psf/requests/issues/6000",
+        "github.com/psf/requests/issues/6000",
+        "www.github.com/psf/requests/issues/6000/",
+        "HTTPS://WWW.GitHub.Com/psf/requests/issues/6000",
+        "Http://GITHUB.COM/psf/requests/issues/6000?a=1#issuecomment-99",
+    ],
+)
+def test_parse_issue_url_takes_what_people_paste(url: str) -> None:
+    assert parse_issue_url(url).url == ISSUE
+
+
+def test_parse_issue_url_keeps_owner_and_repository_as_typed() -> None:
+    ref = parse_issue_url("github.com/PyCQA/isort/issues/2723")
+    assert ref.url == "https://github.com/PyCQA/isort/issues/2723"
+
+
+def test_the_page_accepts_the_same_url_prefixes_as_the_server() -> None:
+    """The page checks a URL before it sends it, so it must not turn away what the server takes."""
+    from fixedyet import web as web_package
+
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    prefix = web_package._GITHUB_PREFIX
+    as_js = prefix.pattern.replace("/", "\\/")  # the same pattern as a JavaScript literal
+    assert prefix.flags & re.IGNORECASE
+    assert f"/{as_js}/i" in script
+    assert "startRun(url)" in script  # the plain https form is what is sent
+
+
+async def test_a_pasted_url_runs_as_its_plain_https_form(
+    client: httpx.AsyncClient, fake: Fake
+) -> None:
+    res = await start(client, "github.com/psf/requests/issues/6000/#issuecomment-1")
+    assert res.status_code == 202
+    assert (await wait_finished(client, res.json()["id"]))["issue_url"] == ISSUE
+    assert fake.calls == [ISSUE]
+
+
+async def test_a_pull_request_url_is_named_as_one(client: httpx.AsyncClient, fake: Fake) -> None:
+    res = await start(client, "https://github.com/psf/requests/pull/6001/files")
+    assert res.status_code == 400 and res.json()["error"] == "invalid_issue_url"
+    message = res.json()["message"]
+    assert "pull request URL" in message and "github.com/owner/repo/issues/123" in message
+    assert fake.calls == []
 
 
 # --- run lifecycle ----------------------------------------------------------------------

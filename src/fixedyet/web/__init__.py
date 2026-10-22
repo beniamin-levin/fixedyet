@@ -9,18 +9,25 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-_ISSUE_URL = re.compile(
-    r"^https://(?:www\.)?github\.com/"
-    r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
+# What people paste: https, http or no scheme, "www.", and the host in any case. Only this part
+# is case-insensitive; owner and repository keep the case they were typed in.
+_GITHUB_PREFIX = re.compile(r"^(?:https?://)?(?:www\.)?github\.com/", re.IGNORECASE)
+_ISSUE_PATH = re.compile(
+    r"^(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
     r"(?P<repo>[A-Za-z0-9._-]{1,100})/"
     r"issues/(?P<number>[1-9][0-9]{0,8})/?(?:[?#].*)?$"
 )
+_PULL_PATH = re.compile(r"^[^/]+/[^/]+/pull/\d+(?:[/?#].*)?$")
 
 MAX_URL_LENGTH = 300
 
 INVALID_URL_MESSAGE = (
     "That does not look like a public GitHub issue URL. "
     "Use the form https://github.com/owner/repo/issues/123."
+)
+PULL_REQUEST_URL_MESSAGE = (
+    "That is a pull request URL, not a GitHub issue URL. FixedYet reproduces bug reports: use "
+    "the URL of the issue the pull request is about, like https://github.com/owner/repo/issues/123."
 )
 
 
@@ -37,13 +44,17 @@ class IssueRef(NamedTuple):
 def parse_issue_url(raw: str) -> IssueRef:
     """Parse a GitHub issue URL into its parts. Raises ValueError with a friendly message.
 
-    Pull request URLs, other hosts, plain http and anything with extra path segments are
-    rejected. A trailing ``#issuecomment-...`` or query string is accepted and dropped.
+    http:// or no scheme, ``www.``, the host in any case, a trailing slash, a query string and an
+    ``#issuecomment-...`` anchor are accepted; ``IssueRef.url`` is the plain https form. Pull
+    request URLs, other hosts and anything with extra path segments are rejected.
     """
     text = raw.strip()
     if not text or len(text) > MAX_URL_LENGTH:
         raise ValueError(INVALID_URL_MESSAGE)
-    match = _ISSUE_URL.match(text)
+    prefix = _GITHUB_PREFIX.match(text)
+    path = text[prefix.end() :] if prefix else ""
+    match = _ISSUE_PATH.match(path)
     if match is None or match["repo"] in {".", ".."}:
-        raise ValueError(INVALID_URL_MESSAGE)
+        message = PULL_REQUEST_URL_MESSAGE if _PULL_PATH.match(path) else INVALID_URL_MESSAGE
+        raise ValueError(message)
     return IssueRef(match["owner"], match["repo"], int(match["number"]))
