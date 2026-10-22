@@ -244,6 +244,8 @@ Rules:
   sleeping, no randomness unless seeded. Import the project the way a user would.
 - When the issue names more than one failing input or case (two version strings, several calls),
   assert each of them: a fix that handles only the first one must not pass your test.
+- When the issue quotes a line of the project's internal code, test the public call a user makes
+  that runs it, not the internal helper on its own: the fix may change the caller instead.
 - Never fake a failure (assert False, pytest.fail) and never skip or xfail; such tests are rejected.
 - The sandbox where tests run has NO network: pip install, downloads and URL fetches fail. Only the
   project and its dependencies, pytest, and the extra packages named in the first message are
@@ -501,10 +503,9 @@ PASSED_NOTE = (
 
 
 _URL_HOST = re.compile(r"https?://([^/\s'\"?#:]+)", re.IGNORECASE)
-_LOCAL_HOSTS = re.compile(
-    r"(^|\.)(localhost|example|example\.(com|org|net)|test|invalid|local)$|^127\.|^0\.0\.0\.0$|^\[",
-    re.IGNORECASE,
-)
+# Only a server the test itself may start; any other host fails offline once a request is sent,
+# example.com too (SWE-bench requests-2931 sent a PUT there).
+_LOCAL_HOSTS = re.compile(r"^(localhost|127\.[\d.]+|0\.0\.0\.0|\[.*)$", re.IGNORECASE)  # [::1]
 
 
 def network_note(code: str) -> str | None:
@@ -711,7 +712,13 @@ class ReproAgent:
                 )
             self.steps.append(note)
         else:
-            raise AgentError(f"no reproduction test was written in {self.max_turns} turns")
+            # the last steps say why (a run of refused tests, scripts only), since the report
+            # of an agent error has no transcript
+            last = "; ".join(step.split(": ", 1)[-1] for step in self.steps[-4:])
+            raise AgentError(
+                f"no reproduction test was written in {self.max_turns} turns"
+                + (f" (last steps: {last})" if last else "")
+            )
         return TEST_PATH, code, "\n".join(self.steps)
 
     def _first_message(self) -> str:

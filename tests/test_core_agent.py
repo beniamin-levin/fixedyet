@@ -739,8 +739,9 @@ def test_imported_modules_lists_absolute_top_level_imports() -> None:
         ("requests.put('http://httpbin.org/put', data=b'x')", "httpbin.org"),
         ("get('https://api.github.com:443/x')", "api.github.com"),
         ("get('http://localhost:8000/'); get('http://127.0.0.1/')", None),
-        ("get('http://.example.com'); get('https://www.example.org/a')", None),
-        ("Request('GET', 'http://site.test/x').prepare()", None),
+        ("requests.put('http://example.com', data=b'x')", "example.com"),
+        ("Request('GET', 'http://site.test/x').prepare()", "site.test"),
+        ("get('http://[::1]:8080/')", None),
         ("no url at all", None),
     ],
 )
