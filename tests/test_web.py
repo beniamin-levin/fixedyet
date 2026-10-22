@@ -183,6 +183,86 @@ def test_the_page_shows_the_new_name_and_never_the_old_one() -> None:
     assert "FixedYet" in html.split('class="brand"', 1)[1].split("</a>", 1)[0]
 
 
+TRY_ONE = {
+    "https://github.com/pallets/jinja/issues/2244": "open bug",
+    "https://github.com/dateutil/dateutil/issues/1588": "open bug",
+    "https://github.com/pallets/werkzeug/issues/3312": "fixed on main",
+}
+
+
+def test_the_page_offers_known_good_issues_that_fill_the_input() -> None:
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    line = html.split('id="try-line"', 1)[1].split("</p>", 1)[0]
+    offered = re.findall(r'<button type="button" class="linklike" data-issue="([^"]+)">', line)
+    assert offered == list(TRY_ONE)
+    for url, verdict in TRY_ONE.items():
+        assert parse_issue_url(url).url == url  # the server takes it as it is
+        assert f"({verdict})" in " ".join(line.split(url, 1)[1].split())
+    # a click fills the input and leaves the run to the Run button
+    handler = script.split("#try-line [data-issue]", 1)[1].split("});\n    });", 1)[0]
+    assert "input.value = button.dataset.issue" in handler and "startRun" not in handler
+
+
+def _readme_matrix() -> list[tuple[str, bool]]:
+    """(verdict, low confidence) for every row of the README's decision matrix."""
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    table = readme.split("### Decision matrix", 1)[1].split("\n\n", 2)[1]
+    rows = [line for line in table.splitlines() if line.startswith("|")][2:]  # no head, no rule
+    found = []
+    for row in rows:
+        verdict_cell = row.strip().strip("|").split("|")[-1]
+        found.append((re.search(r"`(\w+)`", verdict_cell)[1], "confidence low" in verdict_cell))
+    return found
+
+
+def test_the_page_shows_every_row_of_the_decision_matrix() -> None:
+    labels = {"Fixed on main": "fixed_on_main", "Open bug": "open_bug",
+              "Not reproduced": "not_reproduced", "Inconsistent": "inconsistent",
+              "Unsupported": "unsupported", "Needs info": "needs_info"}
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    body = html.split('<table class="matrix">', 1)[1].split("<tbody>", 1)[1].split("</tbody>")[0]
+    page = []
+    for row in re.findall(r"<tr>(.*?)</tr>", body):
+        badge = re.search(r'<span class="badge \w+">([^<]+)</span>', row)[1]
+        page.append((labels[badge], "low confidence" in row))
+    assert sorted(page) == sorted(_readme_matrix())
+    assert len(page) == 10
+
+
+def _contrast(a: str, b: str) -> float:
+    """WCAG contrast ratio of two #rrggbb colours."""
+
+    def luminance(colour: str) -> float:
+        channels = [int(colour[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_the_focus_ring_has_the_contrast_a_ui_component_needs() -> None:
+    css = (web.STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    colours = dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6});", css))
+    for background in ("bg", "surface", "surface-2"):
+        assert _contrast(colours["focus"], colours[background]) >= 3.0, background
+    rings = re.findall(r"outline:\s*\d+px solid ([^;]+);", css)
+    assert rings and set(rings) == {"var(--focus)"}  # every focus outline uses that colour
+
+
+def test_only_the_newest_progress_event_is_announced() -> None:
+    """The progress list is redrawn whole on every event; as a live region, a screen reader
+    would read all of it again each time."""
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    timeline = re.search(r"<ol id=\"timeline\"[^>]*>", html)[0]
+    assert "aria-live" not in timeline
+    assert '<p id="progress-status" class="sr-only" role="status" aria-live="polite"></p>' in html
+    assert "this.announce(event)" in script
+    assert "$('#progress-status').textContent = text" in script
+
+
 def test_the_scripts_never_put_text_into_the_page_as_html() -> None:
     """Report text keeps its brackets (a failure line can quote "<p>"), so the escaping is the
     page's: every string goes in through textContent or a text node."""

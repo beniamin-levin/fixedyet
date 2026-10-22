@@ -39,6 +39,14 @@
                spellcheck="false" placeholder="https://github.com/owner/repo/issues/123" required>
         <button id="run-button" type="submit" class="btn primary">Run</button>
       </form>
+      <p class="try-line" id="try-line">Try one:
+        <button type="button" class="linklike" data-issue="https://github.com/pallets/jinja/issues/2244">pallets/jinja#2244</button>
+        (open bug)<span class="sep" aria-hidden="true">·</span>
+        <button type="button" class="linklike" data-issue="https://github.com/dateutil/dateutil/issues/1588">dateutil/dateutil#1588</button>
+        (open bug)<span class="sep" aria-hidden="true">·</span>
+        <button type="button" class="linklike" data-issue="https://github.com/pallets/werkzeug/issues/3312">pallets/werkzeug#3312</button>
+        (fixed on main)
+      </p>
       <p class="scope">Works on pure-Python projects tested with pytest. An issue from a
         repository GitHub lists as another language, a pull request, or a number with no issue
         behind it is turned away before a run is counted.</p>
@@ -61,7 +69,8 @@
         <h2 id="progress-title">Progress</h2>
         <span id="clock" class="clock" aria-hidden="true"></span>
       </div>
-      <ol id="timeline" class="timeline" aria-live="polite"></ol>
+      <ol id="timeline" class="timeline"></ol>
+      <p id="progress-status" class="sr-only" role="status" aria-live="polite"></p>
     </section>
 
     <section id="report" aria-labelledby="report-title" hidden>
@@ -88,18 +97,22 @@
           </thead>
           <tbody>
             <tr><td>test fails</td><td>test passes</td><td><span class="badge good">Fixed on main</span></td></tr>
-            <tr><td>test fails</td><td>test fails</td><td><span class="badge bad">Open bug</span></td></tr>
+            <tr><td>test fails</td><td>test fails the same way (the same error text)</td><td><span class="badge bad">Open bug</span></td></tr>
+            <tr><td>test fails</td><td>test fails, different error or different error text</td><td><span class="badge warn">Inconsistent</span> <span class="conf">low confidence</span></td></tr>
+            <tr><td>test fails</td><td>test fails the same way, on an exception the issue never names</td><td><span class="badge bad">Open bug</span> <span class="conf">low confidence</span></td></tr>
+            <tr><td>test fails</td><td>test fails the same way, and GitHub shows the issue closed as completed or a merged pull request that closes or mentions it</td><td><span class="badge bad">Open bug</span> <span class="conf">low confidence</span></td></tr>
             <tr><td>test passes</td><td>test passes</td><td><span class="badge neutral">Not reproduced</span></td></tr>
             <tr><td>test passes</td><td>test fails</td><td><span class="badge warn">Inconsistent</span></td></tr>
-            <tr><td>test fails</td><td>test fails with a different error</td><td><span class="badge warn">Inconsistent</span></td></tr>
-            <tr><td>setup or collection error</td><td>any</td><td><span class="badge muted">Unsupported</span></td></tr>
-            <tr><td colspan="2">no runnable snippet in the issue</td><td><span class="badge info">Needs info</span></td></tr>
+            <tr><td>setup or collection error, or the environment could not be built</td><td>any</td><td><span class="badge muted">Unsupported</span></td></tr>
+            <tr><td>the issue has no runnable reproduction</td><td>not run</td><td><span class="badge info">Needs info</span></td></tr>
+            <tr><td colspan="2">runs disagree on either side</td><td><span class="badge warn">Inconsistent</span> <span class="conf">low confidence</span></td></tr>
           </tbody>
         </table>
       </div>
       <p class="muted small">
-        Each side runs the test twice. Confidence is high only when every run agrees and
-        neither side errored. Issue text is treated as data, and all code runs in a sandbox.
+        Each side runs the test twice. Confidence is high only when every run agrees, neither
+        side errored, and no low-confidence row applies. Issue text is treated as data, and all
+        code runs in a sandbox.
       </p>
     </section>
   </main>

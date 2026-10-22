@@ -46,6 +46,7 @@
       this.baseAt = null;
       this.finished = false;
       $('#progress').hidden = false;
+      $('#progress-status').textContent = '';
       this.draw();
       this.startClock();
     },
@@ -94,6 +95,15 @@
       }
       if (this.baseAt === null) this.baseAt = at;
       this.draw();
+      this.announce(event);
+    },
+
+    // The list is redrawn whole on every event, so it is not a live region: a screen reader
+    // would read all of it again each time. Only the newest event goes to the status line.
+    announce(event) {
+      const stage = STAGES.find((s) => s.id === event.stage);  // none for "done" and "error"
+      const text = [stage && stage.label, event.message].filter(Boolean).join(': ');
+      $('#progress-status').textContent = text;
     },
 
     draw() {
@@ -435,6 +445,17 @@
       }
       input.value = url;  // show what is run
       startRun(url);
+    });
+
+    // "Try one": known-good issues, so a first run works. A click fills the input and does not
+    // start the run: the visitor still presses Run.
+    document.querySelectorAll('#try-line [data-issue]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const input = $('#issue-url');
+        input.value = button.dataset.issue;
+        clearNotice();
+        input.focus();
+      });
     });
 
     $('#judge-link').addEventListener('click', toggleJudgeForm);
