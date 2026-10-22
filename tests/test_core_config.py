@@ -153,3 +153,11 @@ def test_total_budget_comes_from_the_env_and_dot_env_example_sets_20() -> None:
         line.split("=", 1)[0:2] for line in example.splitlines() if "=" in line and line[0] != "#"
     )
     assert env["FIXEDYET_TOTAL_BUDGET_USD"].split("#")[0].strip() == "20"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    (None, None), ("on", True), ("OFF", False), ("0", False), ("yes", True), ("maybe", None),
+])
+def test_agent_thinking_switch(raw: str | None, expected: bool | None) -> None:
+    env = {"FIXEDYET_AGENT_THINKING": raw} if raw is not None else {}
+    assert Settings.load(env).agent_thinking is expected

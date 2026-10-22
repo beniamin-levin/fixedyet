@@ -41,6 +41,14 @@ _SECRET_FIELDS = frozenset(
 )
 
 
+def _on_off(value: str | None) -> bool | None:
+    """'on'/'off' (also true/false, 1/0, yes/no) as a bool; None when unset or unrecognised."""
+    if value is None:
+        return None
+    return {"on": True, "true": True, "1": True, "yes": True,
+            "off": False, "false": False, "0": False, "no": False}.get(value.lower())
+
+
 def normalize_root_path(value: str | None) -> str:
     """Clean a URL prefix such as ``fixedyet/`` into ``/fixedyet``; ``""`` and ``/`` mean none.
 
@@ -71,6 +79,9 @@ class Settings(BaseModel):
     fix_budget_usd: float = DEFAULT_FIX_BUDGET_USD  # model cost cap of one fix (all attempts)
     total_budget_usd: float = DEFAULT_TOTAL_BUDGET_USD
     max_turns: int = 20
+    # The agent loop's reasoning switch: None leaves the model's default (on for Nemotron 3
+    # Super). FIXEDYET_AGENT_THINKING=off exists for the model-choice ablation in the docs.
+    agent_thinking: bool | None = None
     demo_daily_limit: int = 5
     runs_dir: Path = Path("runs")
     # The lifetime spend ledger. None: a user-level state file (see ledger.ledger_path), so a
@@ -125,6 +136,7 @@ class Settings(BaseModel):
             "fix_budget_usd": get("FIXEDYET_FIX_BUDGET_USD"),
             "total_budget_usd": get("FIXEDYET_TOTAL_BUDGET_USD"),
             "max_turns": get("FIXEDYET_MAX_TURNS"),
+            "agent_thinking": _on_off(get("FIXEDYET_AGENT_THINKING")),
             "demo_daily_limit": get("FIXEDYET_DEMO_DAILY_LIMIT"),
             "runs_dir": get("FIXEDYET_RUNS_DIR"),
             "ledger_path": get("FIXEDYET_LEDGER_PATH"),

@@ -665,7 +665,10 @@ class ReproAgent:
                         "then call submit.",
                     }
                 )
-            result = await self.llm.chat(messages, tools=TOOLS, max_tokens=AGENT_MAX_TOKENS)
+            result = await self.llm.chat(
+                messages, tools=TOOLS, max_tokens=AGENT_MAX_TOKENS,
+                thinking=self.llm.settings.agent_thinking,
+            )
             messages.append(result.assistant_message())
             if not result.tool_calls:
                 self.steps.append(f"turn {turn}: no tool call")
