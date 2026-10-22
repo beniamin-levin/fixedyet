@@ -496,6 +496,9 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
     basis = list(basis)
     status = await _issue_status(ctx, issue, verdict)
     ctx.caveats += issue_state_lines(verdict, status)  # closed as fixed, a merged linked PR
+    off_history = await _reported_off_fix_history(ctx, issue, verdict)
+    if off_history:
+        ctx.caveats.append(off_history)
     if ctx.caveats and confidence is Confidence.HIGH:
         confidence = Confidence.LOW
     basis += ctx.caveats
@@ -514,7 +517,7 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
             log.exception("evidence gathering failed")
         if evidence.fixing_commit:
             ctx.reproduction.fixing_commit_source = "pull_request"
-        elif verdict is Verdict.FIXED_ON_MAIN:
+        elif verdict is Verdict.FIXED_ON_MAIN and not off_history:  # no fix to find off history
             try:
                 await _bisect_for_fix(ctx, issue, evidence)
             except Exception:  # best effort, like the rest of the evidence
@@ -572,6 +575,34 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
         log.warning("could not save the assessment: %s", exc)
     await ctx.say("done", f"{verdict.value} in {usage.wall_seconds:.0f} s, ${usage.cost_usd:.4f}")
     return assessment
+
+
+async def _reported_off_fix_history(ctx: _Context, issue: Issue, verdict: Verdict) -> str | None:
+    """A caveat when the reported commit is not in the fix side's history. A release cut from its
+    own branch (pyparsing 3.3.3 from `3.3.3_work`) can carry a regression that main never had:
+    the test then passes on main although nobody fixed anything there. Best effort."""
+    rep = ctx.reproduction
+    reported, fix = rep.reported_side, rep.fix_side
+    if (
+        verdict is not Verdict.FIXED_ON_MAIN or ctx.patch or ctx.github is None
+        or reported is None or fix is None or not reported.commit or not fix.commit
+        or reported.commit == fix.commit or not issue.url.startswith("https://")
+    ):
+        return None
+    try:
+        relation = await ctx.github.compare_status(
+            issue.owner, issue.repo, reported.commit, fix.commit
+        )
+    except Exception:  # never fails a run
+        log.warning("history check failed", exc_info=True)
+        return None
+    if relation not in ("diverged", "behind"):
+        return None
+    return (
+        f"the reported version ({reported.ref} at {reported.commit[:10]}) is not in the history "
+        f"of {fix.ref}: it was released from another branch, so passing on {fix.ref} does not "
+        f"show that a fix landed there; the bug may never have reached {fix.ref}"
+    )
 
 
 async def _issue_status(ctx: _Context, issue: Issue, verdict: Verdict) -> IssueStatus | None:

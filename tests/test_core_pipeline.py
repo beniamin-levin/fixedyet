@@ -911,6 +911,35 @@ async def test_a_fix_no_pull_request_names_is_found_by_bisecting(world, bisects)
     assert any("bisecting for the fixing commit" in e.message for e in world.events)
 
 
+async def test_a_reported_commit_off_mains_history_is_a_caveat_not_a_fix(world, bisects) -> None:
+    """Pyparsing 3.3.3 was released from its own branch: the test passed on master, which never
+    had the regression, and the run said fixed_on_main at high confidence."""
+    seen: list[tuple[str, str]] = []
+
+    async def diverged(owner: str, repo: str, base: str, head: str) -> str:
+        seen.append((base, head))
+        return "diverged"
+
+    world.github.compare_status = diverged
+    happy_script(world.llm)
+    a = await world.run()
+    assert seen == [(OLD_SHA, NEW_SHA)]
+    assert (a.verdict, a.confidence) == (Verdict.FIXED_ON_MAIN, Confidence.LOW)
+    (line,) = [b for b in a.confidence_basis if "is not in the history of main" in b]
+    assert "released from another branch" in line and "may never have reached main" in line
+    assert bisects == []  # no fixing commit to look for
+
+
+async def test_a_reported_commit_on_mains_history_changes_nothing(world, bisects) -> None:
+    async def ahead(owner: str, repo: str, base: str, head: str) -> str:
+        return "ahead"
+
+    world.github.compare_status = ahead
+    happy_script(world.llm)
+    a = await world.run()
+    assert a.confidence is Confidence.HIGH and len(bisects) == 1
+
+
 async def test_no_bisect_when_a_pull_request_names_the_fix(world, bisects) -> None:
     world.github.fix = ("abc123def456", "https://github.com/acme/widgets/pull/48")
     happy_script(world.llm)

@@ -557,3 +557,16 @@ async def test_fetch_issue_reads_why_and_when_it_was_closed() -> None:
         got = await gh.fetch_issue("https://github.com/acme/widgets/issues/42")
     assert (got.state, got.state_reason) == ("closed", "not_planned")
     assert got.closed_at is not None and got.closed_at.month == 10
+
+
+@respx.mock
+@pytest.mark.parametrize(("reply", "expected"), [
+    (httpx.Response(200, json={"status": "diverged", "ahead_by": 72}), "diverged"),
+    (httpx.Response(200, json={"status": "ahead"}), "ahead"),
+    (httpx.Response(404, json={"message": "Not Found"}), None),
+    (httpx.Response(200, json=[]), None),
+])
+async def test_compare_status(reply: httpx.Response, expected: str | None) -> None:
+    respx.get(f"{API}/repos/acme/widgets/compare/aaa...bbb").mock(return_value=reply)
+    async with GitHubClient() as gh:
+        assert await gh.compare_status("acme", "widgets", "aaa", "bbb") == expected

@@ -314,6 +314,17 @@ class GitHubClient:
 
     # -- where the issue stands -----------------------------------------------------------
 
+    async def compare_status(self, owner: str, repo: str, base: str, head: str) -> str | None:
+        """How `head` relates to `base` in git history: "ahead" (base is an ancestor of head),
+        "behind", "diverged" or "identical". None when GitHub cannot say."""
+        try:
+            data = await self._get(f"/repos/{owner}/{repo}/compare/{base}...{head}")
+        except GitHubError as exc:
+            log.info("compare %s...%s skipped: %s", base[:10], head[:10], exc)
+            return None
+        status = data.get("status") if isinstance(data, dict) else None
+        return status if isinstance(status, str) else None
+
     async def issue_status(self, issue: Issue) -> IssueStatus | None:
         """The issue's state, why it was closed, and the open or merged pull requests of its own
         repository that are linked to it. Best effort: None when nothing could be read.
