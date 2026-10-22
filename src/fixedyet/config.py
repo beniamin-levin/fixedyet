@@ -64,7 +64,9 @@ class Settings(BaseModel):
     contree_base_url: str = DEFAULT_CONTREE_BASE_URL
     tavily_api_key: str = ""
     github_token: str = ""
-    sandbox: Literal["nebius", "docker"] = "nebius"
+    # Docker by default: it ran every published result, and Nebius Sandboxes is a beta that
+    # needs access granted per account (FIXEDYET_SANDBOX=nebius, with the [nebius] extra).
+    sandbox: Literal["nebius", "docker"] = "docker"
     run_budget_usd: float = 0.60
     fix_budget_usd: float = DEFAULT_FIX_BUDGET_USD  # model cost cap of one fix (all attempts)
     total_budget_usd: float = DEFAULT_TOTAL_BUDGET_USD

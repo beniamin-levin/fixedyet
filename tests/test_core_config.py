@@ -13,7 +13,7 @@ def test_defaults_match_the_spec() -> None:
     assert s.nebius_base_url == "https://api.tokenfactory.nebius.com/v1/"
     assert s.model == "nvidia/nemotron-3-super-120b-a12b"
     assert s.small_model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
-    assert s.sandbox == "nebius"
+    assert s.sandbox == "docker"
     assert s.run_budget_usd == 0.60
     assert s.total_budget_usd == 20.0
     assert s.max_turns == 20

@@ -1,4 +1,4 @@
-"""Sandbox backends: Nebius Token Factory Sandboxes (default) and local Docker."""
+"""Sandbox backends: local Docker (default) and Nebius Token Factory Sandboxes."""
 
 from __future__ import annotations
 
@@ -14,7 +14,13 @@ def get_sandbox(settings: SandboxSettings) -> Sandbox:
     """
     kind = str(settings.sandbox).strip().lower()
     if kind == "nebius":
-        from fixedyet.sandbox.nebius import NebiusSandbox
+        try:
+            from fixedyet.sandbox.nebius import NebiusSandbox
+        except ModuleNotFoundError as exc:  # contree-sdk is the optional [nebius] extra
+            raise SandboxError(
+                f"the nebius backend needs contree-sdk ({exc}): pip install 'fixedyet[nebius]', "
+                "or set FIXEDYET_SANDBOX=docker"
+            ) from exc
 
         return NebiusSandbox(settings)
     if kind == "docker":

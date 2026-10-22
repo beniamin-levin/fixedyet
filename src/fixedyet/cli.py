@@ -609,7 +609,12 @@ async def _doctor(settings: Settings, *, tavily: bool) -> int:
         checks.append(await _timed("Token Factory chat", lambda: _probe_chat(settings)))
     else:
         checks.append(("Token Factory chat", SKIP, "needs NEBIUS_API_KEY"))
-    checks.append(await _timed("sandbox hello world", lambda: _probe_sandbox(settings)))
+    sandbox_check = await _timed("sandbox hello world", lambda: _probe_sandbox(settings))
+    if sandbox_check[1] == FAIL and settings.sandbox == "nebius":
+        # Sandboxes is a beta with access per account: point at the backend that needs none
+        name, status, detail = sandbox_check
+        sandbox_check = (name, status, f"{detail} (FIXEDYET_SANDBOX=docker uses local Docker)")
+    checks.append(sandbox_check)
     checks.append(await _timed("GitHub API", lambda: _probe_github(settings)))
     if tavily and settings.tavily_api_key:
         checks.append(await _timed("Tavily search", lambda: _probe_tavily(settings)))
