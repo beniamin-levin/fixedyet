@@ -6,7 +6,7 @@
  * as text, never as HTML.
  *
  * Every URL this file requests is relative and has no leading slash (api/status), so the page
- * works at the root of a host and under a prefix such as https://benlevin.fyi/fixedyet/.
+ * works at the root of a host and under a prefix such as https://example.com/fixedyet/.
  */
 (() => {
   'use strict';

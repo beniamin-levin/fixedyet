@@ -1,19 +1,21 @@
 # Deploying the demo
 
-The demo at https://benlevin.fyi/fixedyet/ is the FastAPI app (`fixedyet serve --root-path /fixedyet`) on a small Oracle Cloud Ubuntu 24.04 x86 VM with 1 GB of RAM that already serves benlevin.fyi and other sites with nginx. It lives under a path of the existing benlevin.fyi server, so it needs no new DNS record and no new certificate. Everything here is written to leave the other sites alone.
+The demo at https://fixedyet.benlevin.fyi/ is the FastAPI app (`fixedyet serve`, at the root of its host) behind the nginx of a small Oracle Cloud Ubuntu 24.04 x86 VM with 1 GB of RAM that already serves benlevin.fyi and other sites. It has its own server block, DNS record and Let's Encrypt certificate (set up once, see below). The old address, https://benlevin.fyi/fixedyet/, answers with a 308 redirect to the same path on the new host, so links shared before the move keep working. Everything here is written to leave the other sites alone.
 
 | File | What it is |
 |---|---|
 | `deploy.sh` | run from your Mac: copies the repo, creates the user and venv, installs the unit and the nginx files, restarts the service |
-| `fixedyet.service` | systemd unit, user `fixedyet`, `MemoryMax=300M`, hardened, started with `--root-path /fixedyet` |
-| `fixedyet.nginx.conf` | the `location /fixedyet/` block: proxies to `127.0.0.1:8090` with the prefix stripped, unbuffered for server-sent events, `proxy_read_timeout 900s`. Installed as `/etc/nginx/snippets/fixedyet.conf` |
+| `fixedyet.service` | systemd unit, user `fixedyet`, `MemoryMax=300M`, hardened, the app at the root of its host |
+| `fixedyet.nginx.conf` | the `location /` block of fixedyet.benlevin.fyi: proxies to `127.0.0.1:8090` (or `FIXEDYET_UPSTREAM`), unbuffered for server-sent events, `proxy_read_timeout 900s`. Installed as `/etc/nginx/snippets/fixedyet-site.conf` |
+| `fixedyet-server.nginx.conf` | the fixedyet.benlevin.fyi server block, set up once by hand (commands at its top), then given HTTPS by `certbot --nginx`. deploy.sh never writes it |
+| `fixedyet-redirect.nginx.conf` | the old address: a 308 from `benlevin.fyi/fixedyet/...` to `fixedyet.benlevin.fyi/...`. Installed as `/etc/nginx/snippets/fixedyet.conf`, which the benlevin.fyi server block includes |
 | `fixedyet-limits.nginx.conf` | the http-level rate-limit zone for POST requests. Installed as `/etc/nginx/conf.d/fixedyet-limits.conf` |
 
-## How the path prefix works
+## Where the app lives
 
-The browser asks for `https://benlevin.fyi/fixedyet/api/status`. nginx removes `/fixedyet/` (the trailing slash on `proxy_pass http://127.0.0.1:8090/;` does that) and the app sees `/api/status`. The page itself uses only relative URLs (`static/app.js`, `api/runs`, never `/api/runs`), so it works at the root of a host and under any prefix. The service starts with `--root-path /fixedyet` (or `FIXEDYET_ROOT_PATH=/fixedyet`), which makes redirects and the URLs inside JSON answers carry the prefix again.
+The app runs at the root of its own host, https://fixedyet.benlevin.fyi/, so the browser asks for `/api/status` and the app sees `/api/status`: no prefix is stripped or added. The page itself uses only relative URLs (`static/app.js`, `api/runs`, never `/api/runs`), so the same app still works under a prefix elsewhere (`--root-path` / `FIXEDYET_ROOT_PATH`, see the table below).
 
-`/fixedyet` without the final slash is redirected to `/fixedyet/`, because relative URLs need it.
+The old address, `https://benlevin.fyi/fixedyet/...`, is a `308` to `https://fixedyet.benlevin.fyi/...` (same path and query), from the snippet the benlevin.fyi server block already includes.
 
 ## Before the first deploy
 
@@ -36,15 +38,17 @@ What the script does, in order, and what it will not do:
 2. Creates the system user `fixedyet` and `/opt/fixedyet/runs` (owned by that user, mode 750) on the first run.
 3. Creates `/opt/fixedyet/.venv` with the server's `python3.12` on the first run, then `pip install -e .`.
 4. Installs `/etc/systemd/system/fixedyet.service` and enables it.
-5. Installs the two nginx files (`/etc/nginx/snippets/fixedyet.conf` and `/etc/nginx/conf.d/fixedyet-limits.conf`), then runs `nginx -t`. nginx is reloaded only if the test passes. If it fails, the old copies of the two files are put back and the script stops.
-6. Looks for the `include` line below in the enabled nginx configuration and prints **ACTION NEEDED** when it is missing.
+5. Installs the three nginx files (`/etc/nginx/snippets/fixedyet-site.conf`, `/etc/nginx/snippets/fixedyet.conf` and `/etc/nginx/conf.d/fixedyet-limits.conf`), then runs `nginx -t`. nginx is reloaded only if the test passes. If it fails, the old copies are put back and the script stops.
+6. Looks for both `include` lines below in the enabled nginx configuration and prints **ACTION NEEDED** when one is missing.
 7. Restarts the service if `/etc/fixedyet.env` exists, then waits for `GET /healthz`. If the file is missing it prints what to do and does not start the service.
 
-It never edits an existing nginx server block and never writes `/etc/fixedyet.env`.
+It never writes an nginx server block and never writes `/etc/fixedyet.env`.
 
-## The one nginx edit you make yourself
+## The nginx setup you do once yourself
 
-The script cannot know which file holds your benlevin.fyi server, and a wrong edit would break the other sites, so you add one line, once, inside that `server { }` block (the HTTPS one if there are two):
+**The fixedyet.benlevin.fyi server.** Add an A record `fixedyet` for benlevin.fyi pointing at the nginx host, then run the commands at the top of `deploy/fixedyet-server.nginx.conf`: copy the server block into `sites-available`, enable it, reload, and `sudo certbot --nginx -d fixedyet.benlevin.fyi --redirect`. certbot adds the HTTPS listener and renews the certificate on its own.
+
+**The old address.** The script cannot know which file holds your benlevin.fyi server, and a wrong edit would break the other sites, so you add one line, once, inside that `server { }` block (the HTTPS one if there are two):
 
 ```nginx
 server {
@@ -59,10 +63,10 @@ Then check and reload:
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
-curl -s https://benlevin.fyi/fixedyet/healthz        # {"status":"ok"}
+curl -s https://fixedyet.benlevin.fyi/healthz        # {"status":"ok"}
 ```
 
-The snippet uses `location ^~ /fixedyet/`, so a regex location in the same server (for example a static-files rule) cannot take requests away from it. For server-sent events it sets `proxy_buffering off` and `proxy_read_timeout 900s`; the app sends a keepalive comment every 15 seconds, so an idle stream stays open.
+The app's snippet is the whole `location /` of its own server. For server-sent events it sets `proxy_buffering off` and `proxy_read_timeout 900s`; the app sends a keepalive comment every 15 seconds, so an idle stream stays open.
 
 ## Secrets
 
@@ -86,7 +90,7 @@ Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does no
 | `FIXEDYET_ADMIN_TOKEN` | no | turns on maintainer mode (reports page: verify a backport, attempt a fix of an open bug, open a draft PR, hide a report). A random secret of 32 bytes or more: `openssl rand -hex 32`. Empty or unset means off, and every maintainer endpoint answers 404 |
 | `FIXEDYET_MODEL`, `FIXEDYET_SMALL_MODEL` | no | default to Nemotron 3 Super and Nano |
 | `FIXEDYET_SANDBOX` | no | `nebius` (default) |
-| `FIXEDYET_ROOT_PATH` | no | URL prefix the app is served under, normally `/fixedyet`. The unit already passes `--root-path /fixedyet`; the flag wins over this variable |
+| `FIXEDYET_ROOT_PATH` | no | URL prefix the app is served under. Leave it out: the demo runs at the root of fixedyet.benlevin.fyi. Set it (or pass `--root-path`) only when nginx serves the app under a path |
 | `FIXEDYET_KEEP_CHECKPOINTS` | no | only for the `docker` sandbox: how many of the newest `fixedyet-ckpt` images to keep after each run, default `6` |
 | `FIXEDYET_RUN_BUDGET_USD` | no | hard cost cap per run, default `0.60` |
 | `FIXEDYET_TOTAL_BUDGET_USD` | no | hard cap on model spend over the life of the install, default `20`, counted in the spend ledger (`FIXEDYET_LEDGER_PATH`). Token Factory charges the card when the balance goes negative, so this is the real spending limit |
@@ -117,7 +121,7 @@ Worst-case spend is (`FIXEDYET_DEMO_DAILY_LIMIT` + `FIXEDYET_JUDGE_DAILY_LIMIT`)
 
 ## Maintainer mode
 
-The public reports page (`/fixedyet/reports`) needs nothing. Maintainer mode adds controls for you only: **Verify backport** (or **Attempt a fix** on an open bug), then **Open draft PR on <owner/repo>** (after you type the repository name) or **Open in my fork only**, and **Hide / Unhide**. Your runs from the main page also skip the daily limit once you are signed in. It is off until `FIXEDYET_ADMIN_TOKEN` is set in `/etc/fixedyet.env`.
+The public reports page (`/reports`) needs nothing. Maintainer mode adds controls for you only: **Verify backport** (or **Attempt a fix** on an open bug), then **Open draft PR on <owner/repo>** (after you type the repository name) or **Open in my fork only**, and **Hide / Unhide**. Your runs from the main page also skip the daily limit once you are signed in. It is off until `FIXEDYET_ADMIN_TOKEN` is set in `/etc/fixedyet.env`.
 
 1. Generate the admin token and put it in the file: `FIXEDYET_ADMIN_TOKEN=$(openssl rand -hex 32)` (32 bytes or more). Keep a copy in your password manager: you paste it once into the "Maintainer sign-in" link at the bottom of the reports page, and the browser keeps it in localStorage. It is sent as `Authorization: Bearer <token>`, compared in constant time, and never logged or returned. A wrong or missing token is a 401 with no detail.
 2. Create a **classic** personal access token for `GITHUB_TOKEN` with **only** the `public_repo` scope and an expiry you are comfortable with. It is used to fork the upstream project into the token owner's account, push a branch to that fork and open a **draft** pull request: in the fork, or on the upstream project when the maintainer typed the repository's name in the confirmation box (the request carries it as `confirm`; anything else is refused before GitHub is called). Renew the token before it expires; a job that finds no usable token fails at once, with a message, before any sandbox work. The token owner must not own the upstream repository (there would be no fork).
@@ -167,7 +171,7 @@ sudo systemctl status fixedyet
 sudo journalctl -u fixedyet -f                    # live log
 curl -s http://127.0.0.1:8090/healthz             # {"status":"ok"}, the app directly, prefix already stripped
 curl -s http://127.0.0.1:8090/api/status          # runs left today
-curl -s https://benlevin.fyi/fixedyet/api/status  # the same through nginx
+curl -s https://fixedyet.benlevin.fyi/api/status  # the same through nginx
 sudo tail -f /var/log/nginx/error.log             # or the error_log of the benlevin.fyi server
 ```
 

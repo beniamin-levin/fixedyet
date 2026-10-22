@@ -1,6 +1,6 @@
 # The web demo
 
-https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. Code runs in a Docker sandbox on a free 1 GB Oracle Cloud VM, so a run takes about 1.5 to 5 minutes; the Nebius Sandboxes backend is implemented and waiting for beta access. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at the saved reports.
+https://fixedyet.benlevin.fyi/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. Code runs in a Docker sandbox on a free 1 GB Oracle Cloud VM, so a run takes about 1.5 to 5 minutes; the Nebius Sandboxes backend is implemented and waiting for beta access. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at the saved reports.
 
 ## Who can run what
 
@@ -45,4 +45,4 @@ Each file names the issue it ran on, and an optional `_example` object sets the 
 
 ## Running it yourself
 
-Run it locally with `fixedyet serve`. The page uses only relative URLs, so it works at the root of a host and under a prefix: behind nginx's `location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }` (which strips the prefix), start it with `--root-path /fixedyet` or `FIXEDYET_ROOT_PATH=/fixedyet` so redirects carry the prefix. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](../deploy/README.md).
+Run it locally with `fixedyet serve`. The page uses only relative URLs, so it works at the root of a host (the demo runs at the root of fixedyet.benlevin.fyi) and under a prefix: behind nginx's `location /fixedyet/ { proxy_pass http://127.0.0.1:8090/; }` (which strips the prefix), start it with `--root-path /fixedyet` or `FIXEDYET_ROOT_PATH=/fixedyet` so redirects carry the prefix. Deployment files for a small Ubuntu VM (nginx, systemd, a deploy script) are in [`deploy/`](../deploy/README.md).

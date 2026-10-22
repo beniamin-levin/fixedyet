@@ -6,7 +6,7 @@
  *
  * Every URL this file requests or builds is relative or an https://github.com link made from
  * validated parts (see `gh`), so the pages work at the root of a host and under a prefix such as
- * https://benlevin.fyi/fixedyet/. Nothing here touches the document while it loads.
+ * https://example.com/fixedyet/. Nothing here touches the document while it loads.
  */
 (() => {
   'use strict';

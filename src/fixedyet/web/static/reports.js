@@ -7,7 +7,7 @@
  * Everything that comes from the server is untrusted and goes into the page as text, never as HTML.
  *
  * Every URL this file requests is relative and has no leading slash (api/reports), so the page
- * works at the root of a host and under a prefix such as https://benlevin.fyi/fixedyet/.
+ * works at the root of a host and under a prefix such as https://example.com/fixedyet/.
  * A report is shareable as reports#<id>.
  *
  * Maintainer mode: the token is kept in localStorage (when the browser allows it) and sent as

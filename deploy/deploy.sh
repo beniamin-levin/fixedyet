@@ -6,20 +6,22 @@
 # HOST is the server's address (or DEPLOY_HOST in the environment). The login user is
 # "ubuntu" unless DEPLOY_USER is set; DEPLOY_SSH_KEY (a path without spaces) picks the key.
 #
-# The demo is served at https://benlevin.fyi/fixedyet/, inside the existing benlevin.fyi nginx
-# server. Safe to run again and again. What it will and will not do:
+# The demo is served at https://fixedyet.benlevin.fyi/, by the nginx that also serves benlevin.fyi;
+# the old address https://benlevin.fyi/fixedyet/ redirects there.
+# Safe to run again and again. What it will and will not do:
 #   - copies the repository to /opt/fixedyet (never .venv, .env, runs/ or .git)
 #   - creates the system user "fixedyet" and the venv (python3.12) on the first run
-#   - installs the systemd unit and two nginx files (a location snippet and a rate-limit zone)
+#   - installs the systemd unit and three nginx files (the app's location snippet, the redirect
+#     from the old address, and a rate-limit zone)
 #   - runs `nginx -t` and reloads nginx only when it passes, undoing its change when it fails
-#   - NEVER edits an existing nginx server block: you add one `include` line to the
-#     benlevin.fyi server once, and the script tells you when that is still missing
+#   - NEVER writes an nginx server block: the fixedyet.benlevin.fyi block is set up once by hand
+#     (deploy/fixedyet-server.nginx.conf), and the script tells you when an include is missing
 #   - NEVER writes /etc/fixedyet.env (your secrets)
 #
 # Two optional roles, for running the Docker sandbox on a second VM:
 #   DEPLOY_DOCKER_HOST=1        this HOST runs Docker: the service joins the docker group and
 #                               listens on all interfaces (firewall it to the proxy VM only)
-#   FIXEDYET_UPSTREAM=IP:PORT   this HOST only proxies: nginx forwards /fixedyet/ to IP:PORT
+#   FIXEDYET_UPSTREAM=IP:PORT   this HOST only proxies: nginx forwards fixedyet.benlevin.fyi to IP:PORT
 #                               and the local service is stopped and disabled
 set -euo pipefail
 
@@ -27,7 +29,7 @@ REMOTE_DIR=/opt/fixedyet
 SERVICE=fixedyet
 ENV_FILE=/etc/fixedyet.env
 PORT=8090
-PUBLIC_URL=https://benlevin.fyi/fixedyet/
+PUBLIC_URL=https://fixedyet.benlevin.fyi/
 
 HOST="${DEPLOY_HOST:-}"
 UPSTREAM="${FIXEDYET_UPSTREAM:-}"
@@ -134,19 +136,22 @@ if [ -z "$UPSTREAM" ]; then
   sudo systemctl enable "$SERVICE" >/dev/null 2>&1
 fi
 
-# 4. nginx: a location snippet and a rate-limit zone. The existing benlevin.fyi server block
-#    is never edited; it includes the snippet with one line that you add once.
+# 4. nginx: two location snippets and a rate-limit zone. No server block is ever written here.
+#    fixedyet-site.conf is the app's proxy, included by the fixedyet.benlevin.fyi server block
+#    (set up once by hand, see fixedyet-server.nginx.conf); fixedyet.conf is the redirect from
+#    the old address, included by the existing benlevin.fyi server block.
 if ! command -v nginx >/dev/null 2>&1; then
   echo "nginx is not installed; skipping the nginx files" >&2
 else
+  SITE=/etc/nginx/snippets/fixedyet-site.conf
   SNIPPET=/etc/nginx/snippets/fixedyet.conf
   LIMITS=/etc/nginx/conf.d/fixedyet-limits.conf
   undo_nginx() {  # put back what was there before this deploy touched nginx
-    for pair in "$SNIPPET" "$LIMITS"; do
+    for pair in "$SITE" "$SNIPPET" "$LIMITS"; do
       if [ -e "$pair.bak" ]; then sudo mv -f "$pair.bak" "$pair"; else sudo rm -f "$pair"; fi
     done
   }
-  for dest in "$SNIPPET" "$LIMITS"; do
+  for dest in "$SITE" "$SNIPPET" "$LIMITS"; do
     if [ -e "$dest" ]; then sudo cp -p "$dest" "$dest.bak"; fi
   done
   sudo install -d -m 755 /etc/nginx/snippets /etc/nginx/conf.d
@@ -155,14 +160,15 @@ else
       "$REMOTE_DIR/deploy/fixedyet.nginx.conf" > /tmp/fixedyet-snippet.conf
     grep -q "proxy_pass http://$UPSTREAM/;" /tmp/fixedyet-snippet.conf \
       || { echo "could not point the nginx snippet at $UPSTREAM" >&2; undo_nginx; exit 1; }
-    sudo install -m 644 -o root -g root /tmp/fixedyet-snippet.conf "$SNIPPET"
+    sudo install -m 644 -o root -g root /tmp/fixedyet-snippet.conf "$SITE"
     rm -f /tmp/fixedyet-snippet.conf
   else
-    sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet.nginx.conf" "$SNIPPET"
+    sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet.nginx.conf" "$SITE"
   fi
+  sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet-redirect.nginx.conf" "$SNIPPET"
   sudo install -m 644 -o root -g root "$REMOTE_DIR/deploy/fixedyet-limits.nginx.conf" "$LIMITS"
   if sudo nginx -t; then
-    sudo rm -f "$SNIPPET.bak" "$LIMITS.bak"
+    sudo rm -f "$SITE.bak" "$SNIPPET.bak" "$LIMITS.bak"
     sudo systemctl reload nginx
     echo "nginx files installed, nginx reloaded"
   else
@@ -172,10 +178,16 @@ else
   fi
   # -R, not -r: the entries in sites-enabled are symlinks, and -r skips symlinks found while
   # walking a directory. With -r the check never saw the include and always printed the notice.
+  if ! sudo grep -RqE '^[[:space:]]*include[[:space:]]+(/etc/nginx/)?snippets/fixedyet-site\.conf' \
+      /etc/nginx/sites-enabled 2>/dev/null; then
+    echo
+    echo "ACTION NEEDED: the fixedyet.benlevin.fyi server block is missing. Set it up once with"
+    echo "the commands at the top of deploy/fixedyet-server.nginx.conf (DNS record first)."
+  fi
   if ! sudo grep -RqE '^[[:space:]]*include[[:space:]]+(/etc/nginx/)?snippets/fixedyet\.conf' \
       /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null; then
     echo
-    echo "ACTION NEEDED: add this line inside the existing benlevin.fyi server { } block:"
+    echo "ACTION NEEDED (old links): add this line inside the existing benlevin.fyi server { } block:"
     echo "    include snippets/fixedyet.conf;"
     echo "then: sudo nginx -t && sudo systemctl reload nginx"
   fi
@@ -220,7 +232,7 @@ REMOTE
 cat <<DONE
 
 == deployed ==
-Open $PUBLIC_URL (benlevin.fyi already has DNS and HTTPS; this adds no new host).
+Open $PUBLIC_URL (its DNS record and certificate are set up once; see deploy/fixedyet-server.nginx.conf).
 If the script printed ACTION NEEDED, add the include line to the benlevin.fyi server first.
 Logs: ssh $TARGET sudo journalctl -u $SERVICE -f
 DONE

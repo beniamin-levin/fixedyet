@@ -6,8 +6,8 @@ Built for the Nebius x NVIDIA Global AI Hackathon 2026, Coding and Agentic Engin
 
 ## For judges
 
-- **Live demo:** https://benlevin.fyi/fixedyet/, and every saved report at https://benlevin.fyi/fixedyet/reports. **Video (3 min):** _link added on submission_.
-- **Start here:** the [jinja#2244 report](https://benlevin.fyi/fixedyet/reports#real-pallets-jinja-2244). An open bug, then a one-line fix that FixedYet verified in the sandbox (911 tests pass with and without it): the same check the jinja maintainer asked for in the open upstream pull request.
+- **Live demo:** https://fixedyet.benlevin.fyi/, and every saved report at https://fixedyet.benlevin.fyi/reports. **Video (3 min):** _link added on submission_.
+- **Start here:** the [jinja#2244 report](https://fixedyet.benlevin.fyi/reports#real-pallets-jinja-2244). An open bug, then a one-line fix that FixedYet verified in the sandbox (911 tests pass with and without it): the same check the jinja maintainer asked for in the open upstream pull request.
 - **Run one yourself:** paste an issue from a pure-Python project tested with pytest. The judge code in the Devpost testing instructions gives judges their own daily runs.
 - **Measured:** on SWE-bench Verified, three full runs of 15 issues reproduced **12/15, 10/15 and 11/15**, at **about $0.03 per issue**. The third run, with the rules v2 checks, called **no fixed bug open** (the first two had 3 and 4 such wrong `open_bug` verdicts; two more runs of the 7 instances that had ever had one still had 2 and 1). Ten recent real issues run live gave **8 of 10** correct verdicts, and the other 2 are now flagged `inconsistent` instead of wrong. Details in [Evaluation](#evaluation).
 - **Upstream pull requests:** [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043) is a backport FixedYet verified onto `v2.14-fixes` (6,250 tests, no new failure), open and ready for review. [nedbat/cog#98](https://github.com/nedbat/cog/pull/98) and [RDFLib/rdflib#3603](https://github.com/RDFLib/rdflib/pull/3603) start from FixedYet's reproductions and fixes, but were completed with Claude's help after FixedYet's first version, and the rdflib change needed a different approach after review.
@@ -151,7 +151,7 @@ On the live demo it verified [pallets/jinja#2244](https://github.com/pallets/jin
 
 ## Web demo
 
-https://benlevin.fyi/fixedyet/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report. One run at a time, a public daily limit, judge codes with their own quota, and a check that the repository is Python before a run is counted. The reports page lists every run, one row per issue, and shows a report's verdict first, then its fix or backport. The maintainer verifies backports and fixes and opens draft pull requests from it. Details in [docs/web-demo.md](docs/web-demo.md); deployment in [`deploy/`](deploy/README.md).
+https://fixedyet.benlevin.fyi/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report. One run at a time, a public daily limit, judge codes with their own quota, and a check that the repository is Python before a run is counted. The reports page lists every run, one row per issue, and shows a report's verdict first, then its fix or backport. The maintainer verifies backports and fixes and opens draft pull requests from it. Details in [docs/web-demo.md](docs/web-demo.md); deployment in [`deploy/`](deploy/README.md).
 
 ## Evaluation
 
