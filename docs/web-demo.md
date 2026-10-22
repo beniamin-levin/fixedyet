@@ -37,7 +37,7 @@ The reports in [`examples/`](../examples) are saved output of real runs on real 
 | Example | What it shows |
 |---|---|
 | [pallets/jinja#2244](https://github.com/pallets/jinja/issues/2244) | an open bug (still open upstream), and the one-line fix that fix mode verified on the live demo: 911 tests pass with and without it. The open upstream pull request [pallets/jinja#2259](https://github.com/pallets/jinja/pull/2259) makes the same check, after the jinja maintainer asked for it; no pull request was opened |
-| [pydantic/pydantic#13991](https://github.com/pydantic/pydantic/issues/13991) | fixed on `main`; the fix verified on `v2.14-fixes` and opened upstream, after a human review, as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043) |
+| [pydantic/pydantic#13991](https://github.com/pydantic/pydantic/issues/13991) | fixed on `main`; the fix verified on `v2.14-fixes` and opened upstream, after a human review, as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043), closed unmerged by the maintainer, who does the backports |
 | [pallets/click#3384](https://github.com/pallets/click/issues/3384) | fixed on `main`, with the fixing commit and the release that shipped it |
 | [pytest-dev/pytest#13784](https://github.com/pytest-dev/pytest/issues/13784) | fixed on `main`; the fix verified on `8.4.x` and opened as a draft pull request in the owner's fork |
 

@@ -466,7 +466,7 @@ On 21 October 2026, ten real issues from ten pure-Python projects were run on th
 
 **8 of 10 correct, the other two flagged at low confidence with the reason, none wrong at high confidence.** The ten assessments are saved in `eval/live/20261022/`. pyparsing#693 is the run that led to the history check: before it, the same result said `fixed_on_main` at high confidence.
 
-Two of the open bugs went on to [fix mode](../README.md#fix-mode-open-bugs-to-verified-draft-prs), and jinja#2244 was verified on the demo server. One fixed-on-main report went on to a backport: pydantic#13991 was backported to `v2.14-fixes` and opened upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043).
+Two of the open bugs went on to [fix mode](../README.md#fix-mode-open-bugs-to-verified-draft-prs), and jinja#2244 was verified on the demo server. One fixed-on-main report went on to a backport: pydantic#13991 was backported to `v2.14-fixes` and opened upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043), which the maintainer closed unmerged on 22 October, as they do the backports themselves.
 
 ### Contamination caveat
 

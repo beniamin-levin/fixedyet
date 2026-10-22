@@ -1,9 +1,9 @@
 {
   "_example": {
-    "label": "Verified backport, now an upstream pull request",
+    "label": "Verified backport, sent upstream",
     "order": 2,
     "illustrative": false,
-    "note": "- **Real run on the live demo, 21 Oct 2026**: [pydantic/pydantic#13991](https://github.com/pydantic/pydantic/issues/13991), fixed on `main` by [e1ca332](https://github.com/pydantic/pydantic/commit/e1ca33220585e8f745000eff4b067e04fe7d83e9)\n- The fix was **cherry-picked onto `v2.14-fixes` and verified there**: the test fails before and passes after, and the suite (6,250 tests) has no new failure\n- After a human review it went upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043), **open and ready for review**",
+    "note": "- **Real run on the live demo, 21 Oct 2026**: [pydantic/pydantic#13991](https://github.com/pydantic/pydantic/issues/13991), fixed on `main` by [e1ca332](https://github.com/pydantic/pydantic/commit/e1ca33220585e8f745000eff4b067e04fe7d83e9)\n- The fix was **cherry-picked onto `v2.14-fixes` and verified there**: the test fails before and passes after, and the suite (6,250 tests) has no new failure\n- After a human review it went upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043), which the maintainer closed unmerged on 22 Oct 2026: they do the backports themselves before a patch release",
     "pr_url": "https://github.com/pydantic/pydantic/pull/14043"
   },
   "status": "verified",
