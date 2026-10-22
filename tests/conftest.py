@@ -285,7 +285,13 @@ class FakeSandbox:
 def fake_sandbox(tmp_path: Path) -> FakeSandbox:
     repo = tmp_path / "repo"
     repo.mkdir()
-    return FakeSandbox(repo_dir=repo)
+    sandbox = FakeSandbox(repo_dir=repo)
+    # The agent's check that a submitted test imports the project (`widgets` lives in the
+    # repository). First handler, so it wins; a test of the check replaces it.
+    return sandbox.on(
+        "importlib.util.find_spec",
+        ExecResult(exit_code=0, stdout=f"{REPO_DIR}/src/widgets/__init__.py\n"),
+    )
 
 
 # -- the environment builder ---------------------------------------------------------------------

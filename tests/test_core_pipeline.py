@@ -484,7 +484,7 @@ async def test_usage_counts_calls_sandbox_runs_cost_and_time(world) -> None:
     happy_script(world.llm)
     a = await world.run()
     assert a.usage.llm_calls == 4  # contract, run_test, submit, analysis
-    assert a.usage.sandbox_runs == len(world.sandbox.calls) == 1
+    assert a.usage.sandbox_runs == len(world.sandbox.calls) == 2  # run_test, the import check
     assert a.usage.cost_usd == pytest.approx(world.llm.usage.cost_usd) and a.usage.cost_usd > 0
     assert a.usage.input_tokens == 4_000 and a.usage.wall_seconds >= 0
     # the first call is the cheap model, the rest the main one
@@ -687,8 +687,8 @@ async def test_pipeline_works_with_the_real_envbuild_on_a_fake_sandbox(
     assert (a.verdict, a.confidence) == (Verdict.FIXED_ON_MAIN, Confidence.HIGH)
     assert a.reproduction.reported_side.checkpoint_image == "ckpt-baseline"
     assert (a.reproduction.reported_side.ref, a.reproduction.fix_side.ref) == ("v1.2.0", "main")
-    # baseline, agent run_test, the fix side's checkout, the two sides' test runs
-    assert a.usage.sandbox_runs == len(fake_sandbox.calls) == 5
+    # baseline, agent run_test and its import check, the fix side's checkout, the two side runs
+    assert a.usage.sandbox_runs == len(fake_sandbox.calls) == 6
     runs = [c for c in fake_sandbox.calls if "__RUN_START__" in c.command]
     assert len(runs) == 2 and not any(c.network for c in runs)  # the decisive runs are offline
     (checkout,) = [c for c in fake_sandbox.calls if "__PREPARED__" in c.command]

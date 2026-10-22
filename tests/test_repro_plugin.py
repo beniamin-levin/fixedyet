@@ -232,7 +232,9 @@ async def test_a_submit_whose_failure_lacks_the_reported_exception_is_sent_back_
 
     fake_sandbox.on("pytest", ExecResult(exit_code=1, stdout=FAILING_RUN))
     contract = ReproContract(runnable=True, observed_behaviour="parse raises KeyError: 'c'")
-    code = "def test_x():\n    assert parse('a,b,c') == ['a', 'b', 'c']\n"
+    code = (
+        "from widgets import parse\n\ndef test_x():\n    assert parse('a,b,c') == ['a', 'b', 'c']\n"
+    )
     fake_llm.queue(
         fake_llm.tool("run_test", code=code),
         fake_llm.tool("submit", code=code, rationale="first"),
@@ -256,7 +258,9 @@ async def test_a_failure_with_the_reported_exception_is_accepted_at_once(
 
     fake_sandbox.on("pytest", ExecResult(exit_code=1, stdout=FAILING_RUN))
     contract = ReproContract(runnable=True, observed_behaviour="AssertionError on the last item")
-    code = "def test_x():\n    assert parse('a,b,c') == ['a', 'b', 'c']\n"
+    code = (
+        "from widgets import parse\n\ndef test_x():\n    assert parse('a,b,c') == ['a', 'b', 'c']\n"
+    )
     fake_llm.queue(fake_llm.tool("run_test", code=code),
                    fake_llm.tool("submit", code=code, rationale="ok"))
     _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, contract)

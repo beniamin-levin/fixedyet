@@ -498,6 +498,56 @@ PASSED_NOTE = (
 )
 
 
+_URL_HOST = re.compile(r"https?://([^/\s'\"?#:]+)", re.IGNORECASE)
+_LOCAL_HOSTS = re.compile(
+    r"(^|\.)(localhost|example|example\.(com|org|net)|test|invalid|local)$|^127\.|^0\.0\.0\.0$|^\[",
+    re.IGNORECASE,
+)
+
+
+def network_note(code: str) -> str | None:
+    """A note when the test names a real host: the sandbox has no network, so a test that sends
+    a request there fails on both sides once the bug is fixed (SWE-bench requests-2931 called
+    httpbin.org: the fix side failed with a connection error, not a pass)."""
+    hosts = [h for h in dict.fromkeys(_URL_HOST.findall(code)) if not _LOCAL_HOSTS.search(h)]
+    if not hosts:
+        return None
+    return (
+        f"NOTE: your test names the real host {', '.join(hosts[:3])}. The sandbox has no network: "
+        "if the test sends a request there, then with the bug fixed it fails with a connection "
+        "error instead of passing. Build the request without sending it (prepare it) or mount a "
+        "fake transport."
+    )
+
+
+def imported_modules(code: str) -> list[str]:
+    """The top-level modules a test imports (absolute imports only), in order."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module.split(".")[0])
+    return [n for n in dict.fromkeys(names) if re.fullmatch(r"[A-Za-z_]\w*", n)][:20]
+
+
+# Prints where each module named on the command line would be imported from.
+_FIND_MODULES = """import importlib.util, sys
+for name in sys.argv[1:]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except Exception:
+        spec = None
+    where = (spec.origin or "") if spec else ""
+    if spec and not where and spec.submodule_search_locations:
+        where = list(spec.submodule_search_locations)[0]
+    print(where)"""
+
+
 def failure_notes(exit_code: int, output: str, thread: str) -> str | None:
     """What the model should know about a failed run before it reads the output, or None."""
     if exit_code != 1 or not _PYTEST_SUMMARY.search(output):
@@ -571,6 +621,8 @@ class ReproAgent:
         self.last_timed_out = False
         self.symptom_checked = False  # the observed-behaviour check sends a test back once only
         self.outcome_checked = False  # so does the check that the last run failed at all
+        self.import_checked = False  # and the check that the test imports the project
+        self.last_failing: str | None = None  # the last test whose run failed, for the turn limit
         self.thread = "\n\n".join([issue.title, issue.body, *issue.comments])
         self.submitted: tuple[str, str] | None = None  # (code, rationale)
         self.steps: list[str] = []
@@ -642,10 +694,18 @@ class ReproAgent:
             self.steps.append(f"submitted: {rationale.strip()}")
         elif self.last_code is not None:
             code = self.last_code
-            self.steps.append(
-                self.stop_reason
-                or f"turn limit ({self.max_turns}) reached without submit; using the last test run"
+            note = self.stop_reason or (
+                f"turn limit ({self.max_turns}) reached without submit; using the last test run"
             )
+            if self.stop_reason is None and not self._last_run_failed() and self.last_failing:
+                # A last run that errored or passed cannot reproduce anything; an earlier test
+                # that failed can (SWE-bench requests-2317: turn 19 failed, turn 20 errored).
+                code = self.last_failing
+                note = (
+                    f"turn limit ({self.max_turns}) reached without submit; the last run did not "
+                    "fail, so using the last test that did"
+                )
+            self.steps.append(note)
         else:
             raise AgentError(f"no reproduction test was written in {self.max_turns} turns")
         return TEST_PATH, code, "\n".join(self.steps)
@@ -806,7 +866,10 @@ class ReproAgent:
         if note is None:
             self._setup_errors = 0
             passed = result.exit_code == 0 and not result.timed_out
-            hints = PASSED_NOTE if passed else failure_notes(result.exit_code, text, self.thread)
+            if self._last_run_failed():
+                self.last_failing = code
+            notes = [PASSED_NOTE if passed else failure_notes(result.exit_code, text, self.thread)]
+            hints = "\n\n".join(n for n in [*notes, network_note(code)] if n)
             if hints:
                 # first, like the notes below: a long output is cut in the middle
                 output = f"pytest exit code {result.exit_code}: {status}\n\n{hints}\n\n{text}"
@@ -838,7 +901,7 @@ class ReproAgent:
                 "check the failure, then submit exactly that code.",
                 "submit rejected (code differs from the last run)",
             )
-        failed = self.last_exit == 1 and bool(_PYTEST_SUMMARY.search(self.last_output))
+        failed = self._last_run_failed()
         # A last run that passed, or stopped before its assertions for the test's own reason,
         # cannot reproduce anything: the two verdict runs would end the same way. Sent back
         # once; a setup error is the sandbox's, and the harness reports it.
@@ -848,6 +911,13 @@ class ReproAgent:
             return self._outcome_feedback(status), (
                 f"submit returned once: the last run {status.split(' (')[0]}"
             )
+        if failed and not self.import_checked:
+            self.import_checked = True
+            names = imported_modules(code)
+            if not await self._imports_the_project(names):
+                return self._import_feedback(names), (
+                    "submit returned once: the test imports nothing from the repository"
+                )
         if not self.symptom_checked and failed:
             self.symptom_checked = True
             missing = missing_symptoms(self.contract.observed_behaviour, self.last_output)
@@ -857,6 +927,39 @@ class ReproAgent:
                 )
         self.submitted = (code, rationale)
         return "submitted", "submit"
+
+    def _last_run_failed(self) -> bool:
+        return self.last_exit == 1 and bool(_PYTEST_SUMMARY.search(self.last_output))
+
+    async def _imports_the_project(self, names: list[str]) -> bool:
+        """Whether any module the test imports comes from the repository under test. A test that
+        never imports the project fails the same way with the bug fixed (SWE-bench
+        requests-5414 tested the idna package directly and became a wrong open_bug). True when
+        the sandbox cannot tell: this check only ever sends a test back once."""
+        if not names:
+            return False
+        try:
+            result = await self._exec(
+                f"{TESTER_FUNCTIONS}\nir_as_tester python -c {shlex.quote(_FIND_MODULES)} "
+                + " ".join(shlex.quote(n) for n in names),
+                network=False,
+            )
+        except Exception:  # a sandbox hiccup must not cost the model its submit
+            log.warning("import check failed", exc_info=True)
+            return True
+        if result.exit_code != 0:
+            return True
+        return any(line.startswith(f"{REPO_DIR}/") for line in result.stdout.splitlines())
+
+    def _import_feedback(self, names: list[str]) -> str:
+        imported = f"it imports: {', '.join(names)}" if names else "it imports nothing"
+        return (
+            f"submit returned (once): your test imports nothing from the repository under test "
+            f"({imported}), so it never runs the project's code and would fail the same way "
+            "with the bug fixed. Call the project's own API the way the issue does. If the test "
+            "reaches the project another way (a fixture, a command line), call submit again "
+            "with the same code and say so in the rationale: the second submit is accepted."
+        )
 
     def _outcome_feedback(self, status: str) -> str:
         if self.last_exit == 0 and not self.last_timed_out:

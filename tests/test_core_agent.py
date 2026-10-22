@@ -259,10 +259,11 @@ async def test_full_loop_explores_runs_and_submits(fake_llm, fake_sandbox, sampl
     assert "run_test -> FAILED" in summary and "submitted: parse drops the last item" in summary
 
     # Every tool ran in a disposable fork of the baseline image, inside the repository.
-    assert len(fake_sandbox.calls) == 4
+    assert len(fake_sandbox.calls) == 5
     for call in fake_sandbox.calls:
         assert call.image == "baseline-img" and call.keep is False and call.workdir == "/work/repo"
-    list_call, read_call, search_call, test_call = fake_sandbox.calls
+    list_call, read_call, search_call, test_call, import_call = fake_sandbox.calls
+    assert "find_spec" in import_call.command and import_call.command.endswith(" widgets")
     assert test_call.network is False  # the sandbox enforces "no network in the test"
     assert test_call.files is not None
     assert test_call.files["/work/repo/tests/test_fixedyet_repro.py"] == GOOD_TEST
@@ -350,7 +351,7 @@ async def test_fake_failures_and_syntax_errors_are_rejected_without_a_sandbox_ru
     answers = [m["content"] for m in tool_messages(fake_llm)]
     assert answers[0].startswith("not run:") and "fake failure" in answers[0]
     assert answers[1].startswith("not run:") and "SyntaxError" in answers[1]
-    assert len(fake_sandbox.calls) == 1  # only the good test reached the sandbox
+    assert len(fake_sandbox.calls) == 2  # the good test, then the submit's import check
 
 
 async def test_code_in_a_markdown_fence_is_unwrapped(fake_llm, fake_sandbox, sample_issue) -> None:
@@ -484,7 +485,7 @@ async def test_tool_calls_queued_after_submit_are_not_run(
     )
     fake_llm.queue(fake_llm.tool("run_test", code=GOOD_TEST), both)
     _, code, _ = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
-    assert code == GOOD_TEST and len(fake_sandbox.calls) == 1
+    assert code == GOOD_TEST and len(fake_sandbox.calls) == 2  # run_test, the import check
 
 
 # -- an errored run_test: the sandbox's problem or the test's own ---------------------------------
@@ -679,6 +680,98 @@ async def test_a_submit_after_a_setup_error_is_not_sent_back(
     assert "submitted: the sandbox's problem" in summary and "returned" not in summary
 
 
+async def test_a_test_that_imports_nothing_from_the_project_is_sent_back_once(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    """SWE-bench requests-5414: the test called the idna package directly, never requests, and
+    failed the same way with the fix: a wrong open_bug."""
+    fake_sandbox.handlers[0] = (
+        "importlib.util.find_spec",
+        ExecResult(exit_code=0, stdout="/usr/lib/python3.9/site-packages/idna/__init__.py\n"),
+    )
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    code = "import idna\n\ndef test_x():\n    assert idna.encode('a') == b'b'\n"
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=code),
+        fake_llm.tool("submit", code=code, rationale="first"),
+        fake_llm.tool("submit", code=code, rationale="the fixture runs the project"),
+    )
+    _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    (check,) = [c for c in fake_sandbox.calls if "find_spec" in c.command]
+    assert check.command.endswith(" idna") and check.network is False
+    returned = tool_messages(fake_llm)[-1]["content"]
+    assert returned.startswith("submit returned (once): your test imports nothing from the")
+    assert "(it imports: idna)" in returned
+    assert "submitted: the fixture runs the project" in summary
+
+
+def test_imported_modules_lists_absolute_top_level_imports() -> None:
+    code = (
+        "import os, requests.adapters as ad\nfrom idna import encode\nfrom . import x\n"
+        "from requests.models import Request\ndef test_x():\n    import json\n"
+    )
+    assert agent.imported_modules(code) == ["os", "requests", "idna", "json"]
+    assert agent.imported_modules("def (") == []
+
+
+@pytest.mark.parametrize(
+    ("code", "hosts"),
+    [
+        ("requests.put('http://httpbin.org/put', data=b'x')", "httpbin.org"),
+        ("get('https://api.github.com:443/x')", "api.github.com"),
+        ("get('http://localhost:8000/'); get('http://127.0.0.1/')", None),
+        ("get('http://.example.com'); get('https://www.example.org/a')", None),
+        ("Request('GET', 'http://site.test/x').prepare()", None),
+        ("no url at all", None),
+    ],
+)
+def test_network_note_names_real_hosts_only(code: str, hosts: str | None) -> None:
+    note = agent.network_note(code)
+    assert (note is None) if hosts is None else (note is not None and hosts in note)
+
+
+async def test_a_run_of_a_test_that_names_a_real_host_gets_the_note(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    code = GOOD_TEST + "    requests.get('http://httpbin.org/get')\n"
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=code),
+        fake_llm.tool("submit", code=code, rationale="r"),
+    )
+    await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    shown = tool_messages(fake_llm)[0]["content"]
+    assert "NOTE: your test names the real host httpbin.org" in shown.split("\n\n")[1]
+
+
+async def test_at_the_turn_limit_the_last_failing_test_beats_a_later_error(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    """SWE-bench requests-2317: turn 19 ran a failing test, turn 20 one that could not be
+    collected, and the turn limit kept the broken one."""
+    results = iter([PYTEST_FAIL, COLLECTION_ERROR])
+    fake_sandbox.on("pytest", lambda call: next(results))
+    broken = GOOD_TEST.replace("from widgets import parse", "from widgets import nothing")
+    fake_llm.settings.max_turns = 2
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST), fake_llm.tool("run_test", code=broken)
+    )
+    _, code, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    assert code == GOOD_TEST
+    assert "the last run did not fail, so using the last test that did" in summary
+
+
+async def test_at_the_turn_limit_a_failing_last_run_is_kept(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    other = GOOD_TEST.replace("keeps_last_item", "again")
+    fake_llm.settings.max_turns = 2
+    fake_llm.queue(fake_llm.tool("run_test", code=GOOD_TEST), fake_llm.tool("run_test", code=other))
+    _, code, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    assert code == other and "using the last test run" in summary
+
+
 async def test_a_model_that_only_reads_is_told_to_run_a_test(
     fake_llm, fake_sandbox, sample_issue
 ) -> None:
@@ -721,7 +814,7 @@ async def test_an_empty_code_argument_names_what_the_model_sent(
     first, second, *_ = [m["content"] for m in tool_messages(fake_llm)]
     assert first.startswith("not run: the `code` argument is missing or empty (you sent: content)")
     assert "you sent: no arguments" not in second and "missing or empty" in second
-    assert len(fake_sandbox.calls) == 1
+    assert len(fake_sandbox.calls) == 2  # the one real run_test, then the import check
 
 
 def test_a_file_without_a_test_function_says_what_it_does_define() -> None:
