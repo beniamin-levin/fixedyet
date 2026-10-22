@@ -28,12 +28,12 @@ Most bug reports get answered from memory, from the docs, or from a model that n
 | Step | Model on Nebius Token Factory | Why this model |
 |---|---|---|
 | Intake: read the thread, extract version, setup, snippet, expected and observed behaviour | **Nemotron 3 Nano** (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`), Super as the fallback | a structured extraction, at $0.06 / $0.24 per million tokens |
-| Write the reproduction test: a hand-written tool-calling loop that reads files, searches the code, writes a test and runs pytest in a fork of the checkpoint | **Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) | its long context holds the issue thread plus the source files the agent reads; about 15 calls a run |
+| Write the reproduction test: a hand-written tool-calling loop that reads files, searches the code, runs scripts to see what the code returns, writes a test and runs pytest, each in a fork of the checkpoint | **Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) | its long context holds the issue thread plus the source files the agent reads; about 15 calls a run |
 | Root cause and next actions in the report | Nemotron 3 Super | labelled as unchecked model text |
 | [Fix mode](docs/fix-mode.md): search/replace edits for an open bug | Nemotron 3 Super, with reasoning | up to 16,000 tokens and 420 s per call |
 | The verdict | **no model** | `verdict.py`, a decision matrix over exit codes |
 
-Other parts: **Tavily** search and extract find similar issues, upstream reports and the changelog entry of a fix; when no pull request names the fix, a `git bisect` in the sandbox finds the fixing commit. **Nebius Sandboxes** is the intended sandbox (one checkpoint per repository and version, every attempt and both verdict runs as forks of it); the backend is written (`sandbox/nebius.py`, on `contree-sdk`) but has not run against the live service, because beta access is still pending. The **Docker backend** implements the same checkpoint-and-fork interface and ran every result here.
+Other parts: **Tavily** search and extract find similar issues, upstream reports and the changelog entry of a fix; when no pull request names the fix, a `git bisect` in the sandbox finds the fixing commit. **Nebius Sandboxes** was the intended sandbox (one checkpoint per repository and version, every attempt and both verdict runs as forks of it); the backend is written (`sandbox/nebius.py`, on `contree-sdk`, the `[nebius]` extra) but has not run against the live service, because beta access is still pending. The **Docker backend** implements the same checkpoint-and-fork interface, ran every result here, and is the default.
 
 How Token Factory sped the work up:
 
@@ -68,6 +68,7 @@ flowchart LR
 | Reported version | Fix side (main) | Verdict |
 |---|---|---|
 | test fails | test passes | `fixed_on_main` |
+| test fails | test passes, but the reported version is not in main's history (released from another branch) | `fixed_on_main`, confidence low |
 | test fails | test fails the same way (the same error text) | `open_bug` |
 | test fails | test fails, different error or different error text | `inconsistent`, confidence low |
 | test fails | test fails the same way, on an exception the issue never names | `open_bug`, confidence low |
@@ -80,7 +81,7 @@ flowchart LR
 
 ## Quickstart
 
-Python 3.12 or newer.
+Python 3.12 or newer, and a running Docker daemon (Docker Desktop, or Colima on a Mac).
 
 ```bash
 git clone https://github.com/beniamin-levin/fixedyet.git
@@ -98,9 +99,9 @@ fixedyet run https://github.com/OWNER/REPO/issues/123
 | `NEBIUS_API_KEY` | Token Factory inference, and Sandboxes unless `CONTREE_TOKEN` is set |
 | `TAVILY_API_KEY` | evidence. Without it that step is skipped |
 | `GITHUB_TOKEN` | optional for `run` (a read-only token lifts GitHub's 60 requests an hour); required for `--open-pr`, which also falls back to `gh auth token` |
-| `FIXEDYET_SANDBOX` | `nebius` (default) or `docker` for a local Docker daemon |
+| `FIXEDYET_SANDBOX` | `docker` (default) for the local Docker daemon, or `nebius` for Nebius Sandboxes: `pip install -e ".[nebius]"` and `NEBIUS_PROJECT_ID` |
 
-Every variable is in [`.env.example`](.env.example). Sandboxes is a beta product, so access may need to be requested from Nebius; the Docker backend runs the same flow on a local daemon.
+Every variable is in [`.env.example`](.env.example). Sandboxes is a beta product, so access has to be requested from Nebius; Docker runs the same flow with no account.
 
 ```bash
 fixedyet run URL --fix-ref v2.4.0     # fix side is a tag, branch or commit instead of main
@@ -201,6 +202,7 @@ Measured: **$0.031 on average and $0.024 at the median** per issue at Token Fact
 - **Metabase Repro-Bot** (MIT) checks a bug at the reported version and on `master`, but only for Metabase, lets the model decide the verdict and forbids web search. FixedYet is generic across pure-Python projects, lets rules decide, and adds web evidence.
 - **SWE-agent, mini-swe-agent, OpenHands** and the commercial coding agents go straight to a fix; reproduction is at most a step in their prompts. FixedYet's main output is the proof, and its fix mode only runs on a bug the sandbox has shown to be open.
 - **The OpenAI, Vercel and Daytona reference triage agents** run code against the default branch only and let the model judge the result.
+- **SWT-bench** (Mündler et al., NeurIPS 2024) is the benchmark for this task: write a test from an issue that fails before the fix and passes after it. The evaluation below uses the same fail-to-pass criterion on SWE-bench Verified, but on 15 instances, so its numbers are not comparable to the SWT-bench leaderboard.
 
 ## Safety
 

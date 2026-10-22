@@ -227,7 +227,7 @@ def test_the_page_shows_every_row_of_the_decision_matrix() -> None:
         badge = re.search(r'<span class="badge \w+">([^<]+)</span>', row)[1]
         page.append((labels[badge], "low confidence" in row))
     assert sorted(page) == sorted(_readme_matrix())
-    assert len(page) == 10
+    assert len(page) == 11
 
 
 def _contrast(a: str, b: str) -> float:
