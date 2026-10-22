@@ -138,7 +138,7 @@ Behaviour worth knowing:
 - **The fix side is the gold patch.** In live mode the fix side is the current main branch, which has other changes too. Eval mode isolates the one fix.
 - **Contamination.** Nemotron may have seen SWE-bench issues and their fixes during training. A high score on these instances partly measures recall. The live runs on open issues, which have no public fix yet, are the check against this, and the results below keep the two apart.
 - **Environment gap.** See above: plain editable installs against SWE-bench's pinned images. The fix side reinstalls the project after the gold patch is applied, and a reinstall can change dependency versions, so the two sides are only guaranteed to share one environment when the baseline already satisfies what the project declares. That is how the flask-5014 bug below showed up: the base side errored while the fix side ran.
-- **A laptop's Docker, not the demo's server.** The SWE-bench numbers were measured on a local Docker daemon (Colima on an Apple-silicon Mac). The live demo uses the same Docker backend and the same scripts on a 1 GB Oracle Cloud VM, so its wall times differ. The Nebius Sandboxes backend is implemented but has never run against the live service: no number on this page comes from it.
+- **A laptop's Docker, not the demo's server.** The SWE-bench numbers were measured on a local Docker daemon (Colima on an Apple-silicon Mac). The live demo used the same Docker backend and the same scripts on a 1 GB Oracle Cloud VM until 22 October, so its wall times differ. One SWE-bench run and the checks in [Nebius Sandboxes, 22 October 2026](#nebius-sandboxes-22-october-2026) ran on Nebius Sandboxes; every other number on this page came from Docker.
 
 ## Results, the agent of 22 October 2026
 
@@ -210,6 +210,29 @@ A check of the model choice: two variants of the final agent, two full runs each
 - **So Nano stays on intake**, a structured extraction, and Super with reasoning runs the agent.
 
 Two runs per variant is a small sample. The spread between runs of one agent is two instances, and the intervals for Super with and without reasoning overlap, so that gap is not conclusive on its own; the Nano gap is outside the spread. The reasoning-off runs and Nano's first run ran at the same time on one Docker VM (four sandboxes at once), and F1 to F3 one at a time, so wall times compare only roughly. Model spend for the four runs: $1.34.
+
+### Nebius Sandboxes, 22 October 2026
+
+Beta access to Nebius Token Factory Sandboxes arrived on 22 October. The backend, written on 21 October from the documentation and the `contree-sdk` source (`sandbox/nebius.py`), ran unchanged against the live service. These checks ran on it with the final agent (`FIXEDYET_SANDBOX=nebius`, commit `ba7bd0b`), against the Docker runs of the same issues. The results file is in `eval/results/nebius/`.
+
+| Check | Docker | Nebius Sandboxes |
+|---|---|---|
+| SWE-bench Verified, the 15 instances | 13, 12 and 11 reproduced (F1 to F3); $0.033 mean cost, 1m18s mean wall time | **12** reproduced (`20261022T210519Z`); 1 wrong `open_bug` at high confidence; $0.039 mean cost, 1m45s mean wall time, $0.58 in all |
+| Baseline of a project (clone, install, checkpoint) on the demo's 1 GB VM | median 57 s for jinja and 63 s for werkzeug (8 runs each) | 13 s for each, once the Python image is stored |
+| werkzeug#3312 on the demo's VM | `fixed_on_main`, high; median 188 s (8 runs) | `fixed_on_main`, high, the same fixing commit by bisect; 61 s |
+| jinja#2244 on the demo's VM | `open_bug`, high, in 5 of 6 runs (one `unsupported` on 21 October); median 153 s | `open_bug`, high; 232 s and 162 s (19 agent turns in each) |
+| Fix mode, jinja#2244 | verified on the first attempt; 911 tests pass with and without the fix | the same, in 43 s |
+| Backport, pytest#13784 onto `8.4.x` | verified; 157 s on the Mac | verified; 354 s |
+| MCP `check_fixed`, werkzeug#3312 | `"fixed": true`, 53 s on the Mac | `"fixed": true`, 54 s |
+
+- **The same answers.** 12 of 15 is inside the spread of the three Docker runs. The three misses are model-written tests, as on Docker: pylint-4970 (never reproduced on Docker either), pylint-6528 (the same wrong assumption as in F3, a default ignore of `.a` that the issue assumes) and pylint-4604 (an `AttributeError` from the test's own use of the checker API, which rules v2 flags at low confidence). No environment failed to build and no run errored.
+- **Faster on the demo.** On the 1 GB VM, Docker spent about a minute building each project's baseline; Nebius takes 13 s once the Python image is stored in the project. Importing an image from Docker Hub takes 27 to 60 s, once per Python version, and stored images are kept for 180 days. The VM now only waits on the API: two runs at once added about 50 MB to its memory.
+- **Slower for big test suites.** pytest's own suite (3,247 tests) took 165 s a pass in a sandbox, against 68 s on the Mac's Docker. The verdict runs are single tests and do not notice, but fix and backport mode run the project's suite twice, so they take longer here.
+- **The model sets the run time more than the sandbox.** jinja#2244 took 5 agent turns from the Mac and 19 in both runs on the demo, so whole-run times compare only roughly; the baseline times compare directly. The SWE-bench run's wall times include the first import of each Python image and other checks running at the same time.
+- **Network.** contree-sdk 0.3.6 has no switch for the network, so the verdict runs and the bisect use `unshare --net` inside the sandbox. A check from inside a sandbox: the same request that reaches PyPI fails name resolution under `unshare --net`.
+- **Price.** The beta documentation states no price, and the operations report CPU and memory but no cost; two full runs used about 50 CPU-seconds in 25 operations. Model spend for all the checks above: about $0.78.
+
+Since then the demo runs on Nebius Sandboxes. Docker stays the default for running FixedYet locally, with no account needed, and in CI.
 
 ## Results, rules v2
 
@@ -321,7 +344,7 @@ Kept as history: the numbers before rules v2, measured earlier on 2026-10-21. Tw
 | Date | 2026-10-21. Run A started 11:45 UTC, run B 11:55 UTC |
 | FixedYet commit | `348a63f` |
 | Model | `nvidia/nemotron-3-super-120b-a12b` writes the test; `NVIDIA-Nemotron-3-Nano-30B-A3B` extracts the issue contract. Both through Nebius Token Factory |
-| Sandbox backend | **Local Docker** (`FIXEDYET_SANDBOX=docker`; Colima on an Apple-silicon Mac, linux/arm64 `python:3.9` and `python:3.11` images). The live demo uses the same Docker backend on its own VM; the Nebius Sandboxes backend has not run live |
+| Sandbox backend | **Local Docker** (`FIXEDYET_SANDBOX=docker`; Colima on an Apple-silicon Mac, linux/arm64 `python:3.9` and `python:3.11` images). The live demo used the same Docker backend on its own VM; the Nebius Sandboxes backend had not run live yet |
 | Dataset and ids | SWE-bench Verified, the 15 ids of `eval/instances.txt` |
 | Settings | concurrency 2, 1800 s per-instance timeout, $8 budget (never close: each run cost under $0.50) |
 | Results files | `eval/results/20261021T114507Z.{md,json}` (A), `eval/results/20261021T115553Z.{md,json}` (B) |

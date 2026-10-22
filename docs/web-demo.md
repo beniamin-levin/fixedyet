@@ -1,6 +1,6 @@
 # The web demo
 
-https://fixedyet.benlevin.fyi/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. Code runs in Nebius Sandboxes (since 23 October 2026; before that, in Docker on the app's own free 1 GB Oracle Cloud VM, where a run took 1.5 to 5 minutes). The app only waits on the API, so a run takes about 1 to 4 minutes, and the VM's memory no longer limits it. To go back to Docker, set `FIXEDYET_SANDBOX=docker` in `/etc/fixedyet.env` and restart the service. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at the saved reports.
+https://fixedyet.benlevin.fyi/ runs the same pipeline behind a small FastAPI app: paste an issue URL, watch the stages live, read the report with the two-sided result and the test. Code runs in Nebius Sandboxes (since 22 October 2026; before that, in Docker on the app's own free 1 GB Oracle Cloud VM, where a run took 1.5 to 5 minutes). The app only waits on the API, so a run takes about 1 to 4 minutes, and the VM's memory no longer limits it. To go back to Docker, set `FIXEDYET_SANDBOX=docker` in `/etc/fixedyet.env` and restart the service. The server runs one issue at a time and stops at a daily limit (`FIXEDYET_DEMO_DAILY_LIMIT`), then points visitors at the saved reports.
 
 ## Who can run what
 
