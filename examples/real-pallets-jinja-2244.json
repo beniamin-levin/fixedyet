@@ -49,7 +49,7 @@
       "kind": "log",
       "title": "Key error at the reported version",
       "url": null,
-      "why": "AssertionError: assert '\\n' == 'pExample description/p\\n'"
+      "why": "AssertionError: assert '\\n' == '<p>Example description</p>\\n'"
     },
     {
       "kind": "upstream",

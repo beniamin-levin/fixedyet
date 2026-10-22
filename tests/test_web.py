@@ -183,6 +183,15 @@ def test_the_page_shows_the_new_name_and_never_the_old_one() -> None:
     assert "FixedYet" in html.split('class="brand"', 1)[1].split("</a>", 1)[0]
 
 
+def test_the_scripts_never_put_text_into_the_page_as_html() -> None:
+    """Report text keeps its brackets (a failure line can quote "<p>"), so the escaping is the
+    page's: every string goes in through textContent or a text node."""
+    for name in ("common.js", "app.js", "reports.js"):
+        script = (web.STATIC_DIR / name).read_text(encoding="utf-8")
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert sink not in script, f"{name} uses {sink}"
+
+
 def test_page_has_no_dark_background() -> None:
     css = (web.STATIC_DIR / "style.css").read_text(encoding="utf-8")
     assert "color-scheme: light" in css

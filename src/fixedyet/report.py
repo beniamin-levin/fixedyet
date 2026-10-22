@@ -76,6 +76,16 @@ def _fence(text: str, lang: str = "") -> str:
     return f"{ticks}{lang}\n{text.rstrip()}\n{ticks}"
 
 
+def _code_span(text: str) -> str:
+    """One line as inline code, shown as it is: markdown and HTML inside it (``<p>``) are not
+    read, and a backtick run inside cannot close it early."""
+    text = _line(text)
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    ticks = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""  # CommonMark strips one
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
 def _link(title: str, url: str | None) -> str:
     title = _line(title).replace("[", "(").replace("]", ")")
     if url and url.startswith(("http://", "https://")) and " " not in url and ")" not in url:
@@ -105,7 +115,11 @@ def _results_table(a: Assessment) -> str | None:
 
 def _evidence_item(item: Evidence) -> str:
     text = f"- **{item.kind}**: {_link(item.title, item.url)}"
-    return text + (f" - {_line(item.why)}" if item.why else "")
+    if not item.why:
+        return text
+    # A log line keeps its brackets and backticks (evidence.clean_log_line), so it goes into a
+    # code span: a markdown viewer would otherwise read "<p>" in it as HTML.
+    return text + f" - {_code_span(item.why) if item.kind == 'log' else _line(item.why)}"
 
 
 def _usage_line(a: Assessment) -> str:

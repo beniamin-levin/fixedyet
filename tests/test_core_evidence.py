@@ -8,6 +8,7 @@ from fixedyet.config import Settings
 from fixedyet.evidence import (
     ReleaseEntry,
     classify,
+    clean_log_line,
     clean_web_text,
     find_release,
     gather_evidence,
@@ -90,6 +91,14 @@ def test_clean_web_text_makes_one_safe_line() -> None:
     assert "\n" not in out and "<" not in out and ">" not in out and "`" not in out
     assert "\x00" not in out and "\x1b" not in out
     assert len(clean_web_text("a" * 1000)) == 200 and clean_web_text("a" * 1000).endswith("...")
+
+
+def test_clean_log_line_keeps_brackets_and_backticks() -> None:
+    """A line of our own sandbox's output: the brackets are often the point of the failure."""
+    line = "AssertionError: assert '\\n' == '<p>Example description</p>\\n'"
+    assert clean_log_line(line) == line
+    assert clean_log_line("E\x1b[31m  `x` <\x00b>\nnext") == "E [31m `x` < b> next"
+    assert len(clean_log_line("a" * 1000)) == 200 and clean_log_line("a" * 1000).endswith("...")
 
 
 def test_rank_results_prefers_github_then_stackoverflow_then_docs() -> None:
@@ -504,6 +513,20 @@ async def test_without_any_source_only_the_log_line_remains(issue: Issue) -> Non
     assert [e.kind for e in result.evidence] == ["log"]
     assert "AssertionError" in result.evidence[0].why
     assert result.fixing_commit is None and result.fixed_in_release is None
+
+
+async def test_the_key_error_line_is_quoted_as_the_sandbox_printed_it(issue: Issue) -> None:
+    log = (
+        ">       assert render() == '<p>Example description</p>\\n'\n"
+        "E       AssertionError: assert '\\n' == '<p>Example description</p>\\n'\n"
+    )
+    result = await gather_evidence(
+        issue=issue, verdict=Verdict.OPEN_BUG, reported_log=log, usage=Usage(),
+        settings=Settings(tavily_api_key=""),
+    )
+    assert result.evidence[0].why == (
+        "AssertionError: assert '\\n' == '<p>Example description</p>\\n'"
+    )
 
 
 async def test_fixed_on_main_finds_pr_commit_and_release(issue: Issue) -> None:

@@ -138,6 +138,21 @@ def test_untrusted_text_cannot_break_out_of_lists_or_tables() -> None:
     assert "v\\|1" in md
 
 
+def test_a_log_line_keeps_its_brackets_inside_a_code_span() -> None:
+    """A markdown viewer must show "<p>" in a failure line, not read it as HTML."""
+    line = "AssertionError: assert '\\n' == '<p>Example description</p>\\n'"
+    a = assessment(evidence=[
+        Evidence(kind="log", title="Key error at the reported version", why=line),
+        Evidence(kind="log", title="Backticks", why="assert `a` == ``b``"),
+        Evidence(kind="upstream", title="Page", url="https://example.com/p", why="plain text"),
+    ])
+    md = render_markdown(a)
+    assert f"- **log**: Key error at the reported version - `{line}`\n" in md
+    # a longer backtick run than any inside, padded because the text ends with a backtick
+    assert "- **log**: Backticks - ``` assert `a` == ``b`` ```\n" in md
+    assert "- **upstream**: [Page](https://example.com/p) - plain text\n" in md
+
+
 def test_needs_info_report_is_short_and_has_no_empty_sections() -> None:
     a = Assessment(
         issue_url="https://github.com/acme/widgets/issues/1", title="How do I?",
