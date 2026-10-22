@@ -1476,7 +1476,8 @@ Rules:
   refactoring, no reformatting, no unrelated improvements, no new dependencies.
 - Change only the project's source files. Never change tests, CI, packaging or configuration
   files, and never create a file. At most {MAX_CHANGED_LINES} changed lines in total.
-- Do not special-case the test's inputs. The change must be right for every caller.
+- Do not special-case the test's inputs. The change must be right for every caller, and for
+  every input the issue names, also those the test does not check.
 - A function you change may have other callers that the reproduction test does not exercise
   (listed as "other callers" when they are known). Your change must not alter what the function
   does for them. When it would, change the code that is specific to the issue instead, such as

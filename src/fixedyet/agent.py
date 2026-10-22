@@ -242,6 +242,8 @@ Rules:
   SyntaxError) means your test is wrong, not that the bug is reproduced.
 - Prefer the issue's own snippet. Keep the test small: one test function, no network calls, no
   sleeping, no randomness unless seeded. Import the project the way a user would.
+- When the issue names more than one failing input or case (two version strings, several calls),
+  assert each of them: a fix that handles only the first one must not pass your test.
 - Never fake a failure (assert False, pytest.fail) and never skip or xfail; such tests are rejected.
 - The sandbox where tests run has NO network: pip install, downloads and URL fetches fail. Only the
   project and its dependencies, pytest, and the extra packages named in the first message are
