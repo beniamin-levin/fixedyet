@@ -28,7 +28,7 @@ Most bug reports get answered from memory, from the docs, or from a model that n
 | Step | Model on Nebius Token Factory | Why this model |
 |---|---|---|
 | Intake: read the thread, extract version, setup, snippet, expected and observed behaviour | **Nemotron 3 Nano** (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`), Super as the fallback | a structured extraction, at $0.06 / $0.24 per million tokens |
-| Write the reproduction test: a hand-written tool-calling loop that reads files, searches the code, runs scripts to see what the code returns, writes a test and runs pytest, each in a fork of the checkpoint | **Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) | its long context holds the issue thread plus the source files the agent reads; about 15 calls a run |
+| Write the reproduction test: a hand-written tool-calling loop that reads files, searches the code, runs scripts to see what the code returns, writes a test and runs pytest, each in a fork of the checkpoint | **Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`), with reasoning | its long context holds the issue thread plus the source files the agent reads; about 15 calls a run. [Measured](docs/evaluation.md#model-choice-22-october-2026): Nano in its place reproduced 14 of 30 instance runs, against 36 of 45, at a third of the cost; Super without reasoning, 21 of 30 at the same cost |
 | Root cause and next actions in the report | Nemotron 3 Super | labelled as unchecked model text |
 | [Fix mode](docs/fix-mode.md): search/replace edits for an open bug | Nemotron 3 Super, with reasoning | up to 16,000 tokens and 420 s per call |
 | The verdict | **no model** | `verdict.py`, a decision matrix over exit codes |

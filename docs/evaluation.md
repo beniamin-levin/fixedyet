@@ -195,6 +195,22 @@ Every run is kept in `eval/results/`. These ran on intermediate commits that a l
 
 Total model spend of the day's evaluation, development runs included: about $6.55 at list price.
 
+### Model choice, 22 October 2026
+
+A check of the model choice: two variants of the final agent, two full runs each on the same 15 instances, against F1 to F3 above. In the first, Super runs the agent with its reasoning off (`FIXEDYET_AGENT_THINKING=off`, commit `0f3eec2`; the root cause analysis keeps its reasoning). In the second, Nano is the main model (`FIXEDYET_MODEL=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`), so it runs the agent, the analysis and the check of a "not runnable" contract. The results files are in `eval/results/ablations/`.
+
+| Main model | Runs | Reproduced | Instance runs reproduced (95% interval) | Instances reproduced in either of the first two runs | Wrong `open_bug` (high confidence) | `unsupported` | Mean cost per issue | Mean wall time | Output tokens per issue |
+|---|---|---|---|---|---|---|---|---|---|
+| Super, reasoning on (F1 to F3) | 3 | **13, 12, 11** | **36 of 45, 80%** (66-89%) | 14 | 3 (3) | 1 | $0.033 | 1m18s | 5,600 |
+| Super, reasoning off (`20261022T102353Z`, `103148Z`) | 2 | 12, 9 | 21 of 30, 70% (52-83%) | 12 | 6 (4) | 0 | $0.034 | 1m05s | 3,100 |
+| Nano (`20261022T102358Z`, `104226Z`) | 2 | 7, 7 | 14 of 30, 47% (30-64%) | 8 | 3 (0) | 8 | $0.011 | 3m01s | 19,300 |
+
+- **Reasoning stays on.** Without it the agent wrote about half the output tokens, but the cost did not fall: input tokens are most of the bill (about 85 percent with reasoning, 92 without, since every call sends the conversation again), and the runs made a few more calls (252 a run against 237). The tests got worse: twice as many wrong `open_bug` verdicts (6 in 30 runs against 3 in 45), four of them at high confidence, all well-formed tests that asserted something the fix does not do. It saved about 13 seconds an issue.
+- **Nano costs a third as much and reproduces about half as many.** 8 of its 30 runs ended `unsupported`, 7 of them with no test written in 20 turns: the agent kept searching the code despite the nudge to run a first test early. It wrote about 19,000 output tokens per issue, most of them reasoning, and took over twice as long; its second run, alone on the Docker VM, was the slower of the two. Its wrong tests were broken ones (an `ImportError` or `NameError` on both sides), which rules v2 flags, so none of its `open_bug` verdicts was at high confidence. With Nano also checking the contract, requests-2317 was `needs_info` again in one run. It reproduced pylint-6528 in both runs, which Super did in one run of three.
+- **So Nano stays on intake**, a structured extraction, and Super with reasoning runs the agent.
+
+Two runs per variant is a small sample. The spread between runs of one agent is two instances, and the intervals for Super with and without reasoning overlap, so that gap is not conclusive on its own; the Nano gap is outside the spread. The reasoning-off runs and Nano's first run ran at the same time on one Docker VM (four sandboxes at once), and F1 to F3 one at a time, so wall times compare only roughly. Model spend for the four runs: $1.34.
+
 ## Results, rules v2
 
 Measured on 2026-10-21 (UTC, evening), after the first measurement further down. Every wrong verdict of that first measurement, on SWE-bench and on the live issues, was an `open_bug` from a model-written test that failed on both sides for a reason other than the bug. Rules v2 (`verdict.RULES_VERSION`, commits `5032c35` to `1341466`) changes two things.
