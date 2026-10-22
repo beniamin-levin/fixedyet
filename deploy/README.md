@@ -89,7 +89,7 @@ Copy the `KEY=value` lines from `.env.example` and fill them in. systemd does no
 | `GITHUB_TOKEN` | recommended | lifts the GitHub rate limit, which an anonymous server reaches quickly. For maintainer mode it is also the token the draft pull requests are opened with: a classic personal access token with only the `public_repo` scope and a 30-day expiry (see [Maintainer mode](#maintainer-mode)). Without maintainer mode a fine-grained read-only token for public repositories is enough |
 | `FIXEDYET_ADMIN_TOKEN` | no | turns on maintainer mode (reports page: verify a backport, attempt a fix of an open bug, open a draft PR, hide a report). A random secret of 32 bytes or more: `openssl rand -hex 32`. Empty or unset means off, and every maintainer endpoint answers 404 |
 | `FIXEDYET_MODEL`, `FIXEDYET_SMALL_MODEL` | no | default to Nemotron 3 Super and Nano |
-| `FIXEDYET_SANDBOX` | no | `nebius` (default) |
+| `FIXEDYET_SANDBOX` | no | `docker` (default) or `nebius` (Sandboxes beta, the `[nebius]` extra) |
 | `FIXEDYET_ROOT_PATH` | no | URL prefix the app is served under. Leave it out: the demo runs at the root of fixedyet.benlevin.fyi. Set it (or pass `--root-path`) only when nginx serves the app under a path |
 | `FIXEDYET_KEEP_CHECKPOINTS` | no | only for the `docker` sandbox: how many of the newest `fixedyet-ckpt` images to keep after each run, default `6` |
 | `FIXEDYET_RUN_BUDGET_USD` | no | hard cost cap per run, default `0.60` |

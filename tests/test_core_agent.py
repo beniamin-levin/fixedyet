@@ -131,9 +131,9 @@ async def test_emit_progress_accepts_sync_and_async_callbacks_and_survives_error
     assert seen == ["sync:one", "async:two"]
 
 
-def test_tool_schema_has_the_five_tools() -> None:
+def test_tool_schema_has_the_six_tools() -> None:
     names = [t["function"]["name"] for t in TOOLS]
-    assert names == ["list_dir", "read_file", "search_code", "run_test", "submit"]
+    assert names == ["list_dir", "read_file", "search_code", "run_python", "run_test", "submit"]
     for tool in TOOLS:
         params = tool["function"]["parameters"]
         assert set(params["required"]) <= set(params["properties"])
@@ -595,6 +595,40 @@ async def test_an_error_in_the_models_own_test_is_not_a_setup_error(
 
 
 PYTEST_PASS = ExecResult(exit_code=0, stdout=".\n1 passed in 0.01s\n")
+
+
+async def test_run_python_runs_a_plain_script_offline_as_the_tester(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("fixedyet_try.py", ExecResult(exit_code=0, stdout="['a', 'b']\n"))
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    script = "from widgets import parse\nprint(parse('a,b,c'))\n"
+    fake_llm.queue(
+        fake_llm.tool("run_python", code=script),
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="r"),
+    )
+    _, code, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    call = fake_sandbox.calls[0]
+    assert call.files == {"/tmp/fixedyet_try.py": script} and call.network is False
+    assert "ir_as_tester python /tmp/fixedyet_try.py" in call.command and call.keep is False
+    shown = tool_messages(fake_llm)[0]["content"]
+    assert shown.startswith("python exit code 0") and "['a', 'b']" in shown
+    assert "run_python -> exit code 0" in summary and code == GOOD_TEST  # a script is no test
+
+
+async def test_a_script_sent_to_run_test_is_pointed_at_run_python(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    fake_llm.queue(
+        fake_llm.tool("run_test", code="from widgets import parse\nprint(parse('a,b,c'))\n"),
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="r"),
+    )
+    await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    first = tool_messages(fake_llm)[0]["content"]
+    assert first.startswith("not run: the file has no test function") and "use run_python" in first
 
 
 async def test_a_pass_at_the_reported_version_gets_a_note_and_a_submit_is_sent_back_once(

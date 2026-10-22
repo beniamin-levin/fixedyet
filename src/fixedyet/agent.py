@@ -42,6 +42,7 @@ log = logging.getLogger(__name__)
 
 REPO_DIR = "/work/repo"  # same value as envbuild.REPO_DIR (docs/architecture.md)
 TEST_PATH = "tests/test_fixedyet_repro.py"
+SCRIPT_PATH = "/tmp/fixedyet_try.py"  # noqa: S108 - run_python's script, inside the sandbox
 MAX_TOOL_OUTPUT = 8_000
 AGENT_MAX_TOKENS = 8_192  # a reasoning model spends part of this on thinking before the code
 MAX_SANDBOX_FAILURES = 3
@@ -247,8 +248,10 @@ Rules:
   installed. Never try to install anything; if a package the reporter used is missing, write the
   test with what is available and say so in the rationale.
 - The test file is {TEST_PATH}. Use list_dir, read_file and search_code to read the project,
-  run_test to try your test (it runs pytest in a fresh copy of the sandbox and shows the output),
-  and iterate until the failure matches the report.
+  run_python to run a plain script and print what the code really returns (check names, message
+  ids and values before you assert on them), run_test to try your test (it runs pytest in a
+  fresh copy of the sandbox and shows the output), and iterate until the failure matches the
+  report.
 - Call submit once run_test shows the failure matches the report. If after honest effort the test
   cannot be made to fail for the reported reason, submit your best attempt anyway; do not bend the
   test to force a failure. The test you submit must be exactly the code you last ran.
@@ -293,6 +296,14 @@ TOOLS: list[dict[str, Any]] = [
             "glob": {"type": "string", "description": "Optional file glob such as *.py."},
         },
         ["pattern"],
+    ),
+    _tool(
+        "run_python",
+        "Run a short Python script in a fresh copy of the sandbox, with no network, and return its"
+        " output. Use print() to see what the project really returns before you assert on it. It"
+        " is not a test: only run_test and submit count.",
+        {"code": {"type": "string", "description": "The complete script."}},
+        ["code"],
     ),
     _tool(
         "run_test",
@@ -674,6 +685,7 @@ class ReproAgent:
             "list_dir": self._list_dir,
             "read_file": self._read_file,
             "search_code": self._search_code,
+            "run_python": self._run_python,
             "run_test": self._run_test,
             "submit": self._submit,
         }
@@ -748,6 +760,20 @@ class ReproAgent:
         text = result.stdout.strip() or "(no matches)"
         return text, f"search_code {pattern!r}" + (f" in {glob}" if glob else "")
 
+    async def _run_python(self, args: dict[str, Any]) -> tuple[str, str]:
+        """A plain script, for looking: before this tool one run_test call in nine was a script
+        sent as a test and refused (no test function), a wasted turn each time."""
+        raw = args.get("code")
+        if not isinstance(raw, str) or not raw.strip():
+            return "not run: the `code` argument is missing or empty", "run_python rejected"
+        code = strip_code_fence(raw)
+        result = await self._exec(
+            f"{TESTER_FUNCTIONS}\nir_own\nir_as_tester python {SCRIPT_PATH} 2>&1",
+            files={SCRIPT_PATH: code}, timeout_s=120, network=False,
+        )
+        status = "timed out" if result.timed_out else f"exit code {result.exit_code}"
+        return f"python {status}\n\n{self._text(result)}", f"run_python -> {status}"
+
     async def _run_test(self, args: dict[str, Any]) -> tuple[str, str]:
         raw = args.get("code")
         if not isinstance(raw, str) or not raw.strip():
@@ -756,6 +782,8 @@ class ReproAgent:
             return f"not run: {problem}", "run_test rejected: empty code"
         code = strip_code_fence(raw)
         if problem := check_test_code(code):
+            if "no test function" in problem:
+                problem += "; to run a plain script and print values, use run_python"
             return f"not run: {problem}", f"run_test rejected: {problem}"
         # No network: the test must not need it, and the sandbox enforces that rule.
         # as the unprivileged test user, like the side runs that decide the verdict
