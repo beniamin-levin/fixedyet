@@ -1,0 +1,115 @@
+{
+  "issue_url": "https://github.com/PyCQA/isort/issues/2723",
+  "title": "combine_straight_imports mixes up module names on long lines since 9.0.0",
+  "verdict": "fixed_on_main",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: pass on the fix side",
+    "no run errored"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import isort\n\ndef test_combine_straight_imports_does_not_module_not_found():\n    snippet = \"\"\"import email.message\nimport email.utils\nimport http.cookies\nimport importlib.util\nimport os.path\nimport urllib.parse\nimport warnings\n\"\"\"\n    res = isort.code(snippet, combine_straight_imports=True)\n    # Executing the formatted code should not raise ModuleNotFoundError\n    exec(res, {})\n",
+    "reported_side": {
+      "ref": "9.0.0",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:0793fee1fa1b492e",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n___________ test_combine_straight_imports_does_not_module_not_found ____________\n\n    def test_combine_straight_imports_does_not_module_not_found():\n        snippet = \"\"\"import email.message\n    import email.utils\n    import http.cookies\n    import importlib.util\n    import os.path\n    import urllib.parse\n    import warnings\n    \"\"\"\n        res = isort.code(snippet, combine_straight_imports=True)\n        # Executing the formatted code should not raise ModuleNotFoundError\n>       exec(res, {})\n\ntests/test_fixedyet_repro.py:14: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n>   ???\nE   ModuleNotFoundError: No module named 'os.parse'; 'os' is not a package\n\n<string>:1: ModuleNotFoundError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_combine_straight_imports_does_not_module_not_found\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.28s",
+      "commit": "727d119442a3cc9c4184e45e14c74759b811cdb8",
+      "failure_detail": "E   ModuleNotFoundError: No module named 'os.parse'; 'os' is not a package"
+    },
+    "fix_side": {
+      "ref": "main",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:08607eb4b6194fc3",
+      "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.10s",
+      "commit": "b6f2dc5a2c84b4f293d41f399ed7a0c2aa994d43",
+      "failure_detail": null
+    },
+    "fixing_commit": "986b53f1d51d45e41298de25b357506af432e752",
+    "fixing_commit_source": "pull_request",
+    "fixed_in_release": null
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "The commit 2b07aa52 (#2568) caused combined straight-import lines to be processed by wrap.line() in all wrap modes. wrap.line() splits the line at '.' characters and then reverses the order of the parts when moving them to the next line, turning a valid import like 'import os.path' into 'import os\\n parse' or similar, which produces invalid submodule names such as 'os.parse' and leads to ModuleNotFoundError.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "ModuleNotFoundError: No module named 'os.parse'; 'os' is not a package"
+    },
+    {
+      "kind": "upstream",
+      "title": "Merged pull request that references this issue",
+      "url": "https://github.com/PyCQA/isort/pull/2724",
+      "why": "Merge commit 986b53f1d5."
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: search_code 'combine_straight_imports' in *.py | turn 4: run_python -> exit code 0 | turn 5: run_test -> FAILED | turn 6: submit returned once: the failure lacks ModuleNotFoundError | turn 7: run_python -> exit code 0 | turn 8: run_test -> FAILED | turn 9: submit | submitted: The test reproduces the bug where combine_straight_imports incorrectly splits combined import lines at dots, producing invalid imports such as 'os.parse' and 'warnings.path'. Executing the formatted code raises ModuleNotFoundError: No module named 'os.parse'. At the reported version (9.0.0) the test fails with this error, matching the observed behaviour."
+    }
+  ],
+  "next_actions": [
+    "Close this issue as the fix is already merged in pull request #2724.",
+    "Inform users that the fix is included in the 10.0.0b1 release and later; upgrading resolves the problem.",
+    "No further code changes are required on the main branch."
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 46489,
+    "output_tokens": 3853,
+    "cost_usd": 0.0170319,
+    "sandbox_runs": 12,
+    "search_credits": 3,
+    "wall_seconds": 286.38
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:13:12.942847Z",
+  "contract": {
+    "runnable": true,
+    "package": "isort",
+    "reported_version": "9.0.0",
+    "python_version": "3.12",
+    "setup_steps": [
+      "pip install isort",
+      "python --version"
+    ],
+    "code_snippet": "import email.message\nimport email.utils\nimport http.cookies\nimport importlib.util\nimport os.path\nimport urllib.parse\nimport warnings\n",
+    "expected_behaviour": "The file should remain syntactically valid Python after formatting; combined imports longer than the line length should not be split in a way that creates invalid syntax.",
+    "observed_behaviour": "The combined import line is split at dots and reordered, producing an invalid import such as 'import os.parse' which raises ModuleNotFoundError."
+  },
+  "issue_status": {
+    "state": "closed",
+    "state_reason": "completed",
+    "closed_at": "2026-10-15T19:37:58Z",
+    "closed_by": "#2724",
+    "closed_by_url": "https://github.com/PyCQA/isort/pull/2724",
+    "linked_prs": [
+      {
+        "number": 2724,
+        "url": "https://github.com/PyCQA/isort/pull/2724",
+        "title": "Fix combine_straight_imports mixing up module names on long lines",
+        "state": "merged",
+        "draft": false,
+        "merged_at": "2026-10-15T19:37:56Z",
+        "closes": true
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:13:03.756480Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

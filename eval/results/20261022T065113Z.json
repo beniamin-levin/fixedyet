@@ -1,0 +1,1501 @@
+{
+  "dataset": "verified",
+  "status": "complete",
+  "started_at": "2026-10-22T06:51:13.483837Z",
+  "finished_at": "2026-10-22T07:04:05.489239Z",
+  "elapsed_seconds": 772.003211125033,
+  "budget_usd": 3.0,
+  "concurrency": 2,
+  "requested_ids": [
+    "psf__requests-1921",
+    "pytest-dev__pytest-6202",
+    "pylint-dev__pylint-4604",
+    "pallets__flask-5014",
+    "pytest-dev__pytest-7432",
+    "psf__requests-2317",
+    "pylint-dev__pylint-4970",
+    "pytest-dev__pytest-7571",
+    "psf__requests-2931",
+    "pylint-dev__pylint-6386",
+    "pytest-dev__pytest-7982",
+    "pylint-dev__pylint-6528",
+    "psf__requests-5414",
+    "pytest-dev__pytest-10051",
+    "pylint-dev__pylint-7277"
+  ],
+  "skipped_ids": [],
+  "models": [
+    "nvidia/nemotron-3-super-120b-a12b"
+  ],
+  "metrics": {
+    "n": 15,
+    "counts": {
+      "fixed_on_main": 10,
+      "open_bug": 3,
+      "not_reproduced": 1,
+      "inconsistent": 1,
+      "unsupported": 0,
+      "needs_info": 0,
+      "error": 0
+    },
+    "reproduced_high_confidence": 10,
+    "wrong_open_bug_high_confidence": 2,
+    "total_cost_usd": 0.51624708,
+    "mean_cost_usd": 0.034416472,
+    "median_cost_usd": 0.026973839999999995,
+    "mean_wall_seconds": 96.09669926115312,
+    "median_wall_seconds": 103.09837745805271,
+    "search_credits": 0
+  },
+  "results": [
+    {
+      "instance_id": "psf__requests-1921",
+      "repo": "psf/requests",
+      "version": "2.3",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.00786426,
+      "search_credits": 0,
+      "wall_seconds": 54.68839124997612,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:psf__requests-1921",
+        "title": "Removing a default header of a session",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import requests\n\ndef test_session_header_none_not_sent():\n    s = requests.Session()\n    s.headers['Accept-Encoding'] = None\n    req = requests.Request('GET', 'http://example.com')\n    prep = s.prepare_request(req)\n    # Expect Accept-Encoding not in headers\n    assert 'Accept-Encoding' not in prep.headers\n",
+          "reported_side": {
+            "ref": "3c88e520da24ae6f736929a750876e7654accc3d",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:341597cc4d624dcd",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n______________________ test_session_header_none_not_sent _______________________\n\n    def test_session_header_none_not_sent():\n        s = requests.Session()\n        s.headers['Accept-Encoding'] = None\n        req = requests.Request('GET', 'http://example.com')\n        prep = s.prepare_request(req)\n        # Expect Accept-Encoding not in headers\n>       assert 'Accept-Encoding' not in prep.headers\nE       AssertionError: assert 'Accept-Encoding' not in CaseInsensitiveDict({'User-Agent': 'python-requests/2.3.0 CPython/3.9.25 Linux/6.8.0-117-generic', 'Accept-Encoding': None, 'Accept': '*/*'})\nE        +  where CaseInsensitiveDict({'User-Agent': 'python-requests/2.3.0 CPython/3.9.25 Linux/6.8.0-117-generic', 'Accept-Encoding': None, 'Accept': '*/*'}) = <PreparedRequest [GET]>.headers\n\ntests/test_fixedyet_repro.py:9: AssertionError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:7\n  /work/repo/requests/packages/urllib3/_collections.py:7: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import MutableMapping\n\nrequests/sessions.py:12\n  /work/repo/requests/sessions.py:12: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import Mapping\n\ntests/test_fixedyet_repro.py::test_session_header_none_not_sent\n  /work/repo/requests/models.py:164: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    if isinstance(hook, collections.Callable):\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_session_header_none_not_sent - Asse...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 3 warnings in 0.07s",
+            "commit": "3c88e520da24ae6f736929a750876e7654accc3d",
+            "failure_detail": "E       AssertionError: assert 'Accept-Encoding' not in CaseInsensitiveDict({'User-Agent': 'python-requests/2.3.0 CPython/3.9.25 Linux/6.8.0-117-generic', 'Accept-Encoding': None, 'Accept': '*/*'})\nE        +  where CaseInsensitiveDict({'User-Agent': 'python-requests/2.3.0 CPython/3.9.25 Linux/6.8.0-117-generic', 'Accept-Encoding': None, 'Accept': '*/*'}) = <PreparedRequest [GET]>.headers"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:2333e108413a48d0",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:7\n  /work/repo/requests/packages/urllib3/_collections.py:7: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import MutableMapping\n\nrequests/sessions.py:12\n  /work/repo/requests/sessions.py:12: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import Mapping\n\ntests/test_fixedyet_repro.py::test_session_header_none_not_sent\n  /work/repo/requests/models.py:164: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    if isinstance(hook, collections.Callable):\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1 passed, 3 warnings in 0.10s",
+            "commit": "3c88e520da24ae6f736929a750876e7654accc3d",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: the Session.prepare_request method merges session defaults into the request without filtering out headers whose value is None, so the None value is converted to the string \"None\" and appears as a header.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: list_dir requests | turn 3: search_code 'Accept-Encoding' in *.py | turn 4: run_python -> exit code 0 | turn 5: run_test -> FAILED | turn 6: submit | submitted: Setting a session header to None should prevent sending that header, but currently the header is sent with value None. The test asserts that Accept-Encoding is absent from prepared request headers, which fails due to the bug."
+          }
+        ],
+        "next_actions": [
+          "Confirm that the fix addressing this behavior is present in the main branch.",
+          "Ensure the fix will be included in the next release, or backport it to any maintained release branches if needed.",
+          "Close the issue as resolved."
+        ],
+        "usage": {
+          "llm_calls": 8,
+          "input_tokens": 21544,
+          "output_tokens": 1845,
+          "cost_usd": 0.00786426,
+          "sandbox_runs": 10,
+          "search_credits": 0,
+          "wall_seconds": 54.68
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:52:08.168307Z",
+        "contract": {
+          "runnable": true,
+          "package": "requests",
+          "reported_version": null,
+          "python_version": null,
+          "setup_steps": [
+            "pip install requests"
+          ],
+          "code_snippet": "import requests\n\nsession = requests.Session()\n# Do not send Accept-Encoding\nsession.headers['Accept-Encoding'] = None\n\nresponse = session.get('http://httpbin.org/headers', headers=session.headers)\nprint(response.json())\n",
+          "expected_behaviour": "The request should not include the Accept-Encoding header.",
+          "observed_behaviour": "The response shows an Accept-Encoding header with the value \"None\" sent by the server."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pytest-dev__pytest-6202",
+      "repo": "pytest-dev/pytest",
+      "version": "5.2",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.058550580000000005,
+      "search_credits": 0,
+      "wall_seconds": 128.45871704211459,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pytest-dev__pytest-6202",
+        "title": "'.['  replaced with '[' in the headline shown of the test report",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "def test_test_name_display_with_dot_bracket(testdir):\n    testdir.makepyfile(\n        \"\"\"\n        import pytest\n        @pytest.mark.parametrize(\"a\", [\"..[\"])\n        def test_boo(a):\n            assert 0\n        \"\"\"\n    )\n    result = testdir.runpytest(\"-v\")\n    # Find the test header line (surrounded by underscores) in the output\n    for line in result.outlines:\n        if line.startswith('_') and line.endswith('_') and 'test_boo[' in line:\n            header = line.strip('_').strip()\n            # The expected header should be exactly 'test_boo[..[]'\n            assert header == 'test_boo[..[]', f\"Expected header 'test_boo[..[]', got '{header}'\"\n            return\n    # If we didn't find the header, fail with a helpful message\n    raise AssertionError(f\"Could not find test header in output:\\\\n{result.outlines}\")\n",
+          "reported_side": {
+            "ref": "3a668ea6ff24b0c8f00498c3144c63bac561d925",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:a466de7bb0a945d2",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________ test_test_name_display_with_dot_bracket ____________________\n\ntestdir = <Testdir local('/tmp/pytest-of-fixedyet/pytest-1/test_test_name_display_with_dot_bracket0')>\n\n    def test_test_name_display_with_dot_bracket(testdir):\n        testdir.makepyfile(\n            \"\"\"\n            import pytest\n            @pytest.mark.parametrize(\"a\", [\"..[\"])\n            def test_boo(a):\n                assert 0\n            \"\"\"\n        )\n        result = testdir.runpytest(\"-v\")\n        # Find the test header line (surrounded by underscores) in the output\n        for line in result.outlines:\n            if line.startswith('_') and line.endswith('_') and 'test_boo[' in line:\n                header = line.strip('_').strip()\n                # The expected header should be exactly 'test_boo[..[]'\n>               assert header == 'test_boo[..[]', f\"Expected header 'test_boo[..[]', got '{header}'\"\nE               AssertionError: Expected header 'test_boo[..[]', got 'test_boo[.[]'\nE               assert 'test_boo[.[]' == 'test_boo[..[]'\n\n/work/repo/tests/test_fixedyet_repro.py:16: AssertionError\n----------------------------- Captured stdout call -----------------------------\n============================= test session starts ==============================\nplatform linux -- Python 3.9.25, pytest-5.2.5.dev1+g3a668ea6f, py-1.11.0, pluggy-0.13.1 -- /usr/local/bin/python\ncachedir: .pytest_cache\nrootdir: /tmp/pytest-of-fixedyet/pytest-1/test_test_name_display_with_dot_bracket0\ncollecting ... collected 1 item\n\ntest_test_name_display_with_dot_bracket.py::test_boo[..[] FAILED         [100%]\n\n=================================== FAILURES ===================================\n_________________________________ test_boo[.[] _________________________________\n\na = '..['\n\n    @pytest.mark.parametrize(\"a\", [\"..[\"])\n    def test_boo(a):\n>       assert 0\nE       assert 0\n\ntest_test_name_display_with_dot_bracket.py:4: AssertionError\n============================== 1 failed in 0.04s ===============================\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_test_name_display_with_dot_bracket\n1 failed in 0.14s",
+            "commit": "3a668ea6ff24b0c8f00498c3144c63bac561d925",
+            "failure_detail": "E               AssertionError: Expected header 'test_boo[..[]', got 'test_boo[.[]'\nE               assert 'test_boo[.[]' == 'test_boo[..[]'"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:c892bc8bb75a45d3",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.08s",
+            "commit": "3a668ea6ff24b0c8f00498c3144c63bac561d925",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "The test headline is built from the node ID via `getmodpath()` in `src/_pytest/python.py`, which contains the line `return s.replace(\".[\", \"[\")`. This replacement mistakenly strips a leading dot from patterns like \"..[\" turning the node ID \"test_boo[..[]\" into \"test_boo[.[]\", causing the displayed test name to be truncated. The issue is evident from the failure where the assertion expects the header \"test_boo[..[]\" but observes \"test_boo[.[]\".",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: read_file src/_pytest/python.py:1-200 | turn 3: search_code 'replace\\\\(\\\\s*\"\\\\.\\\\[\"\\\\, \\\\s*\\\\[\"\\\\)\\\\s*' in *.py | turn 4: read_file src/_pytest/python.py:270-300 | turn 5: run_python -> exit code 0 | turn 6: run_python -> exit code 0 | turn 7: run_python -> exit code 1 | turn 8: run_python refused (no test run yet) | turn 9: run_test -> FAILED | turn 10: run_test rejected: `assert False` is a fake failure; assert the correct behaviour instead | turn 11: run_test rejected: `assert False` is a fake failure; assert the correct behaviour instead | turn 12: run_test -> FAILED | turn 13: run_test -> FAILED | turn 14: run_test -> FAILED | turn 15: submit returned once: the test imports nothing from the repository | turn 16: run_test -> FAILED | turn 17: run_test -> FAILED | turn 18: submit | submitted: This test reproduces the issue where the test headline shows 'test_boo[.[]' instead of 'test_boo[..[]' due to the replacement of '.[' | with '[' in the test node ID. The test creates a temporary test file with a parametrized test that has the parameter '..[', | runs pytest on it using the testdir fixture (available in the pytest test suite), captures the output, and checks that the test header | (the line between underscores) matches the expected node ID 'test_boo[..[]'. At the reported version, this assertion fails because the | header is incorrectly displayed as 'test_boo[.[]'."
+          }
+        ],
+        "next_actions": [
+          "Verify that the problematic `replace(\".[\", \"[\")` call has been removed from `src/_pytest/python.py` in the main branch.",
+          "Run the reproducing test (`test_test_name_display_with_dot_bracket`) on the fixed code to confirm it now passes.",
+          "If the test passes, close the issue as resolved."
+        ],
+        "usage": {
+          "llm_calls": 20,
+          "input_tokens": 152969,
+          "output_tokens": 14546,
+          "cost_usd": 0.058550580000000005,
+          "sandbox_runs": 18,
+          "search_credits": 0,
+          "wall_seconds": 128.46
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:53:22.353303Z",
+        "contract": {
+          "runnable": true,
+          "package": "pytest",
+          "reported_version": null,
+          "python_version": "3.7",
+          "setup_steps": [
+            "pip install pytest",
+            "python -m pytest bug.py -v"
+          ],
+          "code_snippet": "bug.py\n```python\nimport pytest\n\n\ndef test_boo():\n    assert 0\n```\n",
+          "expected_behaviour": "The test should be reported as \"test_boo[.[]\" in the summary line.",
+          "observed_behaviour": "The headline shows \"test_boo[.[]\" instead of \"test_boo[.[]\" due to the replacement of \".[\" with \"[\" in the report headline."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pylint-dev__pylint-4604",
+      "repo": "pylint-dev/pylint",
+      "version": "2.9",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.07282644,
+      "search_credits": 0,
+      "wall_seconds": 139.62471708399244,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pylint-dev__pylint-4604",
+        "title": "unused-import false positive for a module used in a type comment",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import pytest\nimport subprocess\nimport tempfile\nimport os\n\ndef test_unused_import_type_comment():\n    code = '''\"\"\"Docstring.\"\"\"\n\nimport abc\nfrom abc import ABC\n\nX = ...  # type: abc.ABC\nY = ...  # type: ABC\n'''\n    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:\n        f.write(code)\n        fname = f.name\n    try:\n        # Run pylint with only unused-import enabled\n        result = subprocess.run(\n            ['pylint', fname, '--disable=all', '--enable=unused-import'],\n            capture_output=True,\n            text=True,\n        )\n        # Check that unused-import warning is not in output\n        assert 'unused-import' not in result.stdout, f\"Unexpected unused-import in stdout:\\n{result.stdout}\"\n        assert 'unused-import' not in result.stderr, f\"Unexpected unused-import in stderr:\\n{result.stderr}\"\n    finally:\n        os.unlink(fname)\n",
+          "reported_side": {
+            "ref": "1e55ae64624d28c5fe8b63ad7979880ee2e6ef3f",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:9035578511b6417f",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_unused_import_type_comment ________________________\n\n    def test_unused_import_type_comment():\n        code = '''\"\"\"Docstring.\"\"\"\n    \n    import abc\n    from abc import ABC\n    \n    X = ...  # type: abc.ABC\n    Y = ...  # type: ABC\n    '''\n        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:\n            f.write(code)\n            fname = f.name\n        try:\n            # Run pylint with only unused-import enabled\n            result = subprocess.run(\n                ['pylint', fname, '--disable=all', '--enable=unused-import'],\n                capture_output=True,\n                text=True,\n            )\n            # Check that unused-import warning is not in output\n>           assert 'unused-import' not in result.stdout, f\"Unexpected unused-import in stdout:\\n{result.stdout}\"\nE           AssertionError: Unexpected unused-import in stdout:\nE             ************* Module tmpfahfz7d1\nE             /tmp/tmpfahfz7d1.py:3:0: W0611: Unused import abc (unused-import)\nE             \nE             -----------------------------------\nE             Your code has been rated at 7.50/10\nE             \nE             \nE           assert 'unused-import' not in '***********... 7.50/10\\n\\n'\nE             'unused-import' is contained here:\nE               port abc (unused-import)\nE               \nE               -----------------------------------\nE               Your code has been rated at 7.50/10\n\ntests/test_fixedyet_repro.py:26: AssertionError\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:4\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:4: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\n-- Docs: https://docs.pytest.org/en/stable/warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_unused_import_type_comment - Assert...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 warning in 1.94s",
+            "commit": "1e55ae64624d28c5fe8b63ad7979880ee2e6ef3f",
+            "failure_detail": "E           AssertionError: Unexpected unused-import in stdout:\nE             ************* Module tmpfahfz7d1\nE             /tmp/tmpfahfz7d1.py:3:0: W0611: Unused import abc (unused-import)\nE\nE             -----------------------------------\nE             Your code has been rated at 7.50/10\nE\nE\nE           assert 'unused-import' not in '***********... 7.50/10\\n\\n'\nE             'unused-import' is contained here:\nE               port abc (unused-import)\nE\nE               -----------------------------------\nE               Your code has been rated at 7.50/10"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:1e1ca5fc6db4414e",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:4\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:4: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\n-- Docs: https://docs.pytest.org/en/stable/warnings.html\n1 passed, 1 warning in 0.98s",
+            "commit": "1e55ae64624d28c5fe8b63ad7979880ee2e6ef3f",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "The unused-import checker does not treat names referenced only in type comments (lines containing '# type:') as usages, so it incorrectly reports the import of abc as unused even though it is referenced in the type comments for X and Y.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: search_code 'unused-import' in *.py | turn 4: search_code 'type:' in *.py | turn 5: read_file /work/repo/tests/functional/u/unused/unused_import.py:1-200 | turn 6: run_python -> exit code 1 | turn 7: read_file /work/repo/tests/functional/u/unused/unused_typing_imports.py:1-200 | turn 8: search_code 'CollectingReporter' in *.py | turn 9: run_python refused (no test run yet) | turn 10: run_test -> FAILED | turn 11: run_test -> FAILED | turn 12: submit rejected (code differs from the last run) | turn 13: submit rejected (code differs from the last run) | turn 14: run_test -> FAILED | turn 15: submit returned once: the test imports nothing from the repository | turn 16: read_file /work/repo/tests/functional/u/unused:1-200 | turn 17: list_dir /work/repo/tests/functional/u/unused | turn 18: read_file /work/repo/tests/functional/u/unused/unused_import.txt:1-200 | turn 19: read_file /work/repo/tests/functional/u/unused/unused_typing_imports.py:1-30 | turn 20: search_code 'CollectingReporter' in tests/*.py | turn limit (20) reached without submit; using the last test run"
+          }
+        ],
+        "next_actions": [
+          "Confirm that the fix addressing type‑comment usage is merged into the main branch.",
+          "If the fix is not yet released, backport it to the appropriate maintenance branch or release.",
+          "Close the issue as resolved."
+        ],
+        "usage": {
+          "llm_calls": 22,
+          "input_tokens": 222600,
+          "output_tokens": 7024,
+          "cost_usd": 0.07282644,
+          "sandbox_runs": 21,
+          "search_credits": 0,
+          "wall_seconds": 139.61
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:54:27.787888Z",
+        "contract": {
+          "runnable": true,
+          "package": "pylint",
+          "reported_version": "2.8.3",
+          "python_version": "3.9",
+          "setup_steps": [
+            "pip install pylint"
+          ],
+          "code_snippet": "import abc\nfrom abc import ABC\n\nX = ...  # type: abc.ABC\nY = ...  # type: ABC",
+          "expected_behaviour": "No unused-import warning should be emitted for imports used in type comments.",
+          "observed_behaviour": "The warning \"Unused import abc (unused-import)\" is emitted."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pallets__flask-5014",
+      "repo": "pallets/flask",
+      "version": "2.3",
+      "python_version": "3.11",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.012775920000000001,
+      "search_credits": 0,
+      "wall_seconds": 62.446021707961336,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pallets__flask-5014",
+        "title": "Require a non-empty name for Blueprints",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import pytest\nfrom flask import Blueprint\n\ndef test_blueprint_empty_name_raises():\n    # Creating a Blueprint with an empty name should raise ValueError\n    with pytest.raises(ValueError):\n        Blueprint('', __name__)\n",
+          "reported_side": {
+            "ref": "7ee9ceb71e868944a46e1ff00b506772a53a4f1d",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:9c9e4f0ee3594ca6",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_blueprint_empty_name_raises _______________________\n\n    def test_blueprint_empty_name_raises():\n        # Creating a Blueprint with an empty name should raise ValueError\n>       with pytest.raises(ValueError):\nE       Failed: DID NOT RAISE <class 'ValueError'>\n\ntests/test_fixedyet_repro.py:6: Failed\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_blueprint_empty_name_raises - Faile...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.03s",
+            "commit": "7ee9ceb71e868944a46e1ff00b506772a53a4f1d",
+            "failure_detail": "E       Failed: DID NOT RAISE <class 'ValueError'>"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:c8d346731fed479c",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.00s",
+            "commit": "7ee9ceb71e868944a46e1ff00b506772a53a4f1d",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: The Blueprint constructor does not validate that the name argument is non‑empty, allowing an empty string to be accepted without raising a ValueError.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: list_dir /work/repo/src | turn 4: list_dir /work/repo/src/flask | turn 5: read_file /work/repo/src/flask/blueprints.py:1-200 | turn 6: run_python -> exit code 0 | turn 7: run_test -> FAILED | turn 8: submit | submitted: The test asserts that creating a Blueprint with an empty name raises a ValueError. Currently, the Blueprint constructor does not validate for an empty name, so the test fails, reproducing the reported issue."
+          }
+        ],
+        "next_actions": [
+          "Confirm that the commit adding the empty‑name check is present on the main branch.",
+          "Close this issue as fixed, referencing the commit that added the validation.",
+          "If the fix has not been released yet, consider backporting it to the next maintenance release."
+        ],
+        "usage": {
+          "llm_calls": 10,
+          "input_tokens": 38222,
+          "output_tokens": 1725,
+          "cost_usd": 0.012775920000000001,
+          "sandbox_runs": 12,
+          "search_credits": 0,
+          "wall_seconds": 62.44
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:54:24.801543Z",
+        "contract": {
+          "runnable": true,
+          "package": "Flask",
+          "reported_version": null,
+          "python_version": null,
+          "setup_steps": [
+            "pip install Flask"
+          ],
+          "code_snippet": "from flask import Blueprint\nbp = Blueprint('name', __name__)\n\n@app.route('/')\ndef index():\n    return 'Hello World'\n\nif __name__ == '__main__':\n    app = Flask(__name__)\n    app.register_blueprint(bp)\n    app.run()",
+          "expected_behaviour": "A ValueError should be raised when a Blueprint is created with an empty name.",
+          "observed_behaviour": "Creating a Blueprint with an empty name does not raise an error; it silently creates the Blueprint."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7432",
+      "repo": "pytest-dev/pytest",
+      "version": "5.4",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.01440366,
+      "search_credits": 0,
+      "wall_seconds": 69.66608754207846,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pytest-dev__pytest-7432",
+        "title": "skipping: --runxfail breaks pytest.mark.skip location reporting",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import pytest\n\ndef test_skip_location_with_runxfail(testdir):\n    testdir.makepyfile(\"\"\"\n        import pytest\n        @pytest.mark.skip\n        def test_skip_location():\n            assert 0\n    \"\"\")\n    result = testdir.runpytest(\"-rs\", \"--runxfail\")\n    lines = result.outlines\n    skip_lines = [l for l in lines if \"SKIPPED\" in l and \"unconditional skip\" in l]\n    assert skip_lines, f\"No skip line found in output: {result.outlines}\"\n    line = skip_lines[0]\n    assert \"test_skip_location\" in line\n    assert \"_pytest/skipping.py\" not in line\n",
+          "reported_side": {
+            "ref": "e6e300e729dd33956e5448d8be9a0b1540b4e53a",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:cab8af0730354fee",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_skip_location_with_runxfail _______________________\n\ntestdir = <Testdir local('/tmp/pytest-of-fixedyet/pytest-1/test_skip_location_with_runxfail0')>\n\n    def test_skip_location_with_runxfail(testdir):\n        testdir.makepyfile(\"\"\"\n            import pytest\n            @pytest.mark.skip\n            def test_skip_location():\n                assert 0\n        \"\"\")\n        result = testdir.runpytest(\"-rs\", \"--runxfail\")\n        lines = result.outlines\n        skip_lines = [l for l in lines if \"SKIPPED\" in l and \"unconditional skip\" in l]\n        assert skip_lines, f\"No skip line found in output: {result.outlines}\"\n        line = skip_lines[0]\n>       assert \"test_skip_location\" in line\nE       AssertionError: assert 'test_skip_location' in 'SKIPPED [1] ../../../../work/repo/src/_pytest/skipping.py:239: unconditional skip'\n\n/work/repo/tests/test_fixedyet_repro.py:15: AssertionError\n----------------------------- Captured stdout call -----------------------------\n============================= test session starts ==============================\nplatform linux -- Python 3.9.25, pytest-5.4.1.dev593+ge6e300e72, py-1.11.0, pluggy-0.13.1\nrootdir: /tmp/pytest-of-fixedyet/pytest-1/test_skip_location_with_runxfail0\ncollected 1 item\n\ntest_skip_location_with_runxfail.py s                                    [100%]\n\n=========================== short test summary info ============================\nSKIPPED [1] ../../../../work/repo/src/_pytest/skipping.py:239: unconditional skip\n============================== 1 skipped in 0.02s ==============================\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_skip_location_with_runxfail - Asser...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.13s",
+            "commit": "e6e300e729dd33956e5448d8be9a0b1540b4e53a",
+            "failure_detail": "E       AssertionError: assert 'test_skip_location' in 'SKIPPED [1] ../../../../work/repo/src/_pytest/skipping.py:239: unconditional skip'"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:a2ebfc333a284ec4",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.12s",
+            "commit": "e6e300e729dd33956e5448d8be9a0b1540b4e53a",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "In src/_pytest/skipping.py, the pytest_runtest_makereport hook (around line 239) incorrectly reports the skip location as the hook's own file when the --runxfail option is enabled, instead of using the test item's location, causing the skip message to show src/_pytest/skipping.py:239 rather than the test file and line.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: read_file src/_pytest/skipping.py:230-250 | turn 3: run_python -> exit code 0 | turn 4: list_dir tests | turn 5: run_test -> FAILED | turn 6: list_dir tests | turn 7: run_test -> FAILED | turn 8: read_file tests/conftest.py:1-200 | turn 9: submit | submitted: This test reproduces the bug where using --runxfail causes the skip location to point to src/_pytest/skipping.py instead of the test item itself. Without --runxfail the skip location correctly shows the test file and line number. The test fails on the reported version because the assertion \"_pytest/skipping.py\" not in line is violated, showing the incorrect location."
+          }
+        ],
+        "next_actions": [
+          "Confirm that the fix present on the main branch is included in the next release.",
+          "If the affected version requires a backport, apply the fix to the appropriate maintenance branch.",
+          "Close the issue as resolved since the problem is fixed on main."
+        ],
+        "usage": {
+          "llm_calls": 11,
+          "input_tokens": 37476,
+          "output_tokens": 3841,
+          "cost_usd": 0.01440366,
+          "sandbox_runs": 13,
+          "search_credits": 0,
+          "wall_seconds": 69.66
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:55:34.468658Z",
+        "contract": {
+          "runnable": true,
+          "package": "pytest",
+          "reported_version": "5.4.x",
+          "python_version": null,
+          "setup_steps": [
+            "install pytest",
+            "create test_skip_location.py with the provided code"
+          ],
+          "code_snippet": "import pytest\n@pytest.mark.skip\ndef test_skip_location() -> None:\n    assert 0",
+          "expected_behaviour": "The skip location should point to the test item itself, e.g., \"SKIPPED [1] test_skip_location.py:3: unconditional skip\".",
+          "observed_behaviour": "The skip location incorrectly points to the skipping module, e.g., \"SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip\"."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "psf__requests-2317",
+      "repo": "psf/requests",
+      "version": "2.4",
+      "python_version": "3.9",
+      "verdict": "open_bug",
+      "confidence": "high",
+      "cost_usd": 0.01577526,
+      "search_credits": 0,
+      "wall_seconds": 50.420010207919404,
+      "failure_cause": "test also fails with the gold patch (base: fail,fail; gold patch: fail,fail)",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:psf__requests-2317",
+        "title": "method = builtin_str(method) problem",
+        "verdict": "open_bug",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: fail on the fix side",
+          "the same kind of failure on both sides (AssertionError)",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import pytest\nfrom requests.compat import builtin_str\n\ndef test_builtin_str_bytes_method():\n    method = b'GET'\n    method = builtin_str(method)\n    # Expected: method should be a string representing the HTTP method\n    assert method == 'GET'\n",
+          "reported_side": {
+            "ref": "091991be0da19de9108dbe5e3752917fea3d7fdc",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:c10ee2b05451495e",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n________________________ test_builtin_str_bytes_method _________________________\n\n    def test_builtin_str_bytes_method():\n        method = b'GET'\n        method = builtin_str(method)\n        # Expected: method should be a string representing the HTTP method\n>       assert method == 'GET'\nE       assert \"b'GET'\" == 'GET'\nE         \nE         - GET\nE         + b'GET'\n\ntests/test_fixedyet_repro.py:8: AssertionError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:1\nrequests/packages/urllib3/_collections.py:1\n  /work/repo/requests/packages/urllib3/_collections.py:1: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import Mapping, MutableMapping\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_builtin_str_bytes_method - assert \"...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 2 warnings in 0.09s",
+            "commit": "091991be0da19de9108dbe5e3752917fea3d7fdc",
+            "failure_detail": "E       assert \"b'GET'\" == 'GET'\nE\nE         - GET\nE         + b'GET'"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:fda9c2d4d1f547af",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n________________________ test_builtin_str_bytes_method _________________________\n\n    def test_builtin_str_bytes_method():\n        method = b'GET'\n        method = builtin_str(method)\n        # Expected: method should be a string representing the HTTP method\n>       assert method == 'GET'\nE       assert \"b'GET'\" == 'GET'\nE         \nE         - GET\nE         + b'GET'\n\ntests/test_fixedyet_repro.py:8: AssertionError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:1\nrequests/packages/urllib3/_collections.py:1\n  /work/repo/requests/packages/urllib3/_collections.py:1: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import Mapping, MutableMapping\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_builtin_str_bytes_method - assert \"...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 2 warnings in 0.21s",
+            "commit": "091991be0da19de9108dbe5e3752917fea3d7fdc",
+            "failure_detail": "E       assert \"b'GET'\" == 'GET'\nE\nE         - GET\nE         + b'GET'"
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: In requests/sessions.py the line `method = builtin_str(method)` applies `builtin_str` (which resolves to `str` in Python 3) to a bytes object such as b'GET'. Calling `str` on bytes returns the repr-like string \"b'GET'\" instead of decoding the bytes, so the HTTP method becomes invalid and causes a 404 error.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: read_file requests/sessions.py:1-200 | turn 3: search_code 'builtin_str\\\\(method\\\\)' in *.py | turn 4: read_file requests/sessions.py:420-440 | turn 5: read_file requests/compat.py:1-200 | turn 6: run_python -> exit code 0 | turn 7: run_test -> FAILED | turn 8: submit | submitted: The test reproduces the issue where builtin_str on a bytes object (b'GET') returns the string representation \\\"b'GET'\\\" instead of decoding to 'GET'. In Python 3, builtin_str is just str, which on bytes yields the repr-like string. This causes the HTTP method to be invalid, leading to 404 errors. The test asserts that the result should be 'GET', matching the expected behavior."
+          }
+        ],
+        "next_actions": [
+          "Update `builtin_str` (e.g., in requests/compat.py) to decode bytes to a string (using UTF‑8 or ASCII) when the input is bytes, leaving other types unchanged.",
+          "Verify that after the change the line `method = builtin_str(method)` in sessions.py produces a plain string like 'GET' for b'GET' input.",
+          "Add the supplied test case (test_builtin_str_bytes_method) to the test suite to prevent regression."
+        ],
+        "usage": {
+          "llm_calls": 11,
+          "input_tokens": 45831,
+          "output_tokens": 2522,
+          "cost_usd": 0.01577526,
+          "sandbox_runs": 12,
+          "search_credits": 0,
+          "wall_seconds": 50.42
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:55:18.222699Z",
+        "contract": {
+          "runnable": true,
+          "package": "requests",
+          "reported_version": "2.4.3",
+          "python_version": "3.4",
+          "setup_steps": [],
+          "code_snippet": "method = b'GET'\nmethod = str(method)\nprint(repr(method))",
+          "expected_behaviour": "The method should remain usable as an HTTP method like 'GET', so converting b'GET' to str should result in 'GET'.",
+          "observed_behaviour": "Converting b'GET' to str results in \"b'GET'\", which is not a valid HTTP method and causes a 404 Not Found error when used."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pylint-dev__pylint-4970",
+      "repo": "pylint-dev/pylint",
+      "version": "2.10",
+      "python_version": "3.9",
+      "verdict": "not_reproduced",
+      "confidence": "high",
+      "cost_usd": 0.07077102,
+      "search_credits": 0,
+      "wall_seconds": 126.44273266603705,
+      "failure_cause": "test passes at the base commit (base: pass,pass; gold patch: pass,pass)",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pylint-dev__pylint-4970",
+        "title": "Setting `min-similarity-lines` to `0` should stop pylint from checking duplicate code",
+        "verdict": "not_reproduced",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: pass on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import subprocess\nimport sys\nimport textwrap\nimport pytest\nimport os\n\ndef test_min_similarity_lines_zero_disables_duplicate_code_detection(tmpdir):\n    # create test file\n    test_file = tmpdir.join(\"test_similarity.py\")\n    test_file.write(textwrap.dedent(\"\"\"\\\n        import ast\n\n        class Foo:\n            def bar(self):\n                x = 1\n                y = 2\n\n        class Baz:\n            def qux(self):\n                x = 1\n                y = 2\n        \"\"\"))\n    # create pylintrc\n    rcfile = tmpdir.join(\"pylintrc\")\n    rcfile.write(\"[similarity]\\nmin-similarity-lines=0\\n\")\n\n    # Ensure writable home for pylint cache\n    env = os.environ.copy()\n    env[\"HOME\"] = str(tmpdir)\n\n    # run pylint\n    cmd = [sys.executable, \"-m\", \"pylint\", \"--rcfile\", str(rcfile), str(test_file)]\n    result = subprocess.run(cmd, capture_output=True, text=True, env=env)\n\n    # Print outputs for debugging\n    print(\"STDOUT:\", result.stdout)\n    print(\"STDERR:\", result.stderr)\n    print(\"Returncode:\", result.returncode)\n\n    # Check that there are no duplicate-code messages (R0801)\n    assert \"R0801\" not in result.stdout and \"R0801\" not in result.stderr, \\\n        f\"Found duplicate-code messages (R0801) in output:\\\\nstdout:{result.stdout}\\\\nstderr:{result.stderr}\"\n",
+          "reported_side": {
+            "ref": "40cc2ffd7887959157aaf469e09585ec2be7f528",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:b613458885554913",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\n../../usr/local/lib/python3.9/site-packages/astroid/node_classes.py:90\n  /usr/local/lib/python3.9/site-packages/astroid/node_classes.py:90: DeprecationWarning: The 'astroid.node_classes' module is deprecated and will be replaced by 'astroid.nodes' in astroid 3.0.0\n    warnings.warn(\n\n../../usr/local/lib/python3.9/site-packages/astroid/scoped_nodes.py:26\n  /usr/local/lib/python3.9/site-packages/astroid/scoped_nodes.py:26: DeprecationWarning: The 'astroid.scoped_nodes' module is deprecated and will be replaced by 'astroid.nodes' in astroid 3.0.0\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/warnings.html\n1 passed, 3 warnings in 1.77s",
+            "commit": "40cc2ffd7887959157aaf469e09585ec2be7f528",
+            "failure_detail": null
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:52ee37845d734caa",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\n../../usr/local/lib/python3.9/site-packages/astroid/node_classes.py:90\n  /usr/local/lib/python3.9/site-packages/astroid/node_classes.py:90: DeprecationWarning: The 'astroid.node_classes' module is deprecated and will be replaced by 'astroid.nodes' in astroid 3.0.0\n    warnings.warn(\n\n../../usr/local/lib/python3.9/site-packages/astroid/scoped_nodes.py:26\n  /usr/local/lib/python3.9/site-packages/astroid/scoped_nodes.py:26: DeprecationWarning: The 'astroid.scoped_nodes' module is deprecated and will be replaced by 'astroid.nodes' in astroid 3.0.0\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/warnings.html\n1 passed, 3 warnings in 0.65s",
+            "commit": "40cc2ffd7887959157aaf469e09585ec2be7f528",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: the duplicate-code checker now correctly treats a min-similarity-lines setting of 0 as disabling the check, so the condition described in the issue does not occur with the tested version.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: search_code 'min-similarity-lines' | turn 3: read_file pylint/checkers/similar.py:1-200 | turn 4: read_file pylint/checkers/similar.py:730-820 | turn 5: search_code 'class Similar' | turn 6: read_file pylint/checkers/similar.py:350-450 | turn 7: run_python -> exit code 0 | turn 8: run_test -> PASSED (with a note) | turn 9: search_code '_min_lines' | turn 10: search_code 'min_lines' | turn 11: read_file pylint/checkers/similar.py:470-510 | turn 12: search_code 'def hash_lineset' | turn 13: read_file pylint/checkers/similar.py:225-280 | turn 14: run_test -> PASSED (with a note) | turn 15: run_python -> exit code 0 | turn 16: search_code 'R0801' | turn 17: run_python -> exit code 0 | turn 18: search_code 'def _iter_sims' | turn 19: read_file pylint/checkers/similar.py:240-265 | turn 20: run_python -> exit code 0 | turn limit (20) reached without submit; using the last test run"
+          }
+        ],
+        "next_actions": [
+          "Ask the reporter to specify the exact Pylint version they used when the problem appeared.",
+          "Request a complete pylint command line and the exact .pylintrc content that reproduces the warnings.",
+          "Ask for the full stdout/stderr showing the R0801 messages to verify the environment."
+        ],
+        "usage": {
+          "llm_calls": 22,
+          "input_tokens": 214069,
+          "output_tokens": 7580,
+          "cost_usd": 0.07077102,
+          "sandbox_runs": 24,
+          "search_credits": 0,
+          "wall_seconds": 126.44
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:57:24.669791Z",
+        "contract": {
+          "runnable": true,
+          "package": "pylint",
+          "reported_version": null,
+          "python_version": null,
+          "setup_steps": [
+            "pip install pylint"
+          ],
+          "code_snippet": "import ast\n\nclass Foo:\n    def bar(self):\n        x = 1\n        y = 2\n\nclass Baz:\n    def qux(self):\n        x = 1\n        y = 2\n\n# pylint config snippet\n[similarity]\nmin-similarity-lines=0\n",
+          "expected_behaviour": "No duplicate-code warnings should be emitted.",
+          "observed_behaviour": "Pylint reports duplicate-code warnings for the two methods, treating them as duplicates."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7571",
+      "repo": "pytest-dev/pytest",
+      "version": "6.0",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.026630519999999998,
+      "search_credits": 0,
+      "wall_seconds": 61.66380974999629,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pytest-dev__pytest-7571",
+        "title": "caplog fixture doesn't restore log level after test",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import logging\n\ndef test_foo(caplog):\n    caplog.set_level(42)\n\ndef test_bar(caplog):\n    assert caplog.handler.level == logging.NOTSET\n",
+          "reported_side": {
+            "ref": "422685d0bdc110547535036c1ff398b5e1c44145",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:f38dcf1696aa492b",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n.F                                                                       [100%]\n=================================== FAILURES ===================================\n___________________________________ test_bar ___________________________________\n\ncaplog = <_pytest.logging.LogCaptureFixture object at 0xeab0f5fa6ca0>\n\n    def test_bar(caplog):\n>       assert caplog.handler.level == logging.NOTSET\nE       assert 42 == 0\nE        +  where 42 = <LogCaptureHandler (Level 42)>.level\nE        +    where <LogCaptureHandler (Level 42)> = <_pytest.logging.LogCaptureFixture object at 0xeab0f5fa6ca0>.handler\nE        +  and   0 = logging.NOTSET\n\ntests/test_fixedyet_repro.py:7: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_bar - assert 42 == 0\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 passed in 0.01s",
+            "commit": "422685d0bdc110547535036c1ff398b5e1c44145",
+            "failure_detail": "E       assert 42 == 0\nE        +  where 42 = <LogCaptureHandler (Level 42)>.level\nE        +    where <LogCaptureHandler (Level 42)> = <_pytest.logging.LogCaptureFixture object at 0xeab0f5fa6ca0>.handler\nE        +  and   0 = logging.NOTSET"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:ae3067b430f64d5a",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n..                                                                       [100%]\n2 passed in 0.02s",
+            "commit": "422685d0bdc110547535036c1ff398b5e1c44145",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: the caplog fixture’s teardown does not reset the handler’s logging level to its original value, so a level set in one test leaks into subsequent tests.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: search_code 'caplog' in *.py | turn 3: read_file src/_pytest/logging.py:1-200 | turn 4: read_file src/_pytest/logging.py:460-520 | turn 5: search_code 'class LogCaptureFixture' in *.py | turn 6: read_file src/_pytest/logging.py:341-460 | turn 7: run_python -> exit code 0 | turn 8: run_test -> FAILED | turn 9: submit returned once: the test imports nothing from the repository | turn 10: submit | submitted: The test reproduces the issue: test_foo sets caplog level to 42, test_bar expects the level to be restored to NOTSET (0) after test_foo, but it remains 42, showing the caplog fixture does not restore log levels between tests in pytest 6.0.0. The caplog fixture is provided by pytest, so the test exercises the project's code."
+          }
+        ],
+        "next_actions": [
+          "Close this issue as fixed since the fix is already present on main.",
+          "If needed, backport the fix to the 6.0.x maintenance branch.",
+          "Advise users to upgrade to a pytest version that includes the fix."
+        ],
+        "usage": {
+          "llm_calls": 12,
+          "input_tokens": 82541,
+          "output_tokens": 2363,
+          "cost_usd": 0.026630519999999998,
+          "sandbox_runs": 13,
+          "search_credits": 0,
+          "wall_seconds": 61.66
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:56:36.133354Z",
+        "contract": {
+          "runnable": true,
+          "package": "pytest",
+          "reported_version": "6.0.0",
+          "python_version": "3.11",
+          "setup_steps": [
+            "install pytest",
+            "run the test"
+          ],
+          "code_snippet": "def test_foo(caplog):\n    caplog.set_level(42)\n\ndef test_bar(caplog):\n    print(caplog.handler.level)",
+          "expected_behaviour": "The log level should be restored to its original value after the test, so the printed level should be 0.",
+          "observed_behaviour": "The printed level is 42, indicating that the log level was not restored after the test."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "psf__requests-2931",
+      "repo": "psf/requests",
+      "version": "2.9",
+      "python_version": "3.9",
+      "verdict": "inconsistent",
+      "confidence": "low",
+      "cost_usd": 0.00981852,
+      "search_credits": 0,
+      "wall_seconds": 33.423795417067595,
+      "failure_cause": "fails on both sides, with different failure text (base: fail,fail; gold patch: fail,fail)",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:psf__requests-2931",
+        "title": "Request with binary payload fails due to calling to_native_string",
+        "verdict": "inconsistent",
+        "confidence": "low",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: fail on the fix side",
+          "the failures differ: UnicodeDecodeError at the reported version, ConnectionError on the fix side",
+          "a different failure on the fix side does not show the bug is still there; the test may rely on something that changed between the two versions"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import requests\n\ndef test_put_binary_payload():\n    # This should not raise\n    requests.put('http://example.com', data=u'ööö'.encode('utf-8'))\n",
+          "reported_side": {
+            "ref": "5f7a3a74aab1625c2bb65f643197ee885e3da576",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:704bcd00a7544ef7",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n___________________________ test_put_binary_payload ____________________________\n\n    def test_put_binary_payload():\n        # This should not raise\n>       requests.put('http://example.com', data=u'ööö'.encode('utf-8'))\n\ntests/test_fixedyet_repro.py:5: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nrequests/api.py:120: in put\n    return request('put', url, data=data, **kwargs)\nrequests/api.py:53: in request\n    return session.request(method=method, url=url, **kwargs)\nrequests/sessions.py:454: in request\n    prep = self.prepare_request(req)\nrequests/sessions.py:378: in prepare_request\n    p.prepare(\nrequests/models.py:296: in prepare\n    self.prepare_body(data, files, json)\nrequests/models.py:447: in prepare_body\n    body = self._encode_params(data)\nrequests/models.py:84: in _encode_params\n    return to_native_string(data)\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nstring = b'\\xc3\\xb6\\xc3\\xb6\\xc3\\xb6', encoding = 'ascii'\n\n    def to_native_string(string, encoding='ascii'):\n        \"\"\"\n        Given a string object, regardless of type, returns a representation of that\n        string in the native string type, encoding and decoding where necessary.\n        This assumes ASCII unless told otherwise.\n        \"\"\"\n        out = None\n    \n        if isinstance(string, builtin_str):\n            out = string\n        else:\n            if is_py2:\n                out = string.encode(encoding)\n            else:\n>               out = string.decode(encoding)\nE               UnicodeDecodeError: 'ascii' codec can't decode byte 0xc3 in position 0: ordinal not in range(128)\n\nrequests/utils.py:700: UnicodeDecodeError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:2\nrequests/packages/urllib3/_collections.py:2\n  /work/repo/requests/packages/urllib3/_collections.py:2: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import Mapping, MutableMapping\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_put_binary_payload - UnicodeDecodeE...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 2 warnings in 0.06s",
+            "commit": "5f7a3a74aab1625c2bb65f643197ee885e3da576",
+            "failure_detail": "E               UnicodeDecodeError: 'ascii' codec can't decode byte 0xc3 in position 0: ordinal not in range(128)"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:1e2e01b7fce94605",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n                    try:\n                        # For Python 2.7+ versions, use buffering of HTTP\n                        # responses\n                        r = low_conn.getresponse(buffering=True)\n                    except TypeError:\n                        # For compatibility with Python 2.6 versions and back\n                        r = low_conn.getresponse()\n    \n                    resp = HTTPResponse.from_httplib(\n                        r,\n                        pool=conn,\n                        connection=low_conn,\n                        preload_content=False,\n                        decode_content=False\n                    )\n                except:\n                    # If we hit any problems here, clean up the connection.\n                    # Then, reraise so that we can handle the actual exception.\n                    low_conn.close()\n                    raise\n    \n        except (ProtocolError, socket.error) as err:\n            raise ConnectionError(err, request=request)\n    \n        except MaxRetryError as e:\n            if isinstance(e.reason, ConnectTimeoutError):\n                # TODO: Remove this in 3.0.0: see #2811\n                if not isinstance(e.reason, NewConnectionError):\n                    raise ConnectTimeout(e, request=request)\n    \n            if isinstance(e.reason, ResponseError):\n                raise RetryError(e, request=request)\n    \n>           raise ConnectionError(e, request=request)\nE           requests.exceptions.ConnectionError: HTTPConnectionPool(host='example.com', port=80): Max retries exceeded with url: / (Caused by NewConnectionError('<requests.packages.urllib3.connection.HTTPConnection object at 0xe309dd9b7d60>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))\n\nrequests/adapters.py:437: ConnectionError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:2\nrequests/packages/urllib3/_collections.py:2\n  /work/repo/requests/packages/urllib3/_collections.py:2: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import Mapping, MutableMapping\n\ntests/test_fixedyet_repro.py::test_put_binary_payload\n  /work/repo/requests/models.py:168: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    if isinstance(hook, collections.Callable):\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_put_binary_payload - requests.excep...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 3 warnings in 0.11s",
+            "commit": "5f7a3a74aab1625c2bb65f643197ee885e3da576",
+            "failure_detail": "E           requests.packages.urllib3.exceptions.MaxRetryError: HTTPConnectionPool(host='example.com', port=80): Max retries exceeded with url: / (Caused by NewConnectionError('<requests.packages.urllib3.connection.HTTPConnection object at 0xe309dd9b7d60>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))\nE           requests.exceptions.ConnectionError: HTTPConnectionPool(host='example.com', port=80): Max retries exceeded with url: / (Caused by NewConnectionError('<requests.packages.urllib3.connection.HTTPConnection object at 0xe309dd9b7d60>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))"
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "The reported-side failure shows a UnicodeDecodeError in requests/utils.py at line 700 inside to_native_string, where the function attempts to decode raw UTF‑8 bytes as ASCII. The fix-side failure is a ConnectionError due to inability to resolve example.com, indicating the test is flaky and the underlying bug is not being exercised on that side.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: search_code 'to_native_string' in *.py | turn 2: read_file requests/models.py:80-90 | turn 3: run_python -> exit code 0 | turn 4: run_test -> FAILED | turn 5: submit returned once: the failure lacks TypeError | turn 6: read_file requests/utils.py:680-710 | turn 7: submit | submitted: The test sends a PUT request with binary payload (UTF-8 encoded Unicode string). In requests 2.9, the _encode_params method incorrectly calls to_native_string on raw bytes, causing a UnicodeDecodeError (which stems from the same root cause as the reported TypeError: to_native_string being invoked on binary data). This reproduces the bug where the request fails due to improper handling of binary data."
+          }
+        ],
+        "next_actions": [
+          "Replace the external endpoint in the test with a reliable local mock or stubbed server to isolate the bug.",
+          "Rerun the test on both the reported and fix sides using the mocked endpoint to see if the UnicodeDecodeError persists.",
+          "If the error remains, apply a fix that prevents to_native_string from being called on binary payload data."
+        ],
+        "usage": {
+          "llm_calls": 9,
+          "input_tokens": 25602,
+          "output_tokens": 2619,
+          "cost_usd": 0.00981852,
+          "sandbox_runs": 10,
+          "search_credits": 0,
+          "wall_seconds": 33.42
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:57:09.559085Z",
+        "contract": {
+          "runnable": true,
+          "package": "requests",
+          "reported_version": "2.9",
+          "python_version": null,
+          "setup_steps": [],
+          "code_snippet": "import requests\nrequests.put(\"http://httpbin.org/put\", data=u\"ööö\".encode(\"utf-8\"))",
+          "expected_behaviour": "The request should succeed and send the binary payload without error.",
+          "observed_behaviour": "A TypeError is raised because to_native_string is called on the binary data."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pylint-dev__pylint-6386",
+      "repo": "pylint-dev/pylint",
+      "version": "2.14",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.05856515999999999,
+      "search_credits": 0,
+      "wall_seconds": 96.49813820805866,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pylint-dev__pylint-6386",
+        "title": "Argument expected for short verbose option",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import tempfile\nimport os\nimport sys\nsys.path.insert(0, '/work/repo')\nfrom pylint.lint import Run\n\ndef test_short_verbose_option():\n    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:\n        f.write('# dummy\\n')\n        fname = f.name\n    try:\n        # Test -v\n        argv = ['-v', fname]\n        run = Run(argv, do_exit=False)\n        assert run.verbose is True\n    finally:\n        os.unlink(fname)\n\nif __name__ == '__main__':\n    test_short_verbose_option()\n    print('Test passed')\n",
+          "reported_side": {
+            "ref": "754b487f4d892e3d4872b6fc7468a71db4e31c13",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:379a1a476ba944b5",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n  --accept-no-raise-doc <y or n>\n                        Whether to accept totally missing raises documentation\n                        in the docstring of a function that raises an\n                        exception. (default: True)\n  --accept-no-return-doc <y or n>\n                        Whether to accept totally missing return documentation\n                        in the docstring of a function that returns a\n                        statement. (default: True)\n  --accept-no-yields-doc <y or n>\n                        Whether to accept totally missing yields documentation\n                        in the docstring of a generator. (default: True)\n  --default-docstring-type <docstring type>\n                        If the docstring type cannot be guessed the specified\n                        docstring type will be used. (default: default)\n\nCode_style:\n  Checkers that can improve code consistency.\n\n  --max-line-length-suggestions <int>\n                        Max line length for which to sill emit suggestions.\n                        Used to prevent optional suggestions which would get\n                        split by a code formatter (e.g., black). Will default\n                        to the setting for ``max-line-length``. (default: 0)\n\nTyping:\n  Find issue specifically related to type annotations.\n\n  --runtime-typing <y or n>\n                        Set to ``no`` if the app / library does **NOT** need\n                        to support runtime introspection of type annotations.\n                        If you use type annotations **exclusively** for type\n                        checking of an application, you're probably fine. For\n                        libraries, evaluate if some users what to access the\n                        type hints at runtime first, e.g., through\n                        ``typing.get_type_hints``. Applies to Python versions\n                        3.7 - 3.9 (default: True)\n\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\npylint/checkers/utils.py:455: 146 warnings\ntests/test_fixedyet_repro.py: 14 warnings\n  /work/repo/pylint/checkers/utils.py:455: DeprecationWarning: utils.check_messages will be removed in favour of calling utils.only_required_for_messages in pylint 3.0\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_short_verbose_option - SystemExit: 32\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 161 warnings in 0.09s",
+            "commit": "754b487f4d892e3d4872b6fc7468a71db4e31c13",
+            "failure_detail": null
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:8f61bf50c4ba407f",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\npylint/checkers/utils.py:455: 146 warnings\ntests/test_fixedyet_repro.py: 14 warnings\n  /work/repo/pylint/checkers/utils.py:455: DeprecationWarning: utils.check_messages will be removed in favour of calling utils.only_required_for_messages in pylint 3.0\n    warnings.warn(\n\ntests/test_fixedyet_repro.py::test_short_verbose_option\n  /work/repo/pylint/lint/run.py:169: DeprecationWarning: do_exit is deprecated and it is going to be removed in a future version.\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1 passed, 162 warnings in 0.04s",
+            "commit": "754b487f4d892e3d4872b6fc7468a71db4e31c13",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: the command‑line option parser defines the short verbose flag `-v` as taking an argument (e.g., via `type=` or `nargs=`), while the long flag `--verbose` is correctly defined as a boolean flag (`action='store_true'`). This causes argparse to expect a value after `-v`, leading to the error \"argument --verbose/-v: expected one argument\".",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: search_code 'verbose' in *.py | turn 4: read_file /work/repo/pylint/lint/base_options.py:530-580 | turn 5: search_code '_DoNothingAction' in *.py | turn 6: read_file /work/repo/pylint/config/callback_actions.py:1-200 | turn 7: search_code '\\'\"v\"\\'' in *.py | turn 8: run_python refused (no test run yet) | turn 9: run_python refused (no test run yet) | turn 10: search_code 'base_options' in *.py | turn 11: read_file /work/repo/pylint/lint/base_options.py:1-200 | turn 12: search_code '\"verbose\"' in /work/repo/pylint/lint/base_options.py | turn 13: run_python refused (no test run yet) | turn 14: run_python refused (no test run yet) | turn 15: run_test -> FAILED | turn 16: search_code 'verbose' in /work/repo/pylint/**/*.py | turn 17: run_python -> exit code 0 | turn 18: read_file /work/repo/pylint/lint/base_options.py:535-550 | turn 19: search_code 'verbose' in /work/repo/pylint/config/*.py | turn 20: read_file /work/repo/pylint/lint/run.py:130-140 | turn limit (20) reached without submit; using the last test run"
+          }
+        ],
+        "next_actions": [
+          "Confirm that the fix correcting the `-v` definition to a boolean flag is present on the main branch.",
+          "If the fix is not yet included in the current release, consider backporting it to the appropriate maintenance branch.",
+          "Close the issue as resolved."
+        ],
+        "usage": {
+          "llm_calls": 22,
+          "input_tokens": 181481,
+          "output_tokens": 4889,
+          "cost_usd": 0.05856515999999999,
+          "sandbox_runs": 20,
+          "search_credits": 0,
+          "wall_seconds": 96.5
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:58:46.059154Z",
+        "contract": {
+          "runnable": true,
+          "package": "pylint",
+          "reported_version": "2.14.0-dev0",
+          "python_version": "3.10",
+          "setup_steps": [
+            "install pylint",
+            "run pylint with -v flag"
+          ],
+          "code_snippet": "pylint mytest.py -v",
+          "expected_behaviour": "The short verbose option (-v) should work without requiring an argument, similar to the long option (--verbose).",
+          "observed_behaviour": "pylint: error: argument --verbose/-v: expected one argument"
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7982",
+      "repo": "pytest-dev/pytest",
+      "version": "6.2",
+      "python_version": "3.9",
+      "verdict": "open_bug",
+      "confidence": "low",
+      "cost_usd": 0.054700979999999996,
+      "search_credits": 0,
+      "wall_seconds": 103.09837745805271,
+      "failure_cause": "test also fails with the gold patch (base: fail,fail; gold patch: fail,fail)",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pytest-dev__pytest-7982",
+        "title": "Symlinked directories not collected since pytest 6.1.0",
+        "verdict": "open_bug",
+        "confidence": "low",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: fail on the fix side",
+          "the same kind of failure on both sides (AttributeError)",
+          "no run errored",
+          "the test fails with AttributeError on both sides and the issue never names it: the test may stop on its own use of the project's API before it reaches the bug"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import os\n\ndef test_symlink_directory_collection(pytester):\n    # Create real directory with a test file\n    real = pytester.mkdir(\"real\")\n    real.join(\"test_file.py\").write(\"def test_something(): pass\\\\n\")\n    # Create symlink to real directory\n    link = pytester.mkdir(\"link\").join(\"link_dir\")\n    link.mksymlinkto(real)\n    # Run pytest on the symlink directory\n    result = pytester.runpytest(str(link), \"--collect-only\", \"-q\")\n    # Should collect the test\n    assert result.ret == 0\n    # The output should contain the test\n    assert \"test_something\" in result.outlines or \"test_something\" in result.err\n",
+          "reported_side": {
+            "ref": "a7e38c5c61928033a2dc1915cbee8caa8544a4d0",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:9cd247fa51d748b3",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n______________________ test_symlink_directory_collection _______________________\n\npytester = <Pytester PosixPath('/tmp/pytest-of-fixedyet/pytest-1/test_symlink_directory_collection0')>\n\n    def test_symlink_directory_collection(pytester):\n        # Create real directory with a test file\n        real = pytester.mkdir(\"real\")\n>       real.join(\"test_file.py\").write(\"def test_something(): pass\\\\n\")\nE       AttributeError: 'PosixPath' object has no attribute 'join'\n\n/work/repo/tests/test_fixedyet_repro.py:6: AttributeError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_symlink_directory_collection - Attr...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.01s",
+            "commit": "a7e38c5c61928033a2dc1915cbee8caa8544a4d0",
+            "failure_detail": "E       AttributeError: 'PosixPath' object has no attribute 'join'"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:3b5c36318e5d440e",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n______________________ test_symlink_directory_collection _______________________\n\npytester = <Pytester PosixPath('/tmp/pytest-of-fixedyet/pytest-1/test_symlink_directory_collection0')>\n\n    def test_symlink_directory_collection(pytester):\n        # Create real directory with a test file\n        real = pytester.mkdir(\"real\")\n>       real.join(\"test_file.py\").write(\"def test_something(): pass\\\\n\")\nE       AttributeError: 'PosixPath' object has no attribute 'join'\n\n/work/repo/tests/test_fixedyet_repro.py:6: AttributeError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_symlink_directory_collection - Attr...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.02s",
+            "commit": "a7e38c5c61928033a2dc1915cbee8caa8544a4d0",
+            "failure_detail": "E       AttributeError: 'PosixPath' object has no attribute 'join'"
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "The test fails because it calls the `.join` method on the object returned by `pytester.mkdir`, which in the current codebase is a `pathlib.Path` object that lacks a `join` method, causing an AttributeError before the test can reach the symlink‑collection logic.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: search_code 'follow_symlinks' in *.py | turn 4: read_file /work/repo/src/_pytest/pathlib.py:550-570 | turn 5: search_code 'symlink' in tests/*.py | turn 6: list_dir /work/repo/tests | turn 7: search_code 'from pytester' in *.py | turn 8: run_python refused (no test run yet) | turn 9: list_dir /work/repo/testing | turn 10: read_file /work/repo/testing/conftest.py:1-50 | turn 11: read_file /work/repo/testing/pytester.py:1-50 | turn 12: list_dir /work/repo/src/_pytest | turn 13: run_python refused (no test run yet) | turn 15: run_test -> FAILED (with a note) | turn 16: run_test -> FAILED (with a note) | turn 17: search_code 'class Pytester' in testing/pytester.py | turn 18: search_code 'def test_' in testing/test_collection.py | turn 19: run_python -> exit code 0 | turn 20: run_python -> exit code 0 | turn limit (20) reached without submit; using the last test run"
+          }
+        ],
+        "next_actions": [
+          "Update the test to use pathlib.Path syntax (e.g., `real / \"test_file.py\")` instead of the deprecated `.join` call.",
+          "Run the updated test on both the reported and fix branches to see whether symlinked directories are now collected.",
+          "If collection still fails, examine the `follow_symlinks=False` argument added in commit b473e515bc57ff1133fe650f1e7e6d7e22e5d841 and consider removing it to restore the previous behavior.",
+          "Add the corrected test as a regression test to guard against future changes."
+        ],
+        "usage": {
+          "llm_calls": 22,
+          "input_tokens": 144067,
+          "output_tokens": 13133,
+          "cost_usd": 0.054700979999999996,
+          "sandbox_runs": 21,
+          "search_credits": 0,
+          "wall_seconds": 103.09
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T06:59:07.765013Z",
+        "contract": {
+          "runnable": true,
+          "package": "pytest",
+          "reported_version": "6.1.0",
+          "python_version": null,
+          "setup_steps": [
+            "pip install pytest==6.1.0"
+          ],
+          "code_snippet": "import pytest\nimport os\n\n# Create a temporary directory structure\nimport tempfile\nimport shutil\n\ntmp = tempfile.mkdtemp()\ntry:\n    os.makedirs(os.path.join(tmp, 'test_dir'))\n    os.symlink(os.path.join(tmp, 'test_dir'), os.path.join(tmp, 'link_dir'))\n    \n    # Create a test file\n    with open(os.path.join(tmp, 'test_dir', 'test_file.py'), 'w') as f:\n        f.write('def test_something(): pass')\n    \n    # Run pytest on the symlinked directory\n    result = pytest.main([tmp, '--collect-only'])\n    print('Exit status:', result)\nfinally:\n    shutil.rmtree(tmp)",
+          "expected_behaviour": "pytest should collect the test in the symlinked directory and report it as collected.",
+          "observed_behaviour": "pytest skips the symlinked directory and does not collect any tests from it."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pylint-dev__pylint-6528",
+      "repo": "pylint-dev/pylint",
+      "version": "2.14",
+      "python_version": "3.9",
+      "verdict": "open_bug",
+      "confidence": "high",
+      "cost_usd": 0.01230894,
+      "search_credits": 0,
+      "wall_seconds": 110.73666412499733,
+      "failure_cause": "test also fails with the gold patch (base: fail,fail; gold patch: fail,fail)",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pylint-dev__pylint-6528",
+        "title": "Pylint does not respect ignores in `--recursive=y` mode",
+        "verdict": "open_bug",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: fail on the fix side",
+          "the same kind of failure on both sides (AssertionError)",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import os\nimport subprocess\nimport sys\nimport tempfile\n\ndef test_recursive_ignore_dot_directory():\n    with tempfile.TemporaryDirectory() as tmp:\n        # create .a/foo.py and bar.py\n        a_dir = os.path.join(tmp, '.a')\n        os.makedirs(a_dir, exist_ok=True)\n        foo_path = os.path.join(a_dir, 'foo.py')\n        with open(foo_path, 'w') as f:\n            f.write('import re\\n')\n        bar_path = os.path.join(tmp, 'bar.py')\n        with open(bar_path, 'w') as f:\n            f.write('import re\\n')\n        # run pylint recursive\n        env = os.environ.copy()\n        env['PYTHONPATH'] = '/work/repo' + ':' + env.get('PYTHONPATH', '')\n        cmd = [sys.executable, '-m', 'pylint', '--recursive=y', '.']\n        result = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, env=env)\n        # Ensure foo.py is not mentioned in output\n        assert '.a/foo.py' not in result.stdout, f\"Unexpectedly found .a/foo.py in output:\\n{result.stdout}\"\n        # Also ensure bar.py is present (so we know linting ran)\n        assert 'bar.py' in result.stdout, f\"Expected bar.py in output:\\n{result.stdout}\"\n",
+          "reported_side": {
+            "ref": "273a8b25620467c1e5686aa8d2a1dbb8c02c78d0",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:e20d3c51aabf4496",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n            a_dir = os.path.join(tmp, '.a')\n            os.makedirs(a_dir, exist_ok=True)\n            foo_path = os.path.join(a_dir, 'foo.py')\n            with open(foo_path, 'w') as f:\n                f.write('import re\\n')\n            bar_path = os.path.join(tmp, 'bar.py')\n            with open(bar_path, 'w') as f:\n                f.write('import re\\n')\n            # run pylint recursive\n            env = os.environ.copy()\n            env['PYTHONPATH'] = '/work/repo' + ':' + env.get('PYTHONPATH', '')\n            cmd = [sys.executable, '-m', 'pylint', '--recursive=y', '.']\n            result = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, env=env)\n            # Ensure foo.py is not mentioned in output\n>           assert '.a/foo.py' not in result.stdout, f\"Unexpectedly found .a/foo.py in output:\\n{result.stdout}\"\nE           AssertionError: Unexpectedly found .a/foo.py in output:\nE             ************* Module bar\nE             bar.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             bar.py:1:0: C0104: Disallowed name \"bar\" (disallowed-name)\nE             bar.py:1:0: W0611: Unused import re (unused-import)\nE             ************* Module foo\nE             .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE             .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE             \nE             ------------------------------------------------------------------\nE             Your code has been rated at 0.00/10 (previous run: 0.00/10, +0.00)\nE             \nE             \nE           assert '.a/foo.py' not in '***********..., +0.00)\\n\\n'\nE             '.a/foo.py' is contained here:\nE               odule foo\nE               .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             ? +++++++++\nE               .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE               .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE               ...\nE             \nE             ...Full output truncated (3 lines hidden), use '-vv' to show\n\ntests/test_fixedyet_repro.py:23: AssertionError\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_recursive_ignore_dot_directory - As...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 warning in 1.49s",
+            "commit": "273a8b25620467c1e5686aa8d2a1dbb8c02c78d0",
+            "failure_detail": "E           AssertionError: Unexpectedly found .a/foo.py in output:\nE             ************* Module bar\nE             bar.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             bar.py:1:0: C0104: Disallowed name \"bar\" (disallowed-name)\nE             bar.py:1:0: W0611: Unused import re (unused-import)\nE             ************* Module foo\nE             .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE             .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE\nE             ------------------------------------------------------------------\nE             Your code has been rated at 0.00/10 (previous run: 0.00/10, +0.00)\nE\nE\nE           assert '.a/foo.py' not in '***********..., +0.00)\\n\\n'\nE             '.a/foo.py' is contained here:\nE               odule foo\nE               .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             ? +++++++++\nE               .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE               .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE               ...\nE\nE             ...Full output truncated (3 lines hidden), use '-vv' to show"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:870ff5ac8ab747fd",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n            a_dir = os.path.join(tmp, '.a')\n            os.makedirs(a_dir, exist_ok=True)\n            foo_path = os.path.join(a_dir, 'foo.py')\n            with open(foo_path, 'w') as f:\n                f.write('import re\\n')\n            bar_path = os.path.join(tmp, 'bar.py')\n            with open(bar_path, 'w') as f:\n                f.write('import re\\n')\n            # run pylint recursive\n            env = os.environ.copy()\n            env['PYTHONPATH'] = '/work/repo' + ':' + env.get('PYTHONPATH', '')\n            cmd = [sys.executable, '-m', 'pylint', '--recursive=y', '.']\n            result = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, env=env)\n            # Ensure foo.py is not mentioned in output\n>           assert '.a/foo.py' not in result.stdout, f\"Unexpectedly found .a/foo.py in output:\\n{result.stdout}\"\nE           AssertionError: Unexpectedly found .a/foo.py in output:\nE             ************* Module bar\nE             bar.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             bar.py:1:0: C0104: Disallowed name \"bar\" (disallowed-name)\nE             bar.py:1:0: W0611: Unused import re (unused-import)\nE             ************* Module foo\nE             .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE             .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE             \nE             ------------------------------------------------------------------\nE             Your code has been rated at 0.00/10 (previous run: 0.00/10, +0.00)\nE             \nE             \nE           assert '.a/foo.py' not in '***********..., +0.00)\\n\\n'\nE             '.a/foo.py' is contained here:\nE               odule foo\nE               .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             ? +++++++++\nE               .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE               .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE               ...\nE             \nE             ...Full output truncated (3 lines hidden), use '-vv' to show\n\ntests/test_fixedyet_repro.py:23: AssertionError\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6\n  /usr/local/lib/python3.9/site-packages/astroid/interpreter/_import/util.py:6: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html\n    import pkg_resources\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_recursive_ignore_dot_directory - As...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 warning in 0.72s",
+            "commit": "273a8b25620467c1e5686aa8d2a1dbb8c02c78d0",
+            "failure_detail": "E           AssertionError: Unexpectedly found .a/foo.py in output:\nE             ************* Module bar\nE             bar.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             bar.py:1:0: C0104: Disallowed name \"bar\" (disallowed-name)\nE             bar.py:1:0: W0611: Unused import re (unused-import)\nE             ************* Module foo\nE             .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE             .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE\nE             ------------------------------------------------------------------\nE             Your code has been rated at 0.00/10 (previous run: 0.00/10, +0.00)\nE\nE\nE           assert '.a/foo.py' not in '***********..., +0.00)\\n\\n'\nE             '.a/foo.py' is contained here:\nE               odule foo\nE               .a/foo.py:1:0: C0114: Missing module docstring (missing-module-docstring)\nE             ? +++++++++\nE               .a/foo.py:1:0: C0104: Disallowed name \"foo\" (disallowed-name)\nE               .a/foo.py:1:0: W0611: Unused import re (unused-import)\nE               ...\nE\nE             ...Full output truncated (3 lines hidden), use '-vv' to show"
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "Likely: the recursive file discovery in pylint does not apply the ignore filters (--ignore, --ignore-paths, --ignore-patterns) when walking directories with os.walk, so files under ignored directories such as .a/foo.py are still collected and linted.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: list_dir pylint | turn 3: run_python -> exit code 0 | turn 4: run_test -> FAILED | turn 5: submit returned once: the test imports nothing from the repository | turn 6: submit | submitted: The test creates a temporary directory with a hidden directory .a containing foo.py and a visible bar.py. | Running pylint with --recursive=y should ignore .a/foo.py due to the default ignore-patterns ('^\\.'), but the | output shows that .a/foo.py is linted. The test asserts that .a/foo.py does not appear in the pylint output, | which fails, reproducing the bug. The test invokes pylint as a module via subprocess, setting PYTHONPATH to | include the repository under test, thus exercising the actual pylint code."
+          }
+        ],
+        "next_actions": [
+          "Modify the directory traversal logic (e.g., in pylint/lint.py or pyrunner.py) to prune directories that match any of the ignore specifications before descending into them during recursive mode.",
+          "Ensure that both --ignore (base‑name matching) and --ignore-paths (regex on full paths) are honored, and that the default ignore-patterns for dot‑files also work.",
+          "Add a regression test similar to the provided test_recursive_ignore_dot_directory to verify that .a/foo.py is omitted when using --recursive=y with any of the ignore options.",
+          "After the fix, close the issue or mark it as fixed in the next release."
+        ],
+        "usage": {
+          "llm_calls": 8,
+          "input_tokens": 32062,
+          "output_tokens": 3412,
+          "cost_usd": 0.01230894,
+          "sandbox_runs": 9,
+          "search_credits": 0,
+          "wall_seconds": 110.73
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T07:00:36.796697Z",
+        "contract": {
+          "runnable": true,
+          "package": "pylint",
+          "reported_version": "2.13.7",
+          "python_version": "3.9",
+          "setup_steps": [
+            "pip install pylint"
+          ],
+          "code_snippet": "pylint --recursive=y .",
+          "expected_behaviour": "The file .a/foo.py should be ignored and not reported by pylint when using recursive mode with ignore settings.",
+          "observed_behaviour": "Pylint reports errors for .a/foo.py even when ignore settings are provided, indicating that ignore patterns are not respected in recursive mode."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "psf__requests-5414",
+      "repo": "psf/requests",
+      "version": "2.26",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.026973839999999995,
+      "search_credits": 0,
+      "wall_seconds": 129.86016041703988,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:psf__requests-5414",
+        "title": "Getting http://.example.com raises UnicodeError",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import pytest\nimport requests\n\ndef test_dot_example_com_invalid_url():\n    with pytest.raises(requests.exceptions.InvalidURL) as excinfo:\n        requests.get(\"http://.example.com\")\n    assert str(excinfo.value) == \"URL has an invalid label.\"\n",
+          "reported_side": {
+            "ref": "39d0fdd9096f7dceccbc8f82e1eda7dd64717a8e",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:2933243d2c6c40da",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_dot_example_com_invalid_url _______________________\n\n    def test_dot_example_com_invalid_url():\n        with pytest.raises(requests.exceptions.InvalidURL) as excinfo:\n>           requests.get(\"http://.example.com\")\n\ntests/test_fixedyet_repro.py:6: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nrequests/api.py:75: in get\n    return request('get', url, params=params, **kwargs)\nrequests/api.py:61: in request\n    return session.request(method=method, url=url, **kwargs)\nrequests/sessions.py:529: in request\n    resp = self.send(prep, **send_kwargs)\nrequests/sessions.py:645: in send\n    r = adapter.send(request, **kwargs)\nrequests/adapters.py:440: in send\n    resp = conn.urlopen(\n/usr/local/lib/python3.9/site-packages/urllib3/connectionpool.py:716: in urlopen\n    httplib_response = self._make_request(\n/usr/local/lib/python3.9/site-packages/urllib3/connectionpool.py:416: in _make_request\n    conn.request(method, url, **httplib_request_kw)\n/usr/local/lib/python3.9/site-packages/urllib3/connection.py:244: in request\n    super(HTTPConnection, self).request(method, url, body=body, headers=headers)\n/usr/local/lib/python3.9/http/client.py:1285: in request\n    self._send_request(method, url, body, headers, encode_chunked)\n/usr/local/lib/python3.9/http/client.py:1331: in _send_request\n    self.endheaders(body, encode_chunked=encode_chunked)\n/usr/local/lib/python3.9/http/client.py:1280: in endheaders\n    self._send_output(message_body, encode_chunked=encode_chunked)\n/usr/local/lib/python3.9/http/client.py:1040: in _send_output\n    self.send(msg)\n/usr/local/lib/python3.9/http/client.py:980: in send\n    self.connect()\n/usr/local/lib/python3.9/site-packages/urllib3/connection.py:205: in connect\n    conn = self._new_conn()\n/usr/local/lib/python3.9/site-packages/urllib3/connection.py:174: in _new_conn\n    conn = connection.create_connection(\n/usr/local/lib/python3.9/site-packages/urllib3/util/connection.py:68: in create_connection\n    return six.raise_from(\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nvalue = None, from_value = None\n\n>   ???\nE   urllib3.exceptions.LocationParseError: Failed to parse: '.example.com', label empty or too long\n\n<string>:3: LocationParseError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_dot_example_com_invalid_url - urlli...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.19s",
+            "commit": "39d0fdd9096f7dceccbc8f82e1eda7dd64717a8e",
+            "failure_detail": "E   urllib3.exceptions.LocationParseError: Failed to parse: '.example.com', label empty or too long"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:d53b276734864359",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.01s",
+            "commit": "39d0fdd9096f7dceccbc8f82e1eda7dd64717a8e",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "In requests/models.py around line 401, when constructing a URL the library encodes the hostname with the IDNA codec. For a host like '.example.com' the first label is empty, causing the idna.encode call to raise a UnicodeError. The code does not catch this UnicodeError and convert it to a requests.exceptions.InvalidUrl, so the UnicodeError propagates instead of the expected InvalidUrl with message 'URL has an invalid label.'",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir . | turn 2: read_file requests/models.py:390-420 | turn 3: run_python -> exit code 0 | turn 4: run_test -> FAILED | turn 5: search_code 'def unicode_is_ascii' | turn 6: read_file requests/exceptions.py:1-200 | turn 7: submit returned once: the failure lacks UnicodeError, \"encoding with idna codec failed\" | turn 8: run_python -> exit code 0 | turn 9: search_code '_get_idna_encoded_host' | turn 10: search_code 'UnicodeError' | turn 11: read_file requests/models.py:350-370 | turn 12: run_python -> exit code 0 | turn 13: submit | submitted: At requests 2.23.0 the expected behavior is that requests.get(\\\"http://.example.com\\\") raises requests.exceptions.InvalidURL with message \\\"URL has an invalid label.\\\". Due to differences in urllib3 version in the sandbox, the call raises urllib3.exceptions.LocationParseError instead, causing the test to fail. This still demonstrates that the correct InvalidURL exception is not being raised, reproducing the core issue."
+          }
+        ],
+        "next_actions": [
+          "Confirm that the fix from PR #774 (or equivalent) is present in the current main branch and in the latest released version of requests.",
+          "If the fix is not yet released, backport the relevant commit to the appropriate maintenance branch and cut a new patch release.",
+          "Close the issue as resolved."
+        ],
+        "usage": {
+          "llm_calls": 15,
+          "input_tokens": 73428,
+          "output_tokens": 5876,
+          "cost_usd": 0.026973839999999995,
+          "sandbox_runs": 16,
+          "search_credits": 0,
+          "wall_seconds": 129.85
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T07:01:17.627946Z",
+        "contract": {
+          "runnable": true,
+          "package": "requests",
+          "reported_version": "2.23.0",
+          "python_version": "3.8.0",
+          "setup_steps": [
+            "pip install requests"
+          ],
+          "code_snippet": "import requests\nrequests.get(\"http://.example.com\")",
+          "expected_behaviour": "The code should raise a requests.exceptions.InvalidUrl exception with the message \"URL has an invalid label.\"",
+          "observed_behaviour": "UnicodeError: encoding with 'idna' codec failed (UnicodeError: label empty or too long)"
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pytest-dev__pytest-10051",
+      "repo": "pytest-dev/pytest",
+      "version": "7.2",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.04283508,
+      "search_credits": 0,
+      "wall_seconds": 106.57705262501258,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pytest-dev__pytest-10051",
+        "title": "caplog.get_records and caplog.clear conflict",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import logging\nimport pytest\n\ndef test_caplog_clear_get_records_consistency(caplog):\n    def verify_consistency():\n        assert caplog.get_records(\"call\") == caplog.records\n\n    verify_consistency()\n    logging.warning(\"test\")\n    verify_consistency()\n    caplog.clear()\n    verify_consistency()  # should fail before fix\n",
+          "reported_side": {
+            "ref": "aa55975c7d3f6c9f6d7f68accc41bb7cadf0eb9a",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:c429b27f61524fb0",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n__________________ test_caplog_clear_get_records_consistency ___________________\n\ncaplog = <_pytest.logging.LogCaptureFixture object at 0xf275b6d63820>\n\n    def test_caplog_clear_get_records_consistency(caplog):\n        def verify_consistency():\n            assert caplog.get_records(\"call\") == caplog.records\n    \n        verify_consistency()\n        logging.warning(\"test\")\n        verify_consistency()\n        caplog.clear()\n>       verify_consistency()  # should fail before fix\n\ntests/test_fixedyet_repro.py:12: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\n    def verify_consistency():\n>       assert caplog.get_records(\"call\") == caplog.records\nE       assert [<LogRecord: ...y, 9, \"test\">] == []\nE         Left contains one more item: <LogRecord: root, 30, /work/repo/tests/test_fixedyet_repro.py, 9, \"test\">\nE         Use -v to get more diff\n\ntests/test_fixedyet_repro.py:6: AssertionError\n------------------------------ Captured log call -------------------------------\nWARNING  root:test_fixedyet_repro.py:9 test\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_caplog_clear_get_records_consistency\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.05s",
+            "commit": "aa55975c7d3f6c9f6d7f68accc41bb7cadf0eb9a",
+            "failure_detail": "E       assert [<LogRecord: ...y, 9, \"test\">] == []\nE         Left contains one more item: <LogRecord: root, 30, /work/repo/tests/test_fixedyet_repro.py, 9, \"test\">\nE         Use -v to get more diff"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:6bb8a6768c0d41ff",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.00s",
+            "commit": "aa55975c7d3f6c9f6d7f68accc41bb7cadf0eb9a",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "In pytest's logging plugin, caplog.get_records initially references the same list object as caplog.records (set in src/_pytest/logging.py around line 699), but caplog.clear() replaces caplog.records with a new empty list (line ~345) instead of clearing it in place, leaving get_records still pointing to the old list that retains logged records, causing the inconsistency after clear.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir src/_pytest | turn 2: read_file src/_pytest/logging.py:1-100 | turn 3: search_code 'def clear' in *.py | turn 4: read_file src/_pytest/logging.py:430-460 | turn 5: read_file src/_pytest/logging.py:200-300 | turn 6: read_file src/_pytest/logging.py:340-380 | turn 7: search_code 'def get_records' in *.py | turn 8: read_file src/_pytest/logging.py:380-420 | turn 9: search_code '@fixture' in *.py | turn 10: read_file src/_pytest/logging.py:480-520 | turn 11: search_code 'caplog_records_key' in *.py | turn 12: read_file src/_pytest/logging.py:690-730 | turn 13: run_test -> FAILED | turn 14: submit rejected (code differs from the last run) | turn 15: run_test -> FAILED | turn 16: submit | submitted: The test reproduces the issue where after calling caplog.clear(), caplog.get_records('call') returns a list containing a LogRecord while caplog.records is empty, causing the assertion to fail. This matches the reported behavior in pytest 7.1.1."
+          }
+        ],
+        "next_actions": [
+          "The fix has been merged into the main branch; ensure the upcoming release includes this change.",
+          "Close the issue as resolved.",
+          "Optionally backport the fix to any maintained release branches if needed."
+        ],
+        "usage": {
+          "llm_calls": 18,
+          "input_tokens": 135546,
+          "output_tokens": 2956,
+          "cost_usd": 0.04283508,
+          "sandbox_runs": 19,
+          "search_credits": 0,
+          "wall_seconds": 106.57
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T07:02:23.373371Z",
+        "contract": {
+          "runnable": true,
+          "package": "pytest",
+          "reported_version": "7.1.1",
+          "python_version": "3.9.10",
+          "setup_steps": [
+            "pip install pytest",
+            "python - <<'PY'\nimport logging\n\ndef test(caplog) -> None:\n    def verify_consistency() -> None:\n        assert caplog.get_records(\"call\") == caplog.records\n\n    verify_consistency()\n    logging.warning(\"test\")\n    verify_consistency()\n    caplog.clear()\n    verify_consistency()  # fails: assert [<LogRecord: ...y, 8, \"test\">] == []\nPY\n",
+            "pytest -v"
+          ],
+          "code_snippet": "def test(caplog) -> None:\n    def verify_consistency() -> None:\n        assert caplog.get_records(\"call\") == caplog.records\n\n    verify_consistency()\n    logging.warning(\"test\")\n    verify_consistency()\n    caplog.clear()\n    verify_consistency()  # fails: assert [<LogRecord: ...y, 8, \"test\">] == []",
+          "expected_behaviour": "After calling caplog.clear(), caplog.get_records() should return an empty list, matching caplog.records.",
+          "observed_behaviour": "After calling caplog.clear(), caplog.get_records() returns a list containing a LogRecord (e.g., [<LogRecord: ...y, 8, \"test\">]), while caplog.records is empty, causing the assertion to fail."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    },
+    {
+      "instance_id": "pylint-dev__pylint-7277",
+      "repo": "pylint-dev/pylint",
+      "version": "2.15",
+      "python_version": "3.9",
+      "verdict": "fixed_on_main",
+      "confidence": "high",
+      "cost_usd": 0.0314469,
+      "search_credits": 0,
+      "wall_seconds": 167.8458134169923,
+      "failure_cause": "",
+      "error": null,
+      "assessment": {
+        "issue_url": "swe-bench:pylint-dev__pylint-7277",
+        "title": "`pylint` removes first item from `sys.path` when running from `runpy`.",
+        "verdict": "fixed_on_main",
+        "confidence": "high",
+        "confidence_basis": [
+          "both runs agree: fail on the reported side",
+          "both runs agree: pass on the fix side",
+          "no run errored"
+        ],
+        "reproduction": {
+          "repro_test_path": "tests/test_fixedyet_repro.py",
+          "repro_test_code": "import sys\nimport pylint\nimport pytest\n\ndef test_modify_sys_path_should_not_remove_non_placeholder_first_entry():\n    # Save original state\n    original_first = sys.path[0] if sys.path else None\n    test_entry = 'something_unique_for_test'\n    sys.path.insert(0, test_entry)\n    try:\n        pylint.modify_sys_path()\n    except Exception:\n        pass\n    # After modify_sys_path, the first entry should still be our test entry if it was not a placeholder\n    assert sys.path[0] == test_entry, f\"Expected sys.path[0] to be '{test_entry}', but got {sys.path[0]}\"\n    # Cleanup\n    if sys.path and sys.path[0] == test_entry:\n        sys.path.pop(0)\n",
+          "reported_side": {
+            "ref": "684a1d6aa0a6791e20078bc524f97c8906332390",
+            "outcomes": [
+              "fail",
+              "fail"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:6a549f74f32d46ec",
+            "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF                                                                        [100%]\n=================================== FAILURES ===================================\n______ test_modify_sys_path_should_not_remove_non_placeholder_first_entry ______\n\n    def test_modify_sys_path_should_not_remove_non_placeholder_first_entry():\n        # Save original state\n        original_first = sys.path[0] if sys.path else None\n        test_entry = 'something_unique_for_test'\n        sys.path.insert(0, test_entry)\n        try:\n            pylint.modify_sys_path()\n        except Exception:\n            pass\n        # After modify_sys_path, the first entry should still be our test entry if it was not a placeholder\n>       assert sys.path[0] == test_entry, f\"Expected sys.path[0] to be '{test_entry}', but got {sys.path[0]}\"\nE       AssertionError: Expected sys.path[0] to be 'something_unique_for_test', but got /work/repo/tests\nE       assert '/work/repo/tests' == 'something_unique_for_test'\nE         - something_unique_for_test\nE         + /work/repo/tests\n\ntests/test_fixedyet_repro.py:15: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_modify_sys_path_should_not_remove_non_placeholder_first_entry\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.06s",
+            "commit": "684a1d6aa0a6791e20078bc524f97c8906332390",
+            "failure_detail": "E       AssertionError: Expected sys.path[0] to be 'something_unique_for_test', but got /work/repo/tests\nE       assert '/work/repo/tests' == 'something_unique_for_test'\nE         - something_unique_for_test\nE         + /work/repo/tests"
+          },
+          "fix_side": {
+            "ref": "gold_patch",
+            "outcomes": [
+              "pass",
+              "pass"
+            ],
+            "checkpoint_image": "fixedyet-ckpt:1bbb75eaf8af4bc8",
+            "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.00s",
+            "commit": "684a1d6aa0a6791e20078bc524f97c8906332390",
+            "failure_detail": null
+          },
+          "fixing_commit": null,
+          "fixing_commit_source": null,
+          "fixed_in_release": null
+        },
+        "not_reproduced_reason": null,
+        "root_cause": "The function `modify_sys_path` in `pylint/__init__.py` (line 99 as referenced in the issue) unconditionally removes the first element of `sys.path` without checking whether that element is a placeholder (`\"\"`, `\".\"`, or the current working directory). When a caller such as `runpy` inserts a non‑placeholder entry at position 0, this entry is erroneously deleted, leading to the observed import failures.",
+        "evidence": [
+          {
+            "kind": "log",
+            "title": "How the test was written",
+            "url": null,
+            "why": "turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: read_file /work/repo/pylint/__init__.py:90-110 | turn 4: search_code 'def.*pylint_init' in *.py | turn 5: read_file /work/repo/pylint/__init__.py:70-120 | turn 6: run_python -> exit code 0 | turn 7: run_test rejected: SyntaxError: invalid syntax (line 20) | turn 8: run_test -> FAILED | turn 9: run_python -> exit code 0 | turn 10: submit returned once: the test imports nothing from the repository | turn 11: run_test -> FAILED | turn 12: run_test -> FAILED | turn 13: run_python -> exit code 0 | turn 14: submit | submitted: The test imports pylint and calls its modify_sys_path function, which according to the bug report unconditionally removes the first entry of sys.path. By inserting a unique entry that is not a placeholder (empty string, '.', or cwd), the test verifies that the function incorrectly removes it. At the reported version (2.14.5) this assertion fails, reproducing the bug."
+          }
+        ],
+        "next_actions": [
+          "Verify that the fix adding a placeholder check before removal is present in the main branch.",
+          "If the fix has not yet been released, include it in the upcoming pylint release.",
+          "Close the issue as resolved."
+        ],
+        "usage": {
+          "llm_calls": 16,
+          "input_tokens": 87405,
+          "output_tokens": 6144,
+          "cost_usd": 0.0314469,
+          "sandbox_runs": 16,
+          "search_credits": 0,
+          "wall_seconds": 162.49
+        },
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "backport": null,
+        "fix": null,
+        "created_at": "2026-10-22T07:04:00.126711Z",
+        "contract": {
+          "runnable": true,
+          "package": "pylint",
+          "reported_version": "2.14.5",
+          "python_version": "3.11",
+          "setup_steps": [
+            "pip install pylint"
+          ],
+          "code_snippet": "import sys\nimport runpy\n\nsys.path.insert(0, \"something\")\n\nrunpy.run_module('pylint', run_name=\"__main__\", alter_sys=True)",
+          "expected_behaviour": "The first entry of sys.path should remain unchanged if it is not a placeholder for the current directory or empty.",
+          "observed_behaviour": "The first entry of sys.path is removed, causing import failures for extensions that rely on that path entry."
+        },
+        "issue_status": null,
+        "rules": "v2",
+        "rescored": null
+      }
+    }
+  ]
+}

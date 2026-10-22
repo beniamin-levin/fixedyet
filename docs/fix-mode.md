@@ -53,9 +53,24 @@ Three more live runs on 21 October 2026, after the changes in steps 2, 3 and 7 a
 | [RDFLib/rdflib#3602](https://github.com/RDFLib/rdflib/issues/3602) | **verified**, 2 attempts, $0.018, 301 s | verified, with a change to `_val` that SPARQL MIN and MAX also use, and nothing said about it | the same kind of change to `_val`, but the result now lists its other callers: `min(..., key=_val)` and `max(..., key=_val)` in `aggregates.py` and the `ORDER BY` sort in `evaluate.py`. The model had been shown them and still changed `_val`: the list is for the reviewer, who decides |
 | [RDFLib/pySHACL#332](https://github.com/RDFLib/pySHACL/issues/332) | **verified**, 2 attempts, $0.019, 142 s | `already_fixed`, wrongly | fails at the assessment's path as the assessment saw; passes trivially at `test/issues/test_issue_332.py`, so the pull request would carry no test and says why; fixed in `mix_in_ontology` (380 passed, 15 failed before and after) |
 
+### psf/black#5468: a verified fix that was wrong, and the one that went upstream
+
+On 22 October 2026, [psf/black#5468](https://github.com/psf/black/issues/5468) (Black, about 42,000 stars): `requires-python = "~=3.11.0"` made Black infer py311 to py315 instead of py311. The issue names a second case, `~=3.11.7`. No pull request was open (the reporter had closed theirs, #5469, without a review) and Black has no policy against AI-assisted contributions. Local Docker backend, Nemotron 3 Super.
+
+| Run | Reproduction | Fix | Suite without / with | Model cost |
+|---|---|---|---|---|
+| 1 | `open_bug` on `main` (low confidence: the issue gives no version), $0.011, 50 s; the test checks `~=3.11.0` only | **verified** on the first attempt: keep a `~=` specifier whole | 611 passed, 2 skipped / the same | $0.014 |
+| 2, after the change below | `open_bug`, same test | **verified** on the first attempt: strip a `~=` with three or more release parts to `==X.Y` | 611 passed, 2 skipped / the same | $0.009 |
+
+Run 1's fix was **wrong**, and nothing in the sandbox could see it: kept whole, `~=3.11.7` and `~=3.9.2` make Black infer no target version at all, because it matches specifiers against `"3.N"` strings, and `"3.11"` counts as 3.11.0, below 3.11.7. The test checked only `~=3.11.0`, and Black's suite has no case with a patch number. A check by hand against PEP 440 caught it. Since then the agent asserts every failing input the issue names, and the fix prompt asks for a change that is right for every input the issue names, not only the test's (`b4c3d20`). Run 2's change was right for every case tried, including the issue's second one.
+
+An independent review (Claude, run as a separate agent) then compared `main`, the change and what PEP 440 allows over 6,084 single and pairwise specifier sets. The 445 results that changed all come from a `~=` with three or more release parts. It asked for the literal `==X.Y.*` form with a comment (the same results), three more table cases in Black's existing `test_infer_target_version`, a changelog entry wrapped the way Black's prettier hook wants, and a note on Black's stability policy: the minimum inferred version never rises, and for `~=3.7.x` to `~=3.15.x` the inferred feature set is the same as on `main`, so stable formatting cannot change. With those changes, Black's own CI commands in a clean Python 3.12 container gave 596 passed and 1 skipped (IPython is optional), the same as on `main`, and 83 passed in the Jupyter run; black, flake8, isort, mypy and prettier were clean.
+
+It went upstream as the draft pull request [psf/black#5578](https://github.com/psf/black/pull/5578), whose body says which parts the model wrote, which the review changed, and how it was checked. Black's GitHub Actions wait for a maintainer to approve a first-time contributor's run; its pre-commit check passed.
+
 ## Limits
 
-- A verified fix is a fix that the model's own test accepts and the project's suite does not reject. That is evidence, not a review: the test can be too narrow and the suite can miss things. Read the diff as you would a stranger's pull request.
+- A verified fix is a fix that the model's own test accepts and the project's suite does not reject. That is evidence, not a review: the test can be too narrow and the suite can miss things (on psf/black#5468, above, a verified fix broke an input the issue named and the test did not check). Read the diff as you would a stranger's pull request.
 - The model sees a few files, not the whole project. A fix that needs a change in code it was not shown can only be reached through its one request for more files.
 - The other-callers list is a search by name: it can miss a call through another name (an alias, `getattr`, a callback registered elsewhere) and can list a different function with the same name. It shows the reviewer where to look; it proves nothing.
 - An open bug often has a pull request already. Look at the issue's linked pull requests before you open another.

@@ -1,0 +1,120 @@
+{
+  "issue_url": "https://github.com/pallets/jinja/issues/2244",
+  "title": "ChainableUndefined causes `is escaped` test to pass for `undefined` child elements",
+  "verdict": "open_bug",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: fail on the fix side",
+    "the same kind of failure on both sides (AssertionError)",
+    "no run errored"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import inspect\nfrom jinja2 import ChainableUndefined, Environment\n\ndef test_compatibility_escaped():\n    template_string = inspect.cleandoc(\"\"\"\n        {% macro card(params = {}) %}\n            {#- Support description as string (with deprecated options) #}\n            {%- set description = params.description if params.description is mapping else {\n                \"text\": params.description if params.description is string else undefined,\n                \"html\": params.description if params.description is escaped else params.descriptionHtml\n            } -%}\n\n          {{- description.html | safe if description.html else description.text }}\n        {% endmacro %}\n    \"\"\")\n\n    text = inspect.cleandoc(\"\"\"\n        {{ card({\n            \"description\": \"Example description\"\n        }) }}\n    \"\"\")\n\n    text_safe = inspect.cleandoc(\"\"\"\n        {{ card({\n            \"description\": \"<p>Example description</p>\" | safe\n        }) }}\n    \"\"\")\n\n    text_nested = inspect.cleandoc(\"\"\"\n        {{ card({\n            \"description\": {\n                \"text\": \"Example description\"\n            }\n        }) }}\n    \"\"\")\n\n    html_nested = inspect.cleandoc(\"\"\"\n        {{ card({\n            \"description\": {\n                \"html\": \"<p>Example description</p>\"\n            }\n        }) }}\n    \"\"\")\n\n    html_deprecated = inspect.cleandoc(\"\"\"\n        {{ card({\n          \"descriptionHtml\": \"<p>Example description</p>\"\n        }) }}\n    \"\"\")\n\n    env = Environment(\n        undefined=ChainableUndefined,\n        autoescape=True,\n        trim_blocks=True,\n        lstrip_blocks=True,\n    )\n\n    assert (\n        env.from_string(f\"{template_string}\\n{text}\").render()\n        == \"Example description\\n\"\n    )\n\n    assert (\n        env.from_string(f\"{template_string}\\n{text_safe}\").render()\n        == \"<p>Example description</p>\\n\"\n    )\n\n    assert (\n        env.from_string(f\"{template_string}\\n{text_nested}\").render()\n        == \"Example description\\n\"\n    )\n\n    assert (\n        env.from_string(f\"{template_string}\\n{html_nested}\").render()\n        == \"<p>Example description</p>\\n\"\n    )\n\n    assert (\n        env.from_string(f\"{template_string}\\n{html_deprecated}\").render()\n        == \"<p>Example description</p>\\n\"\n    )\n\nif __name__ == \"__main__\":\n    test_compatibility_escaped()\n    print(\"Test passed.\")\n",
+    "reported_side": {
+      "ref": "3.1.6",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:7141fefd1b3648c8",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n            {% macro card(params = {}) %}\n                {#- Support description as string (with deprecated options) #}\n                {%- set description = params.description if params.description is mapping else {\n                    \"text\": params.description if params.description is string else undefined,\n                    \"html\": params.description if params.description is escaped else params.descriptionHtml\n                } -%}\n    \n              {{- description.html | safe if description.html else description.text }}\n            {% endmacro %}\n        \"\"\")\n    \n        text = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": \"Example description\"\n            }) }}\n        \"\"\")\n    \n        text_safe = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": \"<p>Example description</p>\" | safe\n            }) }}\n        \"\"\")\n    \n        text_nested = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": {\n                    \"text\": \"Example description\"\n                }\n            }) }}\n        \"\"\")\n    \n        html_nested = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": {\n                    \"html\": \"<p>Example description</p>\"\n                }\n            }) }}\n        \"\"\")\n    \n        html_deprecated = inspect.cleandoc(\"\"\"\n            {{ card({\n              \"descriptionHtml\": \"<p>Example description</p>\"\n            }) }}\n        \"\"\")\n    \n        env = Environment(\n            undefined=ChainableUndefined,\n            autoescape=True,\n            trim_blocks=True,\n            lstrip_blocks=True,\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{text}\").render()\n            == \"Example description\\n\"\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{text_safe}\").render()\n            == \"<p>Example description</p>\\n\"\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{text_nested}\").render()\n            == \"Example description\\n\"\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{html_nested}\").render()\n            == \"<p>Example description</p>\\n\"\n        )\n    \n>       assert (\n            env.from_string(f\"{template_string}\\n{html_deprecated}\").render()\n            == \"<p>Example description</p>\\n\"\n        )\nE       AssertionError: assert '\\n' == '<p>Example description</p>\\n'\nE         \nE         Strings contain only whitespace, escaping them using repr()\nE         - '<p>Example description</p>\\n'\nE         + '\\n'\n\ntests/test_fixedyet_repro.py:78: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_compatibility_escaped - AssertionEr...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.21s",
+      "commit": "15206881c006c79667fe5154fe80c01c65410679",
+      "failure_detail": "E       AssertionError: assert '\\n' == '<p>Example description</p>\\n'\nE\nE         Strings contain only whitespace, escaping them using repr()\nE         - '<p>Example description</p>\\n'\nE         + '\\n'"
+    },
+    "fix_side": {
+      "ref": "main",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:45d4b03a8afe42fe",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n            {% macro card(params = {}) %}\n                {#- Support description as string (with deprecated options) #}\n                {%- set description = params.description if params.description is mapping else {\n                    \"text\": params.description if params.description is string else undefined,\n                    \"html\": params.description if params.description is escaped else params.descriptionHtml\n                } -%}\n    \n              {{- description.html | safe if description.html else description.text }}\n            {% endmacro %}\n        \"\"\")\n    \n        text = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": \"Example description\"\n            }) }}\n        \"\"\")\n    \n        text_safe = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": \"<p>Example description</p>\" | safe\n            }) }}\n        \"\"\")\n    \n        text_nested = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": {\n                    \"text\": \"Example description\"\n                }\n            }) }}\n        \"\"\")\n    \n        html_nested = inspect.cleandoc(\"\"\"\n            {{ card({\n                \"description\": {\n                    \"html\": \"<p>Example description</p>\"\n                }\n            }) }}\n        \"\"\")\n    \n        html_deprecated = inspect.cleandoc(\"\"\"\n            {{ card({\n              \"descriptionHtml\": \"<p>Example description</p>\"\n            }) }}\n        \"\"\")\n    \n        env = Environment(\n            undefined=ChainableUndefined,\n            autoescape=True,\n            trim_blocks=True,\n            lstrip_blocks=True,\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{text}\").render()\n            == \"Example description\\n\"\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{text_safe}\").render()\n            == \"<p>Example description</p>\\n\"\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{text_nested}\").render()\n            == \"Example description\\n\"\n        )\n    \n        assert (\n            env.from_string(f\"{template_string}\\n{html_nested}\").render()\n            == \"<p>Example description</p>\\n\"\n        )\n    \n>       assert (\n            env.from_string(f\"{template_string}\\n{html_deprecated}\").render()\n            == \"<p>Example description</p>\\n\"\n        )\nE       AssertionError: assert '\\n' == '<p>Example description</p>\\n'\nE         \nE         Strings contain only whitespace, escaping them using repr()\nE         - '<p>Example description</p>\\n'\nE         + '\\n'\n\ntests/test_fixedyet_repro.py:78: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_compatibility_escaped - AssertionEr...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.10s",
+      "commit": "5ef70112a1ff19c05324ff889dd30405b1002044",
+      "failure_detail": "E       AssertionError: assert '\\n' == '<p>Example description</p>\\n'\nE\nE         Strings contain only whitespace, escaping them using repr()\nE         - '<p>Example description</p>\\n'\nE         + '\\n'"
+    },
+    "fixing_commit": null,
+    "fixing_commit_source": null,
+    "fixed_in_release": null
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "The ChainableUndefined class incorrectly reports that an undefined value passes the `is escaped` test. In the macro, the line `\"html\": params.description if params.description is escaped else params.descriptionHtml` therefore selects `params.description` (which is undefined) when `params.description` is missing, leaving `description.html` undefined and causing the final output to be empty instead of falling back to `descriptionHtml`.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "AssertionError: assert '\\n' == '<p>Example description</p>\\n'"
+    },
+    {
+      "kind": "related",
+      "title": "Template Designer Documentation \u2014 Jinja Documentation (3.1.x)",
+      "url": "https://jinja.palletsprojects.com/en/stable/templates",
+      "why": "jinja.palletsprojects.com: names ChainableUndefined, escaped, safe, undefined. ...now possible to configure the Environment with ChainableUndefined to make the default filter work on nested element..."
+    },
+    {
+      "kind": "related",
+      "title": "API \u2014 Jinja Documentation (3.1.x)",
+      "url": "https://jinja.palletsprojects.com/en/stable/api",
+      "why": "jinja.palletsprojects.com: names ChainableUndefined, undefined, parent. ....1.x) Undefined._fail_with_undefined_error() - ChainableUndefined - DebugUndefined - StrictUndefined - make_logging_undefi..."
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: list_dir . | turn 2: list_dir src | turn 3: run_python -> exit code 1 | turn 4: run_test -> FAILED | turn 5: submit | submitted: This test reproduces the bug where `params.description is escaped` incorrectly evaluates to True for an undefined value when using ChainableUndefined. The test includes five assertions; the last one (html_deprecated) fails because the macro incorrectly uses the escaped branch when params.description is undefined, leading to an empty output instead of the expected HTML from descriptionHtml. The failure matches the reported issue."
+    }
+  ],
+  "next_actions": [
+    "Confirm the bug: the attached test fails at the reported version and on the fix side.",
+    "Use the reproduction test as the failing test for a fix."
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 26487,
+    "output_tokens": 3526,
+    "cost_usd": 0.010252679999999998,
+    "sandbox_runs": 9,
+    "search_credits": 1,
+    "wall_seconds": 136.36
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:32:10.389892Z",
+  "contract": {
+    "runnable": true,
+    "package": "jinja2",
+    "reported_version": "3.1.6",
+    "python_version": "3.13.2",
+    "setup_steps": [
+      "pip install jinja2"
+    ],
+    "code_snippet": "import inspect\nfrom jinja2 import ChainableUndefined, Environment\n\ndef test_compatibility_escaped(environment):\n    template_string = \"\"\"\n        {% macro card(params = {}) %}\n            {#- Support description as string (with deprecated options) #}\n            {%- set description = params.description if params.description is mapping else {\n                \"text\": params.description if params.description is string else undefined,\n                \"html\": params.description if params.description is defined and params.description is escaped else params.descriptionHtml\n            } -%}\n\n          {{- description.html | safe if description.html else description.text }}\n        {% endmacro %}\n    \"\"\"\n\n    text = \"\"\"\n        {{ card({\n            \"description\": \"Example description\"\n        }) }}\n    \"\"\"\n\n    text_safe = \"\"\"\n        {{ card({\n            \"description\": \"<p>Example description</p>\" | safe\n        }) }}\n    \"\"\"\n\n    text_nested = \"\"\"\n        {{ card({\n            \"description\": {\n                \"text\": \"Example description\"\n            }\n        }) }}\n    \"\"\"\n\n    html_nested = \"\"\"\n        {{ card({\n            \"description\": {\n                \"html\": \"<p>Example description</p>\"\n            }\n        }) }}\n    \"\"\"\n\n    html_deprecated = \"\"\"\n        {{ card({\n          \"descriptionHtml\": \"<p>Example description</p>\"\n        }) }}\n    \"\"\"\n\n    assert (\n        environment.from_string(f\"{template_string}\\n{text}\").render()\n        == \"Example description\\n\"\n    )\n\n    assert (\n        environment.from_string(f\"{template_string}\\n{text_safe}\").render()\n        == \"<p>Example description</p>\\n\"\n    )\n\n    assert (\n        environment.from_string(f\"{template_string}\\n{text_nested}\").render()\n        == \"Example description\\n\"\n    )\n\n    assert (\n        environment.from_string(f\"{template_string}\\n{html_nested}\").render()\n        == \"<p>Example description</p>\\n\"\n    )\n\n    assert (\n        environment.from_string(f\"{template_string}\\n{html_deprecated}\").render()\n        == \"<p>Example description</p>\\n\"\n    )\n\nif __name__ == \"__main__\":\n    env = Environment(\n        undefined=ChainableUndefined,\n        autoescape=True,\n        trim_blocks=True,\n        lstrip_blocks=True,\n    )\n    print(\"Running test...\\n\")\n    test_compatibility_escaped(env)\n    print(\"Test passed.\")",
+    "expected_behaviour": "The test should fail on the assertion involving `params.description` because `is escaped` incorrectly returns true for undefined child elements, causing the wrong branch to be taken in the template rendering.",
+    "observed_behaviour": "The test fails because `params.description is escaped` evaluates to true when it should be false for an undefined value, leading to incorrect template logic and causing the assertion to not match the expected output."
+  },
+  "issue_status": {
+    "state": "open",
+    "state_reason": null,
+    "closed_at": null,
+    "closed_by": null,
+    "closed_by_url": null,
+    "linked_prs": [
+      {
+        "number": 2259,
+        "url": "https://github.com/pallets/jinja/pull/2259",
+        "title": "Prevent ChainableUndefined from testing as escaped",
+        "state": "open",
+        "draft": false,
+        "merged_at": null,
+        "closes": true
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:32:04.767908Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

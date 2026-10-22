@@ -1,6 +1,6 @@
 # Evaluation
 
-This page says how FixedYet is measured on SWE-bench, what counts as a success, what the numbers cannot tell you, and how to rerun them. The results sections at the end are the measured runs, copied from `eval/results/`: rules v2 first, then the first measurement (rules v1), kept as history.
+This page says how FixedYet is measured on SWE-bench, what counts as a success, what the numbers cannot tell you, and how to rerun them. The results sections at the end are the measured runs, copied from `eval/results/`: the final agent of 22 October 2026 first, then rules v2 and the first measurement (rules v1), kept as history.
 
 ## What is measured
 
@@ -139,6 +139,61 @@ Behaviour worth knowing:
 - **Contamination.** Nemotron may have seen SWE-bench issues and their fixes during training. A high score on these instances partly measures recall. The live runs on open issues, which have no public fix yet, are the check against this, and the results below keep the two apart.
 - **Environment gap.** See above: plain editable installs against SWE-bench's pinned images. The fix side reinstalls the project after the gold patch is applied, and a reinstall can change dependency versions, so the two sides are only guaranteed to share one environment when the baseline already satisfies what the project declares. That is how the flask-5014 bug below showed up: the base side errored while the fix side ran.
 - **A laptop's Docker, not the demo's server.** The SWE-bench numbers were measured on a local Docker daemon (Colima on an Apple-silicon Mac). The live demo uses the same Docker backend and the same scripts on a 1 GB Oracle Cloud VM, so its wall times differ. The Nebius Sandboxes backend is implemented but has never run against the live service: no number on this page comes from it.
+
+## Results, the agent of 22 October 2026
+
+**Three full runs of the 15 instances on the final agent (commit `cdde69b`): 13, 12 and 11 reproduced** (87%, 80% and 73%; mean 12 of 15). 14 of the 15 instances were reproduced in at least one of the three runs; pylint-4970 never was. Same setup as before: SWE-bench Verified, local Docker (Colima on an Apple-silicon Mac), Nemotron 3 Super with Nemotron 3 Nano for intake, concurrency 2.
+
+| Run | Results file | `fixed_on_main` | Wrong `open_bug` (high confidence) | `not_reproduced` | `inconsistent` | `unsupported` | Mean / median cost | Mean wall time | Total |
+|---|---|---|---|---|---|---|---|---|---|
+| F1 | `20261022T080111Z` | **13** | 0 (0) | 1 | 0 | 1 | $0.032 / $0.025 | 1m43s | $0.48 |
+| F2 | `20261022T081434Z` | **12** | 1 (1) | 2 | 0 | 0 | $0.041 / $0.043 | 1m11s | $0.62 |
+| F3 | `20261022T082425Z` | **11** | 2 (2) | 2 | 0 | 0 | $0.026 / $0.021 | 1m01s | $0.38 |
+
+| Instance | F1 | F2 | F3 |
+|---|---|---|---|
+| requests-1921, pytest-6202, flask-5014, pytest-7432, pytest-7571, requests-2931, pylint-6386, requests-5414, pytest-10051 | reproduced | reproduced | reproduced |
+| pylint-4604 | `unsupported`: the test imports `ImportChecker`, which does not exist | reproduced | reproduced |
+| requests-2317 | reproduced | `open_bug`: the test asserts that a `bytes` method becomes `"GET"` on the prepared request, which the fix does not do | reproduced |
+| pylint-4970 | `not_reproduced` | `not_reproduced` | `not_reproduced` |
+| pytest-7982 | reproduced | reproduced | `not_reproduced`: the symlink layout of the test is collected at the base commit too |
+| pylint-6528 | reproduced | `not_reproduced` | `open_bug`: the test asks for the default ignore of `.a` that the issue wrongly assumes |
+| pylint-7277 | reproduced | reproduced | `open_bug`: parametrized over three placeholders, one of which the fix does not handle |
+
+What changed in the agent since run C, each from a miss in these runs or in a showcase (the commits are on `main`, 22 October 2026):
+
+| Change | The miss behind it |
+|---|---|
+| A submit whose last run passed, or stopped before its assertions, is sent back once; a test that imports nothing from the repository is sent back once | pylint-4604 (a test that could not be collected), requests-5414 (a test of the `idna` package, not of requests) |
+| A first test is due by two fifths of the turns; a `run_python` tool to look at real values before asserting, refused until a first test has run | pylint-4970 (its only test ran on turn 20 of 20); one `run_test` call in nine was a plain script, refused |
+| The main model checks the small model's "not runnable" | requests-2317 (`needs_info` in run C) |
+| At the turn limit, the last test that failed is used when the last run errored or passed | requests-2317 (turn 19 failed, turn 20 could not be collected) |
+| Any request to a non-local host gets a note; the test goes through the public call when the issue quotes internal code | requests-2931 (a PUT to a real host), requests-2317 (a test of the `builtin_str` helper alone) |
+| The test asserts every failing input the issue names | psf/black#5468 (see [fix mode](fix-mode.md)) |
+| An `inconsistent` result gets one more, independent test, and that test's verdict is reported, whatever it is | most `inconsistent` results were tests with a wrong expected value (a log level of 30 where the issue says 0) |
+
+Read the numbers with these caveats:
+
+- **These 15 instances are also where the changes came from.** Each change is a general rule, not a special case for an instance, but the same 15 issues both motivated and measured them, so this is not a held-out score. The live check on ten recent issues (below) and the psf/black fix are the out-of-sample evidence.
+- **The spread between runs is large.** On the same agent, runs differ by two instances (11 to 13); on the intermediate agents of the same day they ranged from 9 to 11. One instance is 6.7 points.
+- **Wrong open bugs remain.** Three of the 45 instance runs ended in `open_bug` at high confidence (requests-2317 once, pylint-6528 once, pylint-7277 once): a test that asks for more than the fix delivers fails the same way on both sides, which no rule over two logs can tell from a real open bug.
+- **The second test costs more.** An `inconsistent` first test adds a second agent run; the mean cost per issue stayed at about $0.03.
+
+### Development runs of 22 October 2026
+
+Every run is kept in `eval/results/`. These ran on intermediate commits that a later change replaced, and are not in the numbers above.
+
+| Run | Commit | Reproduced | Why it was replaced |
+|---|---|---|---|
+| `20261022T053836Z` | `e7969d0` | 10 of 15 | first agent changes; the misses showed the scripts sent as tests (requests-5414: six refusals) |
+| `20261022T055757Z` | `987d2d9` (`run_python`) | 7 of the first 10, stopped | stopped to add the import check, the network note and the turn-limit fallback |
+| `20261022T061444Z` | `df12609` | 11 of 15, 3 `unsupported` | a regression of `run_python`: three instances ran scripts for all 20 turns and wrote no test (fixed in `85a9536`) |
+| `20261022T062307Z` | `df12609` | 6 of the first 8, stopped | the same regression |
+| `20261022T062753Z` | `85a9536` | 11 of the first 14, stopped | stopped when psf/black#5468 showed the one-input test |
+| `20261022T065113Z`, `070406Z`, `071715Z` | `194fc16` | 10, 9, 11 | requests-2317 tested the quoted helper, requests-2931 sent a request to example.com |
+| `20261022T073005Z`, `073855Z`, `074708Z` | `cb1c27b` | 10, 10, 10 | most misses were `inconsistent` tests with a wrong expected value |
+
+Total model spend of the day's evaluation, development runs included: about $6.55 at list price.
 
 ## Results, rules v2
 
@@ -330,6 +385,41 @@ I read the 22 reproduced tests (12 in A, 10 in B) against their issues and the s
 - pylint-7277 (A) calls `modify_sys_path()` directly instead of going through `runpy` as the issue does. It exercises the line the issue points at. B follows the issue.
 - pytest-10051 (A, B), pytest-7571 (A, B) and requests-2931 (A) are the issue's own snippet with an assertion added, so for those the agent mostly had to transcribe.
 
+### Audit of reproduced tests, run C (`20261021T210757Z`)
+
+I read the 11 reproduced tests of run C (`fixed_on_main`, Nemotron 3 Super) against their issues and the stored logs. **This was done by Claude, an AI. No person has audited them yet**, so treat it as a first pass.
+
+How the issues were found. `assessment.issue_url` holds `swe-bench:<instance id>`, not a GitHub URL, and the instance number is the fixing pull request, not the issue. I took the issue number from "Fixes #N" in each pull request body and read the issue with `gh api repos/OWNER/REPO/issues/N` (read-only). The GitHub text is identical to the SWE-bench `problem_statement` the agent was given (compared after whitespace normalisation). Issue numbers: requests-1921 -> #1920, requests-2931 -> #2930, requests-5414 -> #5367, pytest-6202 -> #6189, pytest-7571 -> #7569, pytest-7982 -> #7981, pytest-10051 -> #9877, flask-5014 -> #5010, pylint-6386 -> #6385, pylint-6528 -> #6471, pylint-7277 -> #7231.
+
+On every instance the test failed on the base commit in both runs and passed with the gold patch in both runs, and none of the 11 needs the network.
+
+| Instance | Exercises the issue? | Base log shows the symptom? | Caveat |
+|---|---|---|---|
+| psf__requests-1921 | yes: session header set to `None`, then a request | yes: `'Accept-Encoding': None` in the prepared headers | mocks `session.send`, so it checks the prepared request, not the wire; the issue's snippet plus a mock |
+| pytest-dev__pytest-6202 | yes: `..[` parameter id, headline of the failure report | yes: captured stdout shows `test_boo[.[]` | the issue's snippet run through `testdir`, plus a substring assertion |
+| pallets__flask-5014 | yes: `Blueprint('', __name__)` | yes: `DID NOT RAISE <class 'ValueError'>` | the issue asks for a `ValueError`; it reports no crash, so the "symptom" is the missing error |
+| pytest-dev__pytest-7571 | yes: `set_level` in one test, handler level in the next | yes: `Expected level 0, got 42` | depends on test order; the issue's own snippet with an assertion added |
+| psf__requests-2931 | yes, up to the point of sending: `Request('PUT', ..., data=bytes).prepare()` | yes: `UnicodeDecodeError` raised from `to_native_string` | no assertion; passes if nothing raises |
+| pylint-dev__pylint-6386 | yes: `pylint <file> -v` | yes: `argument --verbose/-v: expected one argument`, the issue's own line | negative assertion only; the agent hit its turn limit without submitting |
+| pytest-dev__pytest-7982 | yes: symlink to a directory inside a test directory | yes: exit code 5, `no tests ran` | runs `pytest.main` inside the outer pytest |
+| pylint-dev__pylint-6528 | yes: `--recursive=y --ignore=.a .` | yes: `.a/foo.py:1:0: ...` is still reported | covers `--ignore` only; hard-coded sandbox path |
+| psf__requests-5414 | yes: `requests.get("http://.example.com")` | different exception class: `LocationParseError`, the issue says `UnicodeError` | exception class differs from the issue's; no network needed (first caveat below) |
+| pytest-dev__pytest-10051 | yes: `get_records("call")` against `records` after `clear()` | yes: `assert [<LogRecord: ...y, 8, "test">] == []`, the issue's own line | the issue's snippet copied, comment included |
+| pylint-dev__pylint-7277 | yes, the line the issue points at: calls `modify_sys_path()` directly, not through `runpy` | yes: `sys.path[0]` is `/work/repo/tests`, `"something"` is gone | direct call instead of `runpy`, as in run A |
+
+Caveats found:
+
+- requests-5414: the base-side log ends in `urllib3.exceptions.LocationParseError: Failed to parse: '.example.com', label empty or too long`, raised in urllib3's `create_connection`. The issue reports `UnicodeError: encoding with 'idna' codec failed`; the installed urllib3 wraps that error. The cause is the same (the empty label) and the expected result is the same (`InvalidURL`), but the exception class in the log is not the one the issue quotes. The harness itself bounced one submit at turn 5 with "the failure lacks UnicodeError", and the stored log still shows `LocationParseError`. The idna check runs before any DNS lookup, so no network is needed. The test is the issue's snippet in `pytest.raises(InvalidURL)` with the message taken from the issue's "Expected Result" (`URL has an invalid label.`), checked by equality, so it is not vacuous.
+- requests-2931: unlike run A, it does not call the live `httpbin.org`; it only prepares the request, so it needs no network. It has no assertion. It passes with the patch because `prepare()` raises nothing, and a fix that returned a mangled body would pass too. The base log shows `UnicodeDecodeError: 'ascii' codec can't decode byte 0xc3` inside `to_native_string`, which matches the issue's title; the issue itself gives no traceback.
+- requests-1921: the test replaces `session.send`, so the adapter and the wire are never reached. The base value in the prepared headers is the Python `None`, which `http.client` later turns into the string "None" as the issue says. The second assertion (`val != 'None'`) cannot fail on the base, because the value is `None`, not the string; the first assertion does the work.
+- pytest-7571: `test_bar` fails only if `test_foo` ran before it in the same process. Run alone, deselected, or reordered by a plugin, it passes. That order dependence is the bug itself (a leak across tests), and the issue's snippet has it too, but the test would be vacuous without it.
+- pytest-10051, pytest-7571, pytest-6202, requests-1921 and requests-5414 are the issue's own snippet with an assertion (and a mock, `pytest.raises` or `testdir`) added, so the agent mostly had to transcribe. pytest-10051 is copied line for line, including the issue's trailing comment `# fails: assert [<LogRecord: ...y, 8, "test">] == []`, and the log reproduces that same text. pylint-6386 and pylint-6528 run the issue's command line. flask-5014 has no snippet in the issue.
+- pylint-6386: the only assertion is that `"expected one argument"` is absent from stderr. With the patch it would also pass if pylint died for some other reason, and the exit code and the verbose output are not checked. The agent used all 20 turns without submitting (two submits rejected as "code differs from the last run"), and the harness took the last test run, so this test was not a deliberate submission.
+- pytest-7982: `pytest.main` is run in-process inside the outer pytest run, so it shares `sys.modules` and plugins with it. It still discriminates (exit 5, `no tests ran`, on the base; exit 0 with the patch) and the rootdir is the temp directory, so no repo config leaks in. The agent's first three versions passed on the base (turns 4, 5 and 8) before it found one that failed. The failure is the symlink being skipped, as the issue says.
+- pylint-6528: it tests only `--ignore=.a`, one of the issue's four commands. It does not demand that `.a/foo.py` is skipped with no ignore option, the wrong expectation that made A and B `open_bug`, and the gold patch fixes the three explicit options through one helper, so test and patch agree. The `'bar.py' in out` check stops it passing if pylint prints nothing. It hard-codes `PYTHONPATH=/work/repo`, which only exists in the sandbox. It also writes `'# pass\\n'` (a literal backslash-n), so each file is one comment line with no final newline (the log shows `C0304 missing-final-newline`) instead of the issue's `import re`; this does not change the result.
+- pylint-7277: it calls `pylint.modify_sys_path()` directly instead of `runpy.run_module('pylint', run_name="__main__", alter_sys=True)` as the issue does (the same choice as run A). It exercises the line the issue points at. The base log is good evidence this time: `sys.path[0]` is `/work/repo/tests`, so the inserted `"something"` was popped. Run B's log held only help text.
+- pallets__flask-5014: the issue is a request for validation, not a crash report. The test is the one-line call `Blueprint('', __name__)` inside `pytest.raises(ValueError)` with no `match`, so any `ValueError` would satisfy it. The base builds the Blueprint without raising, so it does discriminate.
+
 ### Live check on real issues
 
 On 21 October 2026, ten real issues from ten pure-Python projects were run on the live demo (Docker backend on the 1 GB Oracle VM, Nemotron 3 Super). All ten were opened between July and October 2026. They were picked at random from recent bug reports, not from SWE-bench, and nobody had marked a fix for FixedYet to find. Each run took 1.5 to 5 minutes, and the ten together cost about $0.19 in model spend. The "Correct?" column is a judgement made afterwards against the issue thread and the project's history, by an AI (Claude), not by a person.
@@ -349,11 +439,22 @@ On 21 October 2026, ten real issues from ten pure-Python projects were run on th
 
 **First pass: 6 correct, 2 wrong, 2 without a verdict.** The two `unsupported` runs were environment failures, not model failures. python-dotenv's tests need its `cli` extra (click), which was never installed. jinja ships a requirements file for Python 3.7 that downgraded `trio` below what Python 3.13 can import. Both were fixed in general terms (`6a5d38d`, `a952ec1`: a project's own extras, other Pythons' requirements files skipped, a conftest that cannot load repaired from the project's own declared requirements), and both issues were then rerun on the demo. **After those fixes: 8 correct and 2 wrong out of 10.** Both wrong verdicts are `open_bug` from a wrong model-written test, the same failure mode as the SWE-bench misses. Re-scored by rules v2 (above, no model call), both become `inconsistent`, so none of the ten is wrong any more, and none of the eight correct verdicts changed.
 
+**Rerun on the final agent, 22 October 2026** (commit `cdde69b`, deployed on the demo; all ten again, one after another, 29 minutes and $0.15 in all):
+
+| Issue | Verdict | Correct? |
+|---|---|---|
+| werkzeug#3312, packaging#1315, isort#2723, parse#262, python-dotenv#697 | `fixed_on_main`, high; the fixing commit found for each (`7ad32e8`, `0a85b41`, `986b53f`, `4f76a3e`, `e0310e5`) | yes |
+| marshmallow#3072, dateutil#1588, jinja#2244 | `open_bug`, high | yes: all three still open, each with an unmerged pull request |
+| pyparsing#693 | `fixed_on_main`, **low**: "the reported version is not in the history of master" | the test is right this time (the issue's snippet: the comment leaks into the result at 3.3.3 and not on master), but 3.3.3 was released from its own branch, `3.3.3_work`, which master never merged, so nothing was fixed on master. That is what the new history check (`e21fd10`) says; the issue is still open |
+| pytest-mock#639 | `inconsistent`, low, after a second test | no: fixed the day it was opened. The bug is in the wording of the failure message, and both tests asserted only that the call fails, not what the message says |
+
+**8 of 10 correct, the other two flagged at low confidence with the reason, none wrong at high confidence.** The ten assessments are saved in `eval/live/20261022/`. pyparsing#693 is the run that led to the history check: before it, the same result said `fixed_on_main` at high confidence.
+
 Two of the open bugs went on to [fix mode](../README.md#fix-mode-open-bugs-to-verified-draft-prs), and jinja#2244 was verified on the demo server. One fixed-on-main report went on to a backport: pydantic#13991 was backported to `v2.14-fixes` and opened upstream as [pydantic/pydantic#14043](https://github.com/pydantic/pydantic/pull/14043).
 
 ### Contamination caveat
 
-Nemotron may have seen these public issues, their fixing pull requests and SWE-bench itself during training. Several of the reproduced tests are the issue's own snippet (pytest-10051, pytest-7571), which any model can transcribe whether or not it remembers the fix. These 22 reproductions therefore partly measure recall and snippet-copying, not the ability to reproduce a bug nobody has fixed yet. The live check on real issues above is the counterweight: ten recent issues, none from SWE-bench, gave 8 correct verdicts out of 10 after the environment fixes, with the same failure mode (a wrong test, read as an open bug).
+Nemotron may have seen these public issues, their fixing pull requests and SWE-bench itself during training. Several of the reproduced tests are the issue's own snippet (pytest-10051, pytest-7571), which any model can transcribe whether or not it remembers the fix. These 22 reproductions therefore partly measure recall and snippet-copying, not the ability to reproduce a bug nobody has fixed yet. The live check on real issues above is the counterweight: ten recent issues, none from SWE-bench, gave 8 correct verdicts out of 10 after the environment fixes, and on the final agent 8 of 10 with the other two flagged at low confidence.
 
 ### Development runs
 

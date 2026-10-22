@@ -1,0 +1,146 @@
+{
+  "issue_url": "https://github.com/pytest-dev/pytest-mock/issues/639",
+  "title": "assert_has_calls/assert_has_awaits introspection pairs the wrong calls",
+  "verdict": "inconsistent",
+  "confidence": "low",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: fail on the fix side",
+    "the failure text changes between the sides (addresses, durations, line numbers and temporary paths ignored), so the fix side may not show the same bug",
+    "failure at the reported version: AssertionError: Calls not found.",
+    "failure on the fix side: (no further failure line)",
+    "the first test was inconsistent; this verdict comes from a second, independent test written from the issue alone"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import pytest\n\ndef test_alignment(mocker):\n    m = mocker.stub()\n    m(1); m(2); m(3)\n    m.assert_has_calls([mocker.call(2), mocker.call(4)])\n",
+    "reported_side": {
+      "ref": "v3.16.1",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:1d4ef9cdb3434899",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\n[...]\n        sequential. There can be extra calls before or after the\n        specified calls.\n    \n        If `any_order` is True then the calls can be in any order, but\n        they must all appear in `mock_calls`.\"\"\"\n        expected = [self._call_matcher(c) for c in calls]\n        cause = next((e for e in expected if isinstance(e, Exception)), None)\n        all_calls = _CallList(self._call_matcher(c) for c in self.mock_calls)\n        if not any_order:\n            if expected not in all_calls:\n                if cause is None:\n                    problem = 'Calls not found.'\n                else:\n                    problem = ('Error processing expected calls.\\n'\n                               'Errors: {}').format(\n                                   [e if isinstance(e, Exception) else None\n                                    for e in expected])\n>               raise AssertionError(\n                    f'{problem}\\n'\n                    f'Expected: {_CallList(calls)}'\n                    f'{self._calls_repr(prefix=\"  Actual\").rstrip(\".\")}'\n                ) from cause\nE               AssertionError: Calls not found.\nE               Expected: [call(2), call(4)]\nE                 Actual: [call(1), call(2), call(3)]\n\n/usr/local/lib/python3.11/unittest/mock.py:976: AssertionError\n\nDuring handling of the above exception, another exception occurred:\n\nmocker = <pytest_mock.plugin.MockerFixture object at 0x7b0d6d9a03d0>\n\n    def test_alignment(mocker):\n        m = mocker.stub()\n        m(1); m(2); m(3)\n>       m.assert_has_calls([mocker.call(2), mocker.call(4)])\nE       AssertionError: Calls not found.\nE       Expected: [call(2), call(4)]\nE         Actual: [call(1), call(2), call(3)]\nE       \nE       pytest introspection follows:\nE       \nE       Args:\nE       assert (1,) == (2,)\nE         \nE         At index 0 diff: 1 != 2\nE         Use -v to get more diff\nE       Args:\nE       assert (2,) == (4,)\nE         \nE         At index 0 diff: 2 != 4\nE         Use -v to get more diff\nE       Args:\nE       assert (3,) == ()\nE         \nE         Left contains one more item: 3\nE         Use -v to get more diff\n\ntests/test_fixedyet_repro.py:6: AssertionError\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.11/site-packages/_pytest/config/__init__.py:1464\n  /usr/local/lib/python3.11/site-packages/_pytest/config/__init__.py:1464: PytestConfigWarning: Unknown config option: asyncio_mode\n  \n    self._warn_or_fail_if_strict(f\"Unknown config option: {key}\\n\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_alignment - AssertionError: Calls n...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 warning in 0.30s",
+      "commit": "fab730daf4a4cfc260d8656b0467503131535a00",
+      "failure_detail": "E               AssertionError: Calls not found.\nE               Expected: [call(2), call(4)]\nE                 Actual: [call(1), call(2), call(3)]\nE       AssertionError: Calls not found.\nE       Expected: [call(2), call(4)]\nE         Actual: [call(1), call(2), call(3)]\nE\nE       pytest introspection follows:\nE\nE       Args:\nE       assert (1,) == (2,)\nE\nE         At index 0 diff: 1 != 2\nE         Use -v to get more diff\nE       Args:\nE       assert (2,) == (4,)\nE\nE         At index 0 diff: 2 != 4\nE         Use -v to get more diff\nE       Args:\nE       assert (3,) == ()\nE\nE         Left contains one more item: 3\nE         Use -v to get more diff"
+    },
+    "fix_side": {
+      "ref": "main",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:4764486f83fe496a",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n________________________________ test_alignment ________________________________\n\nmocker = <pytest_mock.plugin.MockerFixture object at 0x71c2402da710>\n\n    def test_alignment(mocker):\n        m = mocker.stub()\n        m(1); m(2); m(3)\n>       m.assert_has_calls([mocker.call(2), mocker.call(4)])\nE       AssertionError: Calls not found.\nE       Expected: [call(2), call(4)]\nE         Actual: [call(1), call(2), call(3)]\n\ntests/test_fixedyet_repro.py:6: AssertionError\n=============================== warnings summary ===============================\n../../usr/local/lib/python3.11/site-packages/_pytest/config/__init__.py:1464\n  /usr/local/lib/python3.11/site-packages/_pytest/config/__init__.py:1464: PytestConfigWarning: Unknown config option: asyncio_mode\n  \n    self._warn_or_fail_if_strict(f\"Unknown config option: {key}\\n\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_alignment - AssertionError: Calls n...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 1 warning in 0.02s",
+      "commit": "0286fc5a62d05340093ea5c32eaa1de02130f8d2",
+      "failure_detail": "E       AssertionError: Calls not found.\nE       Expected: [call(2), call(4)]\nE         Actual: [call(1), call(2), call(3)]"
+    },
+    "fixing_commit": null,
+    "fixing_commit_source": null,
+    "fixed_in_release": null
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "Likely: the test failure is being reported differently on the two sides because the pytest-mock assertion introspection (which shows the pairwise argument comparisons) is present in the reported-side output but missing in the fix-side output, indicating a change in how the assertion failure is formatted or captured between the environments.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "AssertionError: Calls not found."
+    },
+    {
+      "kind": "similar",
+      "title": "Incorrect introspection for MagicMock.assert_has_calls \u00b7 Issue #234 \u00b7 pytest-dev/pytest-mock \u00b7 GitHub",
+      "url": "https://github.com/pytest-dev/pytest-mock/issues/234",
+      "why": "github.com: names assert_has_calls, call. Incorrect introspection for MagicMock.assert_has_calls \u00b7 Issue #234 \u00b7 pytest-dev/pytest-mock \u00b7 GitHub reopened this on Mar 30, 2021 5. ### nicoddemusc"
+    },
+    {
+      "kind": "related",
+      "title": "Changelog - pytest-mock documentation",
+      "url": "https://pytest-mock.readthedocs.io/en/latest/changelog.html",
+      "why": "pytest-mock.readthedocs.io: names assert_has_calls, call. ...de-toc: ## Releases\u00b6 ### UNRELEASED\u00b6 #617: Fixed assert_has_calls raising ValueError instead of AssertionError (or showing misleading in..."
+    },
+    {
+      "kind": "related",
+      "title": "Python pytest-mock assert_has_calls",
+      "url": "https://stackoverflow.com/questions/59839192/python-pytest-mock-assert-has-calls",
+      "why": "stackoverflow.com: names assert_has_calls, call. Python pytest-mock assert_has_calls Anton Menshov 2,324 15 15 gold badges 38 38 silver badges 59 59 bronze badges answered Jan 21, 2020 at 12:29 Image"
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: run_test -> FAILED | turn 2: submit returned once: the test imports nothing from the repository | turn 3: submit | submitted: The test uses the mocker fixture from pytest-mock, which exercises the buggy assert_has_calls introspection. It fails with the mismatched args shown in the issue. | turn 1: list_dir / | turn 2: list_dir /work/repo | turn 3: list_dir /work/repo/src | turn 4: run_test -> FAILED | turn 5: submit returned once: the test imports nothing from the repository | turn 6: submit | submitted: The test uses the mocker fixture provided by pytest-mock to create a stub mock, make calls, and then assert_has_calls with a non-contiguous expected sequence. This reproduces the bug where the failure introspection mismatches calls positionally from the start, producing the exact assertion error shown in the issue."
+    },
+    {
+      "kind": "log",
+      "title": "The first test, inconsistent, replaced by a second one",
+      "url": null,
+      "why": "Inconsistent (both runs agree: fail on the reported side; both runs agree: fail on the fix side; the failure text changes between the sides (addresses, durations, line numbers and temporary paths ignored), so the fix side may not show the same bug; failure at the reported version: AssertionError: Calls not found.; failure on the fix side: (no further failure line)).\n\nimport pytest\n\ndef test_alignment(mocker):\n    m = mocker.stub()\n    m(1); m(2); m(3)\n    m.assert_has_calls([mocker.call(2), mocker.call(4)])\n"
+    }
+  ],
+  "next_actions": [
+    "Rerun the test on both the reported and fix sides with identical pytest and pytest-mock versions to see if the failure output becomes consistent.",
+    "Check the installed versions of pytest and pytest-mock in each environment and align them if they differ.",
+    "Ensure that any test configuration or plugins that affect assertion rewriting or output formatting are the same on both sides.",
+    "If the failure continues to differ only in the introspection detail, examine recent changes to pytest-mock's assert_has_calls implementation that might affect failure reporting."
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 33457,
+    "output_tokens": 2281,
+    "cost_usd": 0.01172634,
+    "sandbox_runs": 14,
+    "search_credits": 1,
+    "wall_seconds": 175.04
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:24:25.967766Z",
+  "contract": {
+    "runnable": true,
+    "package": "pytest-mock",
+    "reported_version": "3.16.1",
+    "python_version": "3.11",
+    "setup_steps": [
+      "pip install pytest-mock",
+      "pip install pytest"
+    ],
+    "code_snippet": "def test_alignment(mocker):\n    m = mocker.stub()\n    m(1); m(2); m(3)\n    m.assert_has_calls([mocker.call(2), mocker.call(4)])",
+    "expected_behaviour": "The assertion should fail because the expected calls [call(2), call(4)] are not present in the actual calls [call(1), call(2), call(3)].",
+    "observed_behaviour": "AssertionError: Calls not found.\nExpected: [call(2), call(4)]\n  Actual: [call(1), call(2), call(3)]\n\nArgs:\nassert (1,) == (2,)\nArgs:\nassert (2,) == (4,)\nArgs:\nassert (3,) == ()"
+  },
+  "issue_status": {
+    "state": "closed",
+    "state_reason": "completed",
+    "closed_at": "2026-10-17T16:11:26Z",
+    "closed_by": "#643",
+    "closed_by_url": "https://github.com/pytest-dev/pytest-mock/pull/643",
+    "linked_prs": [
+      {
+        "number": 643,
+        "url": "https://github.com/pytest-dev/pytest-mock/pull/643",
+        "title": "Drop introspection from assert_has_calls and assert_has_awaits",
+        "state": "merged",
+        "draft": false,
+        "merged_at": "2026-10-17T16:11:24Z",
+        "closes": true
+      },
+      {
+        "number": 642,
+        "url": "https://github.com/pytest-dev/pytest-mock/pull/642",
+        "title": "Only show introspection for failures about the call arguments",
+        "state": "merged",
+        "draft": false,
+        "merged_at": "2026-10-17T16:00:17Z",
+        "closes": false
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:24:19.971076Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

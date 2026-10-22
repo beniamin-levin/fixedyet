@@ -1,0 +1,128 @@
+{
+  "issue_url": "https://github.com/pallets/werkzeug/issues/3312",
+  "title": "host_is_trusted rejects a bracketed IPv6 address that is in trusted_hosts since 3.1.9",
+  "verdict": "fixed_on_main",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: pass on the fix side",
+    "no run errored"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import pytest\nfrom werkzeug.sansio.utils import host_is_trusted\n\ndef test_host_is_trusted_ipv6_bracketed_with_port():\n    # Should return True when host matches trusted entry even with port\n    assert host_is_trusted(\"[::1]:5017\", [\"[::1]\"]) is True\n    assert host_is_trusted(\"[::1]\", [\"[::1]\"]) is True\n",
+    "reported_side": {
+      "ref": "3.1.9",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:2a491904a72d4f07",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n________________ test_host_is_trusted_ipv6_bracketed_with_port _________________\n\n    def test_host_is_trusted_ipv6_bracketed_with_port():\n        # Should return True when host matches trusted entry even with port\n>       assert host_is_trusted(\"[::1]:5017\", [\"[::1]\"]) is True\nE       AssertionError: assert False is True\nE        +  where False = host_is_trusted('[::1]:5017', ['[::1]'])\n\ntests/test_fixedyet_repro.py:6: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_host_is_trusted_ipv6_bracketed_with_port\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.22s",
+      "commit": "6604c3b8784ecc7cf5ac0b7412d916989b4c7d45",
+      "failure_detail": "E       AssertionError: assert False is True\nE        +  where False = host_is_trusted('[::1]:5017', ['[::1]'])"
+    },
+    "fix_side": {
+      "ref": "main",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:9913dabbb7944815",
+      "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.09s",
+      "commit": "665e760ca6325a348ce03e5cf780b17e4be01848",
+      "failure_detail": null
+    },
+    "fixing_commit": "7ad32e85d0500f3c961534350369a0eb3c39daf9",
+    "fixing_commit_source": "bisect",
+    "fixed_in_release": null
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "In werkzeug/sansio/utils.py the function host_is_trusted extracts the hostname from the request using a regex group, leaving bracketed IPv6 literals intact (e.g., '[::1]'), but then processes each trusted entry by cutting off everything after the first colon via ref.partition(':')[0] (line 72). This turns a trusted entry like '[::1]' into '[' causing a mismatch and returning False.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "AssertionError: assert False is True"
+    },
+    {
+      "kind": "similar",
+      "title": "Regression in 3.1.7: Host is not trusted. \u00b7 Issue #3137 \u00b7 pallets/werkzeug \u00b7 GitHub",
+      "url": "https://github.com/pallets/werkzeug/issues/3137",
+      "why": "github.com: names Host, hostname, partition. Regression in 3.1.7: Host is not trusted. \u00b7 Issue #3137 \u00b7 pallets/werkzeug \u00b7 GitHub for idna \"b\u00fccher:80\".partition(\":\").encode(\"idna\").decode(\"ascii\""
+    },
+    {
+      "kind": "related",
+      "title": "Changes \u2014 Werkzeug Documentation (3.1.x)",
+      "url": "https://werkzeug.palletsprojects.com/en/stable/changes",
+      "why": "werkzeug.palletsprojects.com: names host_is_trusted. ...entation (3.1.x) Request.host, get_host, and host_is_trusted validate the characters of the value. An empty value is no longer allowed. A Unix s"
+    },
+    {
+      "kind": "related",
+      "title": "WSGI Helpers \u2014 Werkzeug Documentation (3.1.x)",
+      "url": "https://werkzeug.palletsprojects.com/en/stable/wsgi",
+      "why": "werkzeug.palletsprojects.com: names host_is_trusted, Host, hostname. ...ocumentation (3.1.x) The value is passed through host_is_trusted(). The host must be made up of valid characters, but this do..."
+    },
+    {
+      "kind": "upstream",
+      "title": "Fixing commit found by bisecting: 7ad32e85d0: Merge branch 'stable'",
+      "url": "https://github.com/pallets/werkzeug/commit/7ad32e85d0500f3c961534350369a0eb3c39daf9",
+      "why": "git bisect run in the sandbox (a merge commit): the reproduction test fails at 85dd69bda8 and passes at 7ad32e85d0 (5 test runs in the bisection). No release tag contains it yet."
+    },
+    {
+      "kind": "upstream",
+      "title": "The passing code came in through the merge: candidate commits on its other side",
+      "url": "https://github.com/pallets/werkzeug/commit/9ffdc2d38581119fa82829bdbde4b75e2519866f",
+      "why": "Not checked by a test run. Commits on the merge's other side that changed what the test imports (the function first, then its module), newest first: 9ffdc2d385 use match to remove port; de546be714 validate host characters; 2d98672d61 move HeaderSet to own module; 73448fef9a cached properties on FileStorage; 539695f6bf move structured header parsing to class methods"
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: read_file werkzeug/sansio/utils.py:1-200 | turn 2: list_dir . | turn 3: list_dir src | turn 4: list_dir src/werkzeug | turn 5: list_dir src/werkzeug/sansio | turn 6: read_file src/werkzeug/sansio/utils.py:1-200 | turn 7: run_python -> exit code 0 | turn 8: run_test -> FAILED | turn 9: submit | submitted: The test reproduces the bug described in the issue: host_is_trusted returns False for bracketed IPv6 addresses with or without a port when the trusted list contains the same bracketed IPv6 address. In Werkzeug 3.1.9, the function incorrectly partitions trusted entries at the first colon, turning '[::1]' into '[' and causing a mismatch."
+    }
+  ],
+  "next_actions": [
+    "Backport commit 9ffdc2d (which replaces the partition logic with a regex\u2011based port removal) to the stable branch.",
+    "Close this issue as fixed in the next patch release."
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 43676,
+    "output_tokens": 1646,
+    "cost_usd": 0.014210999999999998,
+    "sandbox_runs": 15,
+    "search_credits": 1,
+    "wall_seconds": 203.71
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:04:48.278586Z",
+  "contract": {
+    "runnable": true,
+    "package": "werkzeug",
+    "reported_version": "3.1.9",
+    "python_version": "3.13.15",
+    "setup_steps": [
+      "pip install werkzeug==3.1.9",
+      "python - <<'PY'\nfrom werkzeug.sansio.utils import host_is_trusted\nprint(host_is_trusted(\"[::1]:5017\", [\"[::1]\"]))  # Expected True, got False\nPY"
+    ],
+    "code_snippet": "from werkzeug.sansio.utils import host_is_trusted\nhost_is_trusted(\"[::1]:5017\", [\"[::1]\"])",
+    "expected_behaviour": "The function should return True when the host matches a trusted entry, even if a port is present.",
+    "observed_behaviour": "The function returns False, causing a 400 error for bracketed IPv6 addresses that are listed in trusted_hosts."
+  },
+  "issue_status": {
+    "state": "closed",
+    "state_reason": "completed",
+    "closed_at": "2026-09-29T13:35:57Z",
+    "closed_by": null,
+    "closed_by_url": null,
+    "linked_prs": [],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:03:58.990834Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

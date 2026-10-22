@@ -1,0 +1,109 @@
+{
+  "issue_url": "https://github.com/pyparsing/pyparsing/issues/693",
+  "title": ".ignore() method is ignored in version 3.3.3.",
+  "verdict": "fixed_on_main",
+  "confidence": "low",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: pass on the fix side",
+    "no run errored",
+    "the reported version (3.3.3 at d90d38b283) is not in the history of master: it was released from another branch, so passing on master does not show that a fix landed there; the bug may never have reached master"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import pytest\nfrom pyparsing import Word, alphas, cpp_style_comment, nested_expr\n\ndef test_ignore_comment_in_nested_expr():\n    parser = nested_expr('[', ']', Word(alphas), cpp_style_comment).set_results_name('target')\n    parser.ignore(cpp_style_comment)\n    result = parser.scan_string('[x /* */]')\n    for tokens, start, end in result:\n        inner = tokens.target[0]\n        assert list(inner) == ['x'], f\"Got {list(inner)}\"\n",
+    "reported_side": {
+      "ref": "3.3.3",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:04fdb78653244661",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n______________________ test_ignore_comment_in_nested_expr ______________________\n\n    def test_ignore_comment_in_nested_expr():\n        parser = nested_expr('[', ']', Word(alphas), cpp_style_comment).set_results_name('target')\n        parser.ignore(cpp_style_comment)\n        result = parser.scan_string('[x /* */]')\n        for tokens, start, end in result:\n            inner = tokens.target[0]\n>           assert list(inner) == ['x'], f\"Got {list(inner)}\"\nE           AssertionError: Got ['x', '/* */']\nE           assert ['x', '/* */'] == ['x']\nE             \nE             Left contains one more item: '/* */'\nE             Use -v to get more diff\n\ntests/test_fixedyet_repro.py:10: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_ignore_comment_in_nested_expr - Ass...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.29s",
+      "commit": "d90d38b283efaece7ac7cace7050ba55cb82abe5",
+      "failure_detail": "E           AssertionError: Got ['x', '/* */']\nE           assert ['x', '/* */'] == ['x']\nE\nE             Left contains one more item: '/* */'\nE             Use -v to get more diff"
+    },
+    "fix_side": {
+      "ref": "master",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:545c2673509541bd",
+      "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.09s",
+      "commit": "810199f89bf916590426e1c5cb3d612584f11a2f",
+      "failure_detail": null
+    },
+    "fixing_commit": null,
+    "fixing_commit_source": null,
+    "fixed_in_release": null
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "Likely: A change in the pyparsing library between versions 3.3.2 and 3.3.3 altered how the .ignore() directive interacts with nested_expr, causing the cpp_style_comment pattern to no longer be discarded inside the nested expression and thus appearing as part of the parsed target.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "AssertionError: Got ['x', '/* */']"
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: run_test -> FAILED (with a note) | turn 2: run_test -> FAILED | turn 3: submit rejected (code differs from the last run) | turn 4: submit rejected (code differs from the last run) | turn 5: run_test -> FAILED | turn 6: submit | submitted: The test reproduces the reported regression: in pyparsing 3.3.3 the .ignore() call does not discard the cpp_style_comment inside a nested_expr, causing the comment to appear in the parsed result. The test expects only the word 'x' to be present, matching the correct behavior seen in 3.3.2."
+    }
+  ],
+  "next_actions": [
+    "Check the main branch for the commit that restores proper ignore behavior for nested_expr.",
+    "If the fix is present on main, consider backporting it to the 3.3.x release line.",
+    "Close the issue as fixed_on_main."
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 20459,
+    "output_tokens": 2227,
+    "cost_usd": 0.007840499999999999,
+    "sandbox_runs": 8,
+    "search_credits": 2,
+    "wall_seconds": 141.43
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:26:53.572444Z",
+  "contract": {
+    "runnable": true,
+    "package": "pyparsing",
+    "reported_version": "3.3.3",
+    "python_version": null,
+    "setup_steps": [
+      "pip install pyparsing==3.3.3"
+    ],
+    "code_snippet": "from pyparsing import Word, alphas, cpp_style_comment, nested_expr\n\nparser = nested_expr('[', ']', Word(alphas), cpp_style_comment).set_results_name('target')\nparser.ignore(cpp_style_comment)\n\nresult = parser.scan_string('[x /* */]')\nfor tokens, start, end in result:\n    print(f'tokens.target: {tokens.target}')",
+    "expected_behaviour": "The parser should ignore the comment \"/* */\" and return only the token \"x\" as the target.",
+    "observed_behaviour": "The parser returns both \"x\" and the comment \"/* */\" as part of the target token."
+  },
+  "issue_status": {
+    "state": "open",
+    "state_reason": null,
+    "closed_at": null,
+    "closed_by": null,
+    "closed_by_url": null,
+    "linked_prs": [
+      {
+        "number": 694,
+        "url": "https://github.com/pyparsing/pyparsing/pull/694",
+        "title": "Skip ignore() expressions inside nested_expr (fixes #693)",
+        "state": "open",
+        "draft": false,
+        "merged_at": null,
+        "closes": false
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:26:44.582321Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

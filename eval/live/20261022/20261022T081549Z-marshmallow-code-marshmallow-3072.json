@@ -1,0 +1,116 @@
+{
+  "issue_url": "https://github.com/marshmallow-code/marshmallow/issues/3072",
+  "title": "`validate.Email` accepts a leading/trailing hyphen in the last domain label",
+  "verdict": "open_bug",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: fail on the fix side",
+    "the same kind of failure on both sides (Failed)",
+    "no run errored"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import pytest\nfrom marshmallow import validate, ValidationError\n\ndef test_email_rejects_hyphen_start_end_last_label():\n    email = validate.Email()\n    # These should raise ValidationError but currently do not (bug)\n    with pytest.raises(ValidationError):\n        email(\"user@example.-com\")\n    with pytest.raises(ValidationError):\n        email(\"user@example.com-\")\n    # Additional examples from issue\n    with pytest.raises(ValidationError):\n        email(\"user@\u4f8b\u3048.-\u30c6\u30b9\u30c8\")\n    # Ensure normal valid email passes\n    assert email(\"user@example.com\") == \"user@example.com\"\n    # Ensure existing rejection for hyphen in middle label still works\n    with pytest.raises(ValidationError):\n        email(\"user@ex-.com\")\n",
+    "reported_side": {
+      "ref": "4.3.1",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:2685594836ca4d75",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n________________ test_email_rejects_hyphen_start_end_last_label ________________\n\n    def test_email_rejects_hyphen_start_end_last_label():\n        email = validate.Email()\n        # These should raise ValidationError but currently do not (bug)\n>       with pytest.raises(ValidationError):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE ValidationError\n\ntests/test_fixedyet_repro.py:7: Failed\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_email_rejects_hyphen_start_end_last_label\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.38s",
+      "commit": "c7b559a1fa3aba57ca6dba0ab336841c5038a782",
+      "failure_detail": "E       Failed: DID NOT RAISE ValidationError"
+    },
+    "fix_side": {
+      "ref": "dev",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:9dca62b50c644a81",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n________________ test_email_rejects_hyphen_start_end_last_label ________________\n\n    def test_email_rejects_hyphen_start_end_last_label():\n        email = validate.Email()\n        # These should raise ValidationError but currently do not (bug)\n>       with pytest.raises(ValidationError):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE ValidationError\n\ntests/test_fixedyet_repro.py:7: Failed\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_email_rejects_hyphen_start_end_last_label\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+      "commit": "b762ea2d59ca52fe5df76b90de14bed7e5ec5607",
+      "failure_detail": "E       Failed: DID NOT RAISE ValidationError"
+    },
+    "fixing_commit": null,
+    "fixing_commit_source": null,
+    "fixed_in_release": null
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "The Email validator\u2019s DOMAIN_REGEX allows the final domain label to begin or end with a hyphen because the pattern for the last label (e.g., `[A-Z0-9{_UNICODE_LETTERS}-]{2,}`) lacks lookarounds that prohibit a leading or trailing '-', so inputs like 'user@example.-com' and 'user@example.com-' are mistakenly accepted.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "Failed: DID NOT RAISE ValidationError"
+    },
+    {
+      "kind": "related",
+      "title": "Changelog - marshmallow 4.3.1 documentation",
+      "url": "https://marshmallow.readthedocs.io/en/latest/changelog.html",
+      "why": "marshmallow.readthedocs.io: names validate.Email, Email, validate. ...ixes: marshmallow.validate.URL and marshmallow.validate.Email accept Internationalized Domain Names (IDNs) (#2821, #2936). mars..."
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: list_dir . | turn 2: list_dir src | turn 3: search_code 'class Email' in *.py | turn 4: read_file src/marshmallow/validate.py:1-200 | turn 5: read_file src/marshmallow/validate.py:240-300 | turn 6: list_dir tests | turn 7: search_code 'def test_email' in tests/*.py | turn 8: read_file tests/test_validate.py:1-50 | turn 9: search_code 'Email' in tests/test_validate.py | turn 10: search_code 'Email' in tests/test_validate.py | turn 11: search_code 'Email' in tests/*.py | turn 12: run_test -> FAILED | turn 13: run_test -> FAILED | turn 14: run_python -> exit code 0 | turn 15: submit | submitted: The test expects ValidationError for email addresses with a leading or trailing hyphen in the last domain label (e.g., \"user@example.-com\", \"user@example.com-\", \"user@\u4f8b\u3048.-\u30c6\u30b9\u30c8\"). At the reported version (marshmallow 4.3.1), the Email validator incorrectly accepts these addresses, causing the test to fail. The test also verifies that a valid email passes and that the existing rejection for a hyphen in a middle label (\"user@ex-.com\") still works."
+    }
+  ],
+  "next_actions": [
+    "Modify the DOMAIN_REGEX in marshmallow/validate.py (where Email is defined) to wrap the final label alternative with negative lookahead and lookbehind: change `|[A-Z0-9{_UNICODE_LETTERS}-]{2,}\\Z` to `|(?!-)[A-Z0-9{_UNICODE_LETTERS}-]{2,}(?<!-)\\Z`.",
+    "Run the provided test; it should now raise ValidationError for 'user@example.-com', 'user@example.com-', and 'user@\u4f8b\u3048.-\u30c6\u30b9\u30c8'.",
+    "Confirm that the test suite passes, ensuring valid emails (e.g., 'user@example.com') are still accepted and that existing rejections like 'user@ex-.com' continue to work.",
+    "Add the test as a permanent regression test to prevent future regressions."
+  ],
+  "usage": {
+    "llm_calls": 17,
+    "input_tokens": 106431,
+    "output_tokens": 3644,
+    "cost_usd": 0.03485208,
+    "sandbox_runs": 19,
+    "search_credits": 1,
+    "wall_seconds": 153.81
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:18:22.862071Z",
+  "contract": {
+    "runnable": true,
+    "package": "marshmallow",
+    "reported_version": "4.3.1",
+    "python_version": "3.12",
+    "setup_steps": [
+      "pip install marshmallow"
+    ],
+    "code_snippet": "from marshmallow import validate\nemail = validate.Email()\nemail(\"user@example.-com\")\nemail(\"user@example.com-\")",
+    "expected_behaviour": "The validator should reject email addresses where the last domain label starts or ends with a hyphen, such as \"user@example.-com\" or \"user@example.com-\".",
+    "observed_behaviour": "The validator incorrectly accepts email addresses with a leading or trailing hyphen in the last domain label, e.g., \"user@example.-com\" and \"user@example.com-\" pass validation."
+  },
+  "issue_status": {
+    "state": "open",
+    "state_reason": null,
+    "closed_at": null,
+    "closed_by": null,
+    "closed_by_url": null,
+    "linked_prs": [
+      {
+        "number": 3073,
+        "url": "https://github.com/marshmallow-code/marshmallow/pull/3073",
+        "title": "Reject leading/trailing hyphen in the last domain label in validate.Email",
+        "state": "open",
+        "draft": false,
+        "merged_at": null,
+        "closes": true
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:18:10.998600Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

@@ -1,0 +1,120 @@
+{
+  "issue_url": "https://github.com/r1chardj0n3s/parse/issues/262",
+  "title": "Fields after a datetime format containing %z are shifted: %z's capture groups are not counted",
+  "verdict": "fixed_on_main",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: pass on the fix side",
+    "no run errored"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import pytest\nfrom parse import parse\n\ndef test_percent_z_shift():\n    r = parse(\"{:%Y-%m-%d %H:%M:%S%z}|{}\", \"2020-03-04 05:06:07+0200|abc\")\n    assert r[1] == \"abc\"\n",
+    "reported_side": {
+      "ref": "1.22.3",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:210fffa03eb2410e",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n_____________________________ test_percent_z_shift _____________________________\n\n    def test_percent_z_shift():\n        r = parse(\"{:%Y-%m-%d %H:%M:%S%z}|{}\", \"2020-03-04 05:06:07+0200|abc\")\n>       assert r[1] == \"abc\"\nE       AssertionError: assert '00' == 'abc'\nE         \nE         - abc\nE         + 00\n\ntests/test_fixedyet_repro.py:6: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_percent_z_shift - AssertionError: a...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.20s",
+      "commit": "0d2d28fbccf023d0485be21aaccc95de88e92eaa",
+      "failure_detail": "E       AssertionError: assert '00' == 'abc'\nE\nE         - abc\nE         + 00"
+    },
+    "fix_side": {
+      "ref": "master",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:8f4b581d92674484",
+      "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n================================ tests coverage ================================\n_______________ coverage: platform linux, python 3.11.17-final-0 _______________\n\nName                Stmts   Miss Branch BrPart  Cover   Missing\n---------------------------------------------------------------\nparse/__init__.py     554    339    246     42    34%   43-48, 68, 71-98, 107, 110, 114, 123-124, 127, 130, 133, 136, 139-141, 193-277, 287-288, 293-298, 362-363, 365-367, 370, 374-375, 378->385, 381-382, 386-387, 389-390, 395-401, 411, 436->438, 440, 454-456, 460-470, 474->490, 478-486, 494, 498, 502, 511, 516, 530-539, 553-555, 563-579, 597-604, 623, 625, 637-655, 675-690, 709-715, 717-719, 721-723, 725-727, 729-731, 733-735, 742-746, 748-749, 751-753, 755-763, 772-834, 842-850, 852->857, 857->861, 866-867, 870, 874, 876, 878, 902, 905, 908, 919-920, 924, 934-938, 941, 944-952, 1025-1026, 1063-1064, 1083\n---------------------------------------------------------------\nTOTAL                 554    339    246     42    34%\n1 passed in 0.28s",
+      "commit": "175b52d5079dd632332bdc8a075f25867d5a6a17",
+      "failure_detail": null
+    },
+    "fixing_commit": "4f76a3e2982a7b5c5491651283e718029a2cd6a1",
+    "fixing_commit_source": "pull_request",
+    "fixed_in_release": "1.22.4"
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "In parse/__init__.py, the Parser._handle_field method handles datetime format specifiers like %z via the dt_format_to_regex branch but does not advance self._group_index by the number of capturing groups introduced by the generated regex pattern for %z. This causes later fields to read from the wrong capture groups, so the second field returns '00' instead of the expected 'abc'.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "AssertionError: assert '00' == 'abc'"
+    },
+    {
+      "kind": "upstream",
+      "title": "Merged pull request that references this issue",
+      "url": "https://github.com/r1chardj0n3s/parse/pull/263",
+      "why": "Merge commit 4f76a3e298."
+    },
+    {
+      "kind": "changelog",
+      "title": "Released in 1.22.4",
+      "url": "https://github.com/r1chardj0n3s/parse/releases",
+      "why": "The release notes lists #262 / #263 under 1.22.4."
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: list_dir . | turn 2: list_dir parse | turn 3: read_file parse/__init__.py:1-100 | turn 4: search_code 'dt_format_to_regex' | turn 5: read_file parse/__init__.py:750-780 | turn 6: read_file parse/__init__.py:730-800 | turn 7: read_file parse/__init__.py:290-310 | turn 8: list_dir tests | turn 9: run_test -> FAILED | turn 10: submit | submitted: The test reproduces the bug where fields after a datetime format containing %z are shifted because the capturing groups in %z are not accounted for in group indexing. The second captured field should be 'abc' but incorrectly returns '00'."
+    }
+  ],
+  "next_actions": [
+    "Refer to the fix merged in PR #263 on main.",
+    "Upgrade to version 1.22.4 or later, which includes the patch.",
+    "Close the issue as the bug is resolved."
+  ],
+  "usage": {
+    "llm_calls": 12,
+    "input_tokens": 53162,
+    "output_tokens": 1624,
+    "cost_usd": 0.01709814,
+    "sandbox_runs": 14,
+    "search_credits": 3,
+    "wall_seconds": 137.98
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:15:46.133693Z",
+  "contract": {
+    "runnable": true,
+    "package": "parse",
+    "reported_version": "1.22.3",
+    "python_version": "3.11",
+    "setup_steps": [
+      "pip install parse"
+    ],
+    "code_snippet": "from parse import parse\nr = parse(\"{:%Y-%m-%d %H:%M:%S%z}|{}\", \"2020-03-04 05:06:07+0200|abc\")\nr[1]",
+    "expected_behaviour": "The second captured field should be 'abc'.",
+    "observed_behaviour": "The second captured field is '00', which is the wrong value."
+  },
+  "issue_status": {
+    "state": "closed",
+    "state_reason": "completed",
+    "closed_at": "2026-10-20T20:35:34Z",
+    "closed_by": "#263",
+    "closed_by_url": "https://github.com/r1chardj0n3s/parse/pull/263",
+    "linked_prs": [
+      {
+        "number": 263,
+        "url": "https://github.com/r1chardj0n3s/parse/pull/263",
+        "title": "Account for the capture groups %z adds to the generated pattern",
+        "state": "merged",
+        "draft": false,
+        "merged_at": "2026-10-20T20:35:32Z",
+        "closes": true
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:15:35.120474Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

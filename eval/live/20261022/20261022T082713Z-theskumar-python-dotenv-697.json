@@ -1,0 +1,132 @@
+{
+  "issue_url": "https://github.com/theskumar/python-dotenv/issues/697",
+  "title": "dotenv run --no-override expands variables with the wrong precedence",
+  "verdict": "fixed_on_main",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: pass on the fix side",
+    "no run errored"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import os\nimport subprocess\nimport sys\nimport tempfile\nfrom pathlib import Path\nimport pytest\n\ndef test_dotenv_run_no_override_variable_precedence():\n    with tempfile.TemporaryDirectory() as directory:\n        env_path = Path(directory) / \".env\"\n        env_path.write_text(\n            \"DOTENV_TEST_BASE=file\\n\"\n            \"DOTENV_TEST_DERIVED=${DOTENV_TEST_BASE}/suffix\\n\"\n        )\n        env = dict(os.environ)\n        env[\"DOTENV_TEST_BASE\"] = \"environment\"\n        env.pop(\"DOTENV_TEST_DERIVED\", None)\n        result = subprocess.run(\n            [\n                sys.executable, \"-m\", \"dotenv\", \"-f\", str(env_path),\n                \"run\", \"--no-override\", sys.executable, \"-c\",\n                \"import os; print(os.environ['DOTENV_TEST_BASE']); \"\n                \"print(os.environ['DOTENV_TEST_DERIVED'])\",\n            ],\n            env=env,\n            capture_output=True,\n            text=True,\n            check=True,\n        )\n        output_lines = result.stdout.strip().splitlines()\n        assert len(output_lines) == 2\n        assert output_lines[0] == \"environment\"\n        assert output_lines[1] == \"environment/suffix\"\n\nif __name__ == \"__main__\":\n    pytest.main([__file__])\n",
+    "reported_side": {
+      "ref": "v1.2.3",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:b1d9c156ca344b94",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n_______________ test_dotenv_run_no_override_variable_precedence ________________\n\n    def test_dotenv_run_no_override_variable_precedence():\n        with tempfile.TemporaryDirectory() as directory:\n            env_path = Path(directory) / \".env\"\n            env_path.write_text(\n                \"DOTENV_TEST_BASE=file\\n\"\n                \"DOTENV_TEST_DERIVED=${DOTENV_TEST_BASE}/suffix\\n\"\n            )\n            env = dict(os.environ)\n            env[\"DOTENV_TEST_BASE\"] = \"environment\"\n            env.pop(\"DOTENV_TEST_DERIVED\", None)\n            result = subprocess.run(\n                [\n                    sys.executable, \"-m\", \"dotenv\", \"-f\", str(env_path),\n                    \"run\", \"--no-override\", sys.executable, \"-c\",\n                    \"import os; print(os.environ['DOTENV_TEST_BASE']); \"\n                    \"print(os.environ['DOTENV_TEST_DERIVED'])\",\n                ],\n                env=env,\n                capture_output=True,\n                text=True,\n                check=True,\n            )\n            output_lines = result.stdout.strip().splitlines()\n            assert len(output_lines) == 2\n            assert output_lines[0] == \"environment\"\n>           assert output_lines[1] == \"environment/suffix\"\nE           AssertionError: assert 'file/suffix' == 'environment/suffix'\nE             \nE             - environment/suffix\nE             + file/suffix\n\ntests/test_fixedyet_repro.py:33: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_dotenv_run_no_override_variable_precedence\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.48s",
+      "commit": "49515afee2d50c33cad9419b3800b3a0dc93fc59",
+      "failure_detail": "E           AssertionError: assert 'file/suffix' == 'environment/suffix'\nE\nE             - environment/suffix\nE             + file/suffix"
+    },
+    "fix_side": {
+      "ref": "main",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:b989c4bdded9454f",
+      "log_excerpt": "installed the extra [cli] of the project\n--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.18s",
+      "commit": "0b2880591780a426b0551436f47a17e7a76d954f",
+      "failure_detail": null
+    },
+    "fixing_commit": "e0310e5bb3f2b701b11bbc007ca0c82c1bd56f38",
+    "fixing_commit_source": "pull_request",
+    "fixed_in_release": "1.2.4"
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "Likely: The `dotenv run --no-override` command calls `dotenv_values()` with `override=True` to expand variables, which lets values from the .env file override existing environment variables before the `--no-override` filter is applied. This causes derived variables like `${DOTENV_TEST_BASE}/suffix` to use the .env value of `DOTENV_TEST_BASE` instead of the environment value, producing inconsistent output.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "AssertionError: assert 'file/suffix' == 'environment/suffix'"
+    },
+    {
+      "kind": "changelog",
+      "title": "Changelog - python-dotenv",
+      "url": "https://saurabh-kumar.com/python-dotenv/changelog",
+      "why": "saurabh-kumar.com: names #698, load_dotenv, dotenv_values, run. ...ide=False), so a value like ${BASE}/suffix uses the existing BASE from the environment instead of the one from the .env file by @R..."
+    },
+    {
+      "kind": "similar",
+      "title": "#444 dotenv run is overriding existing environment variables",
+      "url": "https://github.com/theskumar/python-dotenv/issues/444",
+      "why": "Same repository (closed, 3 comments). Its title names run, environment."
+    },
+    {
+      "kind": "upstream",
+      "title": "Merged pull request that references this issue",
+      "url": "https://github.com/theskumar/python-dotenv/pull/698",
+      "why": "Merge commit e0310e5bb3."
+    },
+    {
+      "kind": "changelog",
+      "title": "Released in 1.2.4",
+      "url": "https://github.com/theskumar/python-dotenv/blob/main/CHANGELOG.md",
+      "why": "The project's CHANGELOG.md lists #697 / #698 under 1.2.4."
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: list_dir . | turn 2: list_dir src | turn 3: run_python -> exit code 0 | turn 4: search_code 'def test.*dotenv' in tests/*.py | turn 5: run_test -> FAILED | turn 6: submit returned once: the test imports nothing from the repository | turn 7: submit | submitted: The test reproduces the reported bug by invoking the dotenv CLI via subprocess, which exercises the project's code. With --no-override, the environment variable DOTENV_TEST_BASE should take precedence, and the derived variable DOTENV_TEST_DERIVED should expand using that environment value. The bug causes the derived variable to use the .env file value instead, resulting in 'file/suffix' rather than 'environment/suffix'."
+    }
+  ],
+  "next_actions": [
+    "See the fix in pull request #698 which adjusts variable expansion to respect --no-override precedence.",
+    "Verify that the fix is present in the main branch and included in the next release (version 1.2.4 or later).",
+    "Close this issue as resolved."
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 29857,
+    "output_tokens": 2921,
+    "cost_usd": 0.01109274,
+    "sandbox_runs": 10,
+    "search_credits": 1,
+    "wall_seconds": 145.48
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:29:38.527764Z",
+  "contract": {
+    "runnable": true,
+    "package": "python-dotenv",
+    "reported_version": "1.2.3",
+    "python_version": "3.13.15",
+    "setup_steps": [
+      "pip install python-dotenv[cli]"
+    ],
+    "code_snippet": "import os\nimport subprocess\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nwith tempfile.TemporaryDirectory() as directory:\n    path = Path(directory) / \".env\"\n    path.write_text(\n        \"DOTENV_TEST_BASE=file\\n\"\n        \"DOTENV_TEST_DERIVED=${DOTENV_TEST_BASE}/suffix\\n\"\n    )\n    env = dict(os.environ)\n    env[\"DOTENV_TEST_BASE\"] = \"environment\"\n    env.pop(\"DOTENV_TEST_DERIVED\", None)\n    subprocess.run(\n        [\n            sys.executable, \"-m\", \"dotenv\", \"-f\", str(path),\n            \"run\", \"--no-override\", sys.executable, \"-c\",\n            \"import os; print(os.environ['DOTENV_TEST_BASE']); \"\n            \"print(os.environ['DOTENV_TEST_DERIVED'])\",\n        ],\n        env=env,\n        check=True,\n    )",
+    "expected_behaviour": "Both values should use the existing environment variable, printing 'environment' and 'environment/suffix'.",
+    "observed_behaviour": "The first value prints 'environment' but the second prints 'file/suffix', showing that the derived variable incorrectly uses the .env file value instead of the environment variable."
+  },
+  "issue_status": {
+    "state": "closed",
+    "state_reason": "completed",
+    "closed_at": "2026-09-30T03:05:58Z",
+    "closed_by": "#698",
+    "closed_by_url": "https://github.com/theskumar/python-dotenv/pull/698",
+    "linked_prs": [
+      {
+        "number": 698,
+        "url": "https://github.com/theskumar/python-dotenv/pull/698",
+        "title": "Fix variable expansion in dotenv run --no-override",
+        "state": "merged",
+        "draft": false,
+        "merged_at": "2026-09-30T03:05:57Z",
+        "closes": true
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:29:31.898368Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}

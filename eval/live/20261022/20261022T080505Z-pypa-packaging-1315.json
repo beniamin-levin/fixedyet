@@ -1,0 +1,144 @@
+{
+  "issue_url": "https://github.com/pypa/packaging/issues/1315",
+  "title": "`str(Marker(...))` drops parentheses of a nested group and changes evaluation",
+  "verdict": "fixed_on_main",
+  "confidence": "high",
+  "confidence_basis": [
+    "both runs agree: fail on the reported side",
+    "both runs agree: pass on the fix side",
+    "no run errored",
+    "the first test was inconsistent; this verdict comes from a second, independent test written from the issue alone"
+  ],
+  "reproduction": {
+    "repro_test_path": "tests/test_fixedyet_repro.py",
+    "repro_test_code": "import pytest\nfrom packaging.markers import Marker\n\ndef test_marker_str_preserves_evaluation():\n    m = Marker('python_version < \"3.10\" and ((sys_platform == \"linux\" or sys_platform == \"darwin\"))')\n    env = {\"python_version\": \"3.12\", \"sys_platform\": \"darwin\"}\n    assert m.evaluate(env) == Marker(str(m)).evaluate(env)\n",
+    "reported_side": {
+      "ref": "26.2",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:c70eac3460ab40dc",
+      "log_excerpt": "--- last of 2 runs, every run exited 1 ---\nF\n=================================== FAILURES ===================================\n_____________________ test_marker_str_preserves_evaluation _____________________\n\n    def test_marker_str_preserves_evaluation():\n        m = Marker('python_version < \"3.10\" and ((sys_platform == \"linux\" or sys_platform == \"darwin\"))')\n        env = {\"python_version\": \"3.12\", \"sys_platform\": \"darwin\"}\n>       assert m.evaluate(env) == Marker(str(m)).evaluate(env)\nE       assert False == True\nE        +  where False = evaluate({'python_version': '3.12', 'sys_platform': 'darwin'})\nE        +    where evaluate = <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>.evaluate\nE        +  and   True = evaluate({'python_version': '3.12', 'sys_platform': 'darwin'})\nE        +    where evaluate = <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>.evaluate\nE        +      where <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')> = Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')\nE        +        where 'python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"' = str(<Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>)\n\nenv        = {'python_version': '3.12', 'sys_platform': 'darwin'}\nm          = <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>\n\ntests/test_fixedyet_repro.py:7: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_fixedyet_repro.py::test_marker_str_preserves_evaluation - a...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.78s",
+      "commit": "84a87ee42483d7352f9502d78a9553da8859aa7a",
+      "failure_detail": "E       assert False == True\nE        +  where False = evaluate({'python_version': '3.12', 'sys_platform': 'darwin'})\nE        +    where evaluate = <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>.evaluate\nE        +  and   True = evaluate({'python_version': '3.12', 'sys_platform': 'darwin'})\nE        +    where evaluate = <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>.evaluate\nE        +      where <Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')> = Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')\nE        +        where 'python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"' = str(<Marker('python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"')>)"
+    },
+    "fix_side": {
+      "ref": "main",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "checkpoint_image": "fixedyet-ckpt:4abcb0e9d9c24a21",
+      "log_excerpt": "--- last of 2 runs, every run exited 0 ---\n.                                                                        [100%]\n1 passed in 0.38s",
+      "commit": "1a62a26afe0f4881593e31bed4f7753bd1c8fe27",
+      "failure_detail": null
+    },
+    "fixing_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
+    "fixing_commit_source": "pull_request",
+    "fixed_in_release": "26.3"
+  },
+  "not_reproduced_reason": null,
+  "root_cause": "The Marker.__str__ method serializes a marker expression without preserving necessary parentheses around nested sub\u2011expressions. When the original marker contains a parenthesized group inside an 'and'/'or' expression (e.g., `A and ((B or C))`), the generated string drops the inner parentheses, producing `A and B or C`. This changes operator precedence during re\u2011parsing, causing the reparsed marker to evaluate differently from the original. The fix ensures that parentheses are retained when needed to preserve the original evaluation semantics.",
+  "evidence": [
+    {
+      "kind": "log",
+      "title": "Key error at the reported version",
+      "url": null,
+      "why": "assert False == True"
+    },
+    {
+      "kind": "changelog",
+      "title": "Releases \u00b7 pypa/packaging \u00b7 GitHub",
+      "url": "https://github.com/pypa/packaging/releases",
+      "why": "github.com: names #1316, Marker. ...marker values, so round-tripped markers parse back to the same marker. (#1213) Keep the parentheses of a nested group when serializing markers. (#1316"
+    },
+    {
+      "kind": "changelog",
+      "title": "Changelog - Packaging",
+      "url": "https://packaging.pypa.io/en/stable/changelog.html",
+      "why": "packaging.pypa.io: names #1316, Marker. ... values, so round-tripped markers parse back to the same marker. (PR #1213) Keep the parentheses of a nested group when serializing markers. (PR #1316"
+    },
+    {
+      "kind": "similar",
+      "title": "#1399 `Value.serialize()` does not escape backslashes, so `str(Marker(x))` can re-parse to a marker that evaluates differently",
+      "url": "https://github.com/pypa/packaging/issues/1399",
+      "why": "Same repository (open, 3 comments). Its title names str(Marker, Marker."
+    },
+    {
+      "kind": "upstream",
+      "title": "Merged pull request that references this issue",
+      "url": "https://github.com/pypa/packaging/pull/1316",
+      "why": "Merge commit 0a85b41e24."
+    },
+    {
+      "kind": "changelog",
+      "title": "Released in 26.3",
+      "url": "https://github.com/pypa/packaging/blob/main/CHANGELOG.rst",
+      "why": "The project's CHANGELOG.rst lists #1315 / #1316 under 26.3."
+    },
+    {
+      "kind": "log",
+      "title": "How the test was written",
+      "url": null,
+      "why": "turn 1: run_test -> FAILED | turn 2: submit | submitted: The test checks that the string representation of a Marker preserves parentheses so that re-parsing yields equivalent evaluation. In packaging 26.2, str(Marker(...)) drops inner parentheses, changing precedence and causing the re-parsed marker to evaluate differently. The assertions fail, reproducing the reported bug. | turn 1: list_dir /work/repo | turn 2: list_dir /work/repo/src | turn 3: list_dir /work/repo/src/packaging | turn 4: run_python -> exit code 0 | turn 5: run_test -> FAILED | turn 6: submit | submitted: The test reproduces the issue where str(Marker(...)) drops parentheses, changing precedence and causing different evaluation. With python_version='3.12' and sys_platform='darwin', the original marker evaluates to False, but the reparsed string evaluates to True. The assertion fails, demonstrating the bug."
+    },
+    {
+      "kind": "log",
+      "title": "The first test, inconsistent, replaced by a second one",
+      "url": null,
+      "why": "Inconsistent (both runs agree: fail on the reported side; both runs agree: fail on the fix side; the failure text changes between the sides (addresses, durations, line numbers and temporary paths ignored), so the fix side may not show the same bug; failure at the reported version: assert 'python_versi...m == \"darwin\"' == 'python_versi...== \"darwin\"))'; failure on the fix side: assert 'python_versi... == \"darwin\")' == 'python_versi...== \"darwin\"))').\n\nimport pytest\nfrom packaging.markers import Marker\n\ndef test_marker_str_preserves_evaluation():\n    m = Marker('python_version < \"3.10\" and ((sys_platform == \"linux\" or sys_platform == \"darwin\"))')\n    env = {\"python_version\": \"3.12\", \"sys_platform\": \"darwin\"}\n    assert str(m) == 'python_version < \"3.10\" and ((sys_platform == \"linux\" or sys_platform == \"darwin\"))'\n    assert m.evaluate(env) is False\n    assert Marker(str(m)).evaluate(env) is False\n"
+    }
+  ],
+  "next_actions": [
+    "Tell the reporter the bug is already fixed on the default branch and link the fix.",
+    "Ask them to upgrade to the release that contains it, then close the issue."
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 28402,
+    "output_tokens": 1992,
+    "cost_usd": 0.00997608,
+    "sandbox_runs": 15,
+    "search_credits": 2,
+    "wall_seconds": 197.09
+  },
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "backport": null,
+  "fix": null,
+  "created_at": "2026-10-22T08:08:22.793956Z",
+  "contract": {
+    "runnable": true,
+    "package": "packaging",
+    "reported_version": "26.2",
+    "python_version": "3.12",
+    "setup_steps": [
+      "pip install packaging"
+    ],
+    "code_snippet": "from packaging.markers import Marker\n\nm = Marker('python_version < \"3.10\" and ((sys_platform == \"linux\" or sys_platform == \"darwin\"))')\nenv = {\"python_version\": \"3.12\", \"sys_platform\": \"darwin\"}\n\nprint(str(m))\nprint(m.evaluate(env))\nprint(Marker(str(m)).evaluate(env))",
+    "expected_behaviour": "The string representation of the marker should be reparsed to produce a Marker that evaluates to the same boolean result as the original marker in every environment.",
+    "observed_behaviour": "The printed string is `python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"`, which evaluates to True in the given environment, whereas the original marker evaluates to False."
+  },
+  "issue_status": {
+    "state": "closed",
+    "state_reason": "completed",
+    "closed_at": "2026-07-06T12:42:48Z",
+    "closed_by": "#1316",
+    "closed_by_url": "https://github.com/pypa/packaging/pull/1316",
+    "linked_prs": [
+      {
+        "number": 1316,
+        "url": "https://github.com/pypa/packaging/pull/1316",
+        "title": "fix(markers): keep parentheses of a nested group when serializing",
+        "state": "merged",
+        "draft": false,
+        "merged_at": "2026-07-06T12:42:47Z",
+        "closes": true
+      }
+    ],
+    "source": "graphql",
+    "checked_at": "2026-10-22T08:08:08.296458Z"
+  },
+  "rules": "v2",
+  "rescored": null
+}
