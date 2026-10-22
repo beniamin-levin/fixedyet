@@ -41,14 +41,19 @@ def _relative_runs_dir_is_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 @pytest.fixture(autouse=True)
 def _repositories_are_python(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The web app reads a repository's language from GitHub before it counts a run. Tests never
-    touch the network: every repository is Python unless a test says otherwise."""
+    """The web app reads a repository's language and the issue itself from GitHub before it
+    counts a run. Tests never touch the network: every repository is Python and every number an
+    issue unless a test says otherwise."""
     from fixedyet.web import app as web_app
 
     async def python(owner: str, repo: str, *, settings: Any) -> str | None:
         return "Python"
 
+    async def an_issue(owner: str, repo: str, number: int, *, settings: Any) -> None:
+        return None
+
     monkeypatch.setattr(web_app, "fetch_repo_language", python)
+    monkeypatch.setattr(web_app, "check_issue", an_issue)
 
 
 @pytest.fixture(autouse=True)

@@ -45,7 +45,9 @@ compared in constant time and never logged or echoed. Without codes the judge en
 Scope check: FixedYet runs pure-Python projects tested with pytest. Before a public or judge run
 is counted, the repository's main language is read from the GitHub API; a repository GitHub
 lists as another language is refused with 422 and uses up nothing. A language GitHub does not
-know, or a lookup that fails, lets the run go ahead.
+know, or a lookup that fails, lets the run go ahead. Every run, the maintainer's too, also reads
+the issue itself (one request, at the same time): a number GitHub has no issue for, or one that
+belongs to a pull request, is refused with 422 before anything is counted.
 Finished runs are written to ``<runs_dir>/web/<id>.json`` and survive restarts. A backport job
 is a run of kind "backport": it takes the same single slot, streams the same events, and does
 not count against the daily limit. It only verifies; opening the pull request is a second,
@@ -110,7 +112,7 @@ JUDGE_HEADER = "x-judge-code"
 JUDGE_COUNTER = "judge-daily"
 MIN_JUDGE_CODE_LENGTH = 12  # shorter codes are ignored: a judge code must not be guessable
 SUPPORTED_LANGUAGE = "Python"
-LANGUAGE_TIMEOUT_S = 10.0  # the language check must never hold a run request for long
+LOOKUP_TIMEOUT_S = 10.0  # the GitHub checks before a run must never hold a run request for long
 LANGUAGE_CACHE_S = 6 * 3600
 
 PAUSED_MESSAGE = (
@@ -167,6 +169,30 @@ async def run_fix(assessment: Assessment, *, settings: Any, progress: Any) -> Fi
 
 class RepositoryNotFound(LookupError):
     """GitHub has no public repository by that name."""
+
+
+class IssueNotFound(LookupError):
+    """GitHub has no issue by that number in the repository (or the repository is private)."""
+
+
+class NotAnIssue(LookupError):
+    """The number belongs to a pull request, not an issue."""
+
+
+async def check_issue(owner: str, repo: str, number: int, *, settings: Any) -> None:
+    """Read the issue from GitHub, one request. Raises IssueNotFound when there is none and
+    NotAnIssue for a pull request; any other failure raises as well, and the caller lets the run
+    go ahead."""
+    from fixedyet.github import GitHubClient, GitHubNotAnIssue, GitHubNotFound
+
+    token = str(getattr(settings, "github_token", "") or "").strip() or None
+    async with GitHubClient(token) as client:
+        try:
+            await client.issue_data(owner, repo, number)
+        except GitHubNotFound as exc:
+            raise IssueNotFound(f"{owner}/{repo}#{number}") from exc
+        except GitHubNotAnIssue as exc:
+            raise NotAnIssue(f"{owner}/{repo}#{number}") from exc
 
 
 async def fetch_repo_language(owner: str, repo: str, *, settings: Any) -> str | None:
@@ -702,7 +728,7 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             language = cached[1]
         else:
             try:
-                async with asyncio.timeout(LANGUAGE_TIMEOUT_S):
+                async with asyncio.timeout(LOOKUP_TIMEOUT_S):
                     language = await fetch_repo_language(
                         ref.owner, ref.repo, settings=get_settings()
                     )
@@ -730,6 +756,45 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             "counted.",
             language=language,
         )
+
+    async def issue_refusal(ref: IssueRef) -> Response | None:
+        """A 422 when the number is not an issue of that repository: GitHub has none (a typo, or
+        a private repository), or it is a pull request. None for an issue, and when the lookup
+        fails: the run then goes ahead and the pipeline reports what it finds."""
+        try:
+            async with asyncio.timeout(LOOKUP_TIMEOUT_S):
+                await check_issue(ref.owner, ref.repo, ref.number, settings=get_settings())
+        except IssueNotFound:
+            return _error(
+                422, "issue_not_found",
+                f"GitHub has no issue #{ref.number} in {ref.owner}/{ref.repo} (or the repository "
+                "is private). Check the number in the URL. The run was not started and nothing "
+                "was counted.",
+            )
+        except NotAnIssue:
+            return _error(
+                422, "not_an_issue",
+                f"#{ref.number} in {ref.owner}/{ref.repo} is a pull request, not an issue. "
+                "FixedYet reproduces bug reports: paste the URL of the issue the pull request is "
+                "about. The run was not started and nothing was counted.",
+            )
+        except Exception as exc:  # noqa: BLE001 - never block a run on a failed lookup
+            logger.warning(
+                "issue %s/%s#%d unreadable (%s); the run goes ahead",
+                ref.owner, ref.repo, ref.number, type(exc).__name__,
+            )
+        return None
+
+    async def scope_refusal(ref: IssueRef, *, check_language: bool) -> Response | None:
+        """The GitHub checks made before a run is counted, read at the same time. A missing
+        repository or another language is reported first: it says more than the issue check,
+        which fails for a missing repository too."""
+        checks = [language_refusal(ref)] if check_language else []
+        checks.append(issue_refusal(ref))
+        for refused in await asyncio.gather(*checks):
+            if refused is not None:
+                return refused
+        return None
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -860,9 +925,12 @@ def create_app(settings: Any | None = None, *, examples_dir: Path | None = None)
             return None
 
         refused = refusal()
-        if refused is None and not admin:
-            # Only pure-Python projects can be run: say so before anything is counted.
-            refused = await language_refusal(ref) or refusal()  # the lookup awaited: check again
+        if refused is None:
+            # Before anything is counted: the URL must name an issue, not a pull request or a
+            # number with no issue behind it, and only pure-Python projects can be run. Everyone
+            # gets the issue check; the maintainer may run a repository of any language. The
+            # lookups were awaited, so the limits are checked again.
+            refused = await scope_refusal(ref, check_language=not admin) or refusal()
         if refused is not None:
             return refused
         run = store.create(ref.url)

@@ -27,6 +27,7 @@ CODE = "judge-code-0123456789"
 OTHER_CODE = "second-judge-code-abcdef"
 ADMIN = "maintainer-key-0123456789abcdef"
 REAL_LOOKUP = web.fetch_repo_language  # conftest replaces it in every test; kept for one test
+REAL_ISSUE_CHECK = web.check_issue  # likewise
 
 
 class Pipeline:
@@ -57,6 +58,19 @@ class Languages:
         return self.answer
 
 
+class Issues:
+    """Stands in for the issue lookup: None for an issue, or the exception GitHub's answer gives."""
+
+    def __init__(self, answer: BaseException | None = None) -> None:
+        self.answer = answer
+        self.calls: list[str] = []
+
+    async def __call__(self, owner: str, repo: str, number: int, *, settings: Any) -> None:
+        self.calls.append(f"{owner}/{repo}#{number}")
+        if self.answer is not None:
+            raise self.answer
+
+
 @pytest.fixture
 def pipeline(monkeypatch: pytest.MonkeyPatch) -> Pipeline:
     fake = Pipeline()
@@ -69,6 +83,13 @@ def pipeline(monkeypatch: pytest.MonkeyPatch) -> Pipeline:
 def languages(monkeypatch: pytest.MonkeyPatch) -> Languages:
     fake = Languages()
     monkeypatch.setattr(web, "fetch_repo_language", fake)
+    return fake
+
+
+@pytest.fixture
+def issues(monkeypatch: pytest.MonkeyPatch) -> Issues:
+    fake = Issues()
+    monkeypatch.setattr(web, "check_issue", fake)
     return fake
 
 
@@ -338,6 +359,86 @@ async def test_the_lookup_reads_the_repository_language_from_github() -> None:
         assert await lookup("empty", "repo", settings=settings) is None
         with pytest.raises(web.RepositoryNotFound):
             await lookup("nobody", "nothing", settings=settings)
+
+
+# --- the scope check: the URL must name an issue ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("answer", "error", "words"),
+    [
+        (web.NotAnIssue("psf/requests#6000"), "not_an_issue", "is a pull request, not an issue"),
+        (web.IssueNotFound("psf/requests#6000"), "issue_not_found", "has no issue #6000"),
+    ],
+)
+async def test_a_pull_request_or_a_missing_issue_is_refused_for_everyone_and_counts_nowhere(
+    tmp_path: Path, pipeline: Pipeline, languages: Languages, issues: Issues,
+    answer: BaseException, error: str, words: str,
+) -> None:
+    issues.answer = answer
+    settings = make_settings(tmp_path, admin_token=ADMIN)
+    async with client_for(settings) as client:
+        for who in ({}, {"code": CODE}, {"admin": True}):  # the public, a judge, the maintainer
+            res = await run(client, **who)
+            assert res.status_code == 422, who
+            body = res.json()
+            assert body["error"] == error and words in body["message"]
+            assert "psf/requests" in body["message"] and "nothing was counted" in body["message"]
+        status = (await client.get("/api/status", headers={"X-Judge-Code": CODE})).json()
+    assert status["runs_today"] == 0 and status["judge"]["runs_today"] == 0
+    assert pipeline.calls == []
+    assert issues.calls == ["psf/requests#6000"] * 3
+
+
+async def test_a_failed_issue_lookup_lets_the_run_go_ahead(
+    tmp_path: Path, pipeline: Pipeline, languages: Languages, issues: Issues
+) -> None:
+    issues.answer = RuntimeError("GitHub is down")
+    async with client_for(make_settings(tmp_path)) as client:
+        assert (await run(client)).status_code == 202
+    assert len(pipeline.calls) == 1
+
+
+async def test_a_missing_repository_is_named_before_the_missing_issue(
+    tmp_path: Path, pipeline: Pipeline, languages: Languages, issues: Issues
+) -> None:
+    languages.answer = web.RepositoryNotFound("nobody/nothing")
+    issues.answer = web.IssueNotFound("nobody/nothing#1")
+    async with client_for(make_settings(tmp_path)) as client:
+        res = await run(client, url="https://github.com/nobody/nothing/issues/1")
+    assert res.json()["error"] == "repository_not_found"
+
+
+async def test_a_used_up_limit_reads_no_issue_either(
+    tmp_path: Path, pipeline: Pipeline, issues: Issues
+) -> None:
+    async with client_for(make_settings(tmp_path, demo_daily_limit=0)) as client:
+        assert (await run(client)).status_code == 429
+    assert issues.calls == []
+
+
+async def test_the_issue_check_reads_the_issue_from_github_in_one_request() -> None:
+    """The real seam, against a mocked GitHub API: no network."""
+    import respx
+
+    from fixedyet.github import API_ROOT
+
+    check = REAL_ISSUE_CHECK
+    settings = SimpleNamespace(github_token="")
+    with respx.mock(base_url=API_ROOT) as mock:
+        issue = mock.get("/repos/pallets/jinja/issues/2244").respond(
+            200, json={"number": 2244, "title": "a bug"}
+        )
+        mock.get("/repos/pallets/jinja/issues/2259").respond(200, json={
+            "number": 2259, "title": "a fix", "pull_request": {"url": "x", "merged_at": None},
+        })
+        mock.get("/repos/pallets/jinja/issues/99999").respond(404, json={"message": "Not Found"})
+        assert await check("pallets", "jinja", 2244, settings=settings) is None
+        assert issue.call_count == 1 and len(mock.calls) == 1
+        with pytest.raises(web.NotAnIssue):
+            await check("pallets", "jinja", 2259, settings=settings)
+        with pytest.raises(web.IssueNotFound):
+            await check("pallets", "jinja", 99999, settings=settings)
 
 
 # --- the pages ----------------------------------------------------------------------------

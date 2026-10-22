@@ -100,8 +100,14 @@ def key_error_line(log_text: str) -> str:
 
 def clean_web_text(text: str, limit: int = SNIPPET_CHARS) -> str:
     """One line of plain text: control characters and markup-ish brackets removed, then cut."""
+    return clean_log_line(re.sub(r"[<>`]", "", text), limit)
+
+
+def clean_log_line(text: str, limit: int = SNIPPET_CHARS) -> str:
+    """One line of our own sandbox's output: control characters removed, then cut. Brackets and
+    backticks stay, because they are often the point (``assert '' == '<p>x</p>'``); every
+    renderer escapes the line (a code span in markdown, text nodes on the web page)."""
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
-    text = re.sub(r"[<>`]", "", text)
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
@@ -748,7 +754,7 @@ async def gather_evidence(
             Evidence(
                 kind="log",
                 title="Key error at the reported version",
-                why=clean_web_text(error_line),
+                why=clean_log_line(error_line),
             )
         )
     terms = issue_terms(issue, test_code, package=package)

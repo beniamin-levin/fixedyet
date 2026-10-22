@@ -140,7 +140,7 @@ Hackathon judges must be able to use the demo until the judging period ends, and
 2. Optionally keep budget back from the public: `FIXEDYET_JUDGE_RESERVE_USD=6` refuses public runs once less than $6 plus one run's budget is left under `FIXEDYET_TOTAL_BUDGET_USD`. Judges and the maintainer can still spend it.
 3. Restart, then check: `curl -s -H "X-Judge-Code: <code>" http://127.0.0.1:8090/api/judge/check` answers `{"ok": true, ...}`, and without the header `api/status` shows `"judge_access": true`.
 
-Put the code in the private testing instructions of the submission, never in the repository. A judge types it under the run form ("Hackathon judge? Enter your code"); the browser keeps it in localStorage and sends it as `X-Judge-Code`. Every run, public or judge, first reads the repository's language from the GitHub API and is refused with 422 (and counted nowhere) when GitHub lists it as anything but Python.
+Put the code in the private testing instructions of the submission, never in the repository. A judge types it under the run form ("Hackathon judge? Enter your code"); the browser keeps it in localStorage and sends it as `X-Judge-Code`. Every run, public or judge, first reads the repository's language from the GitHub API and is refused with 422 (and counted nowhere) when GitHub lists it as anything but Python. Every run, the maintainer's too, also reads the issue: a pull request's number, or a number with no issue behind it, is refused with 422 the same way.
 
 ## Live runs on a second VM (Docker sandbox)
 
@@ -161,7 +161,7 @@ FIXEDYET_UPSTREAM=<docker-vm-private-ip>:8090 deploy/deploy.sh <proxy-vm-public-
 
 Inside each sandbox container the project's tests run as an unprivileged user (`fixedyet`, created by the baseline step; setup steps stay root), so the host needs no change for it. Checkpoint images built by an older version have no such user, and runs from them fall back to root; every run builds a fresh baseline, so there is nothing to clear.
 
-Also allow TCP 8090 from the proxy VM's private IP in the cloud security list. The second command points the nginx snippet at the Docker VM, stops and disables the local service on the proxy VM, and checks the upstream's `/healthz`. To go back, run a plain `deploy/deploy.sh <proxy-vm-public-ip>`.
+Also allow TCP 8090 from the proxy VM's private IP in the cloud security list. The Docker VM's drop-in (`fixedyet-docker-host.conf`) sets `FORWARDED_ALLOW_IPS` to that same IP, so uvicorn takes the scheme and the client address from nginx's `X-Forwarded-Proto` and `X-Forwarded-For` and a redirect stays on https; if the proxy VM's address changes, change it there or put a `FORWARDED_ALLOW_IPS=` line in `/etc/fixedyet.env`. Check: `curl -sI https://fixedyet.benlevin.fyi/reports/` answers `location: https://fixedyet.benlevin.fyi/reports`. The second command points the nginx snippet at the Docker VM, stops and disables the local service on the proxy VM, and checks the upstream's `/healthz`. To go back, run a plain `deploy/deploy.sh <proxy-vm-public-ip>`.
 
 ## Operating it
 

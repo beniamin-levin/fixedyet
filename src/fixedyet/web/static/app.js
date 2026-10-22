@@ -46,6 +46,7 @@
       this.baseAt = null;
       this.finished = false;
       $('#progress').hidden = false;
+      $('#progress-status').textContent = '';
       this.draw();
       this.startClock();
     },
@@ -94,6 +95,15 @@
       }
       if (this.baseAt === null) this.baseAt = at;
       this.draw();
+      this.announce(event);
+    },
+
+    // The list is redrawn whole on every event, so it is not a live region: a screen reader
+    // would read all of it again each time. Only the newest event goes to the status line.
+    announce(event) {
+      const stage = STAGES.find((s) => s.id === event.stage);  // none for "done" and "error"
+      const text = [stage && stage.label, event.message].filter(Boolean).join(': ');
+      $('#progress-status').textContent = text;
     },
 
     draw() {
@@ -395,18 +405,57 @@
     }[result] || 'Could not reach the server.';
   }
 
+  // ---------- the issue URL ----------
+
+  // What people paste: http:// or no scheme, www., the host in any case, a trailing slash, a
+  // query or an #issuecomment anchor. Only that prefix is case-insensitive: owner and repository
+  // keep the case they were typed in. The server parses the URL the same way.
+  const GITHUB_PREFIX = /^(?:https?:\/\/)?(?:www\.)?github\.com\//i;
+  const ISSUE_PATH = /^([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})\/issues\/([1-9]\d{0,8})\/?(?:[?#].*)?$/;
+  const PULL_PATH = /^[^/]+\/[^/]+\/pull\/\d+(?:[/?#].*)?$/;
+
+  // The plain https form of an issue URL, or null for anything else.
+  function normaliseIssueUrl(value) {
+    const text = String(value || '').trim();
+    const prefix = GITHUB_PREFIX.exec(text);
+    const m = prefix ? ISSUE_PATH.exec(text.slice(prefix[0].length)) : null;
+    if (!m || m[2] === '.' || m[2] === '..') return null;
+    return `https://github.com/${m[1]}/${m[2]}/issues/${m[3]}`;
+  }
+
+  function isPullRequestUrl(value) {
+    const text = String(value || '').trim();
+    const prefix = GITHUB_PREFIX.exec(text);
+    return Boolean(prefix) && PULL_PATH.test(text.slice(prefix[0].length));
+  }
+
   // ---------- start-up ----------
 
   document.addEventListener('DOMContentLoaded', () => {
     $('#run-form').addEventListener('submit', (event) => {
       event.preventDefault();
-      const value = $('#issue-url').value.trim();
-      if (!/^https:\/\/(www\.)?github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+/.test(value)) {
-        notice('Paste a public GitHub issue URL, like https://github.com/owner/repo/issues/123.', 'error');
-        $('#issue-url').focus();
+      const input = $('#issue-url');
+      const url = normaliseIssueUrl(input.value);
+      if (!url) {
+        notice(isPullRequestUrl(input.value)
+          ? 'That is a pull request URL. Paste the URL of the issue it is about, like https://github.com/owner/repo/issues/123.'
+          : 'Paste a public GitHub issue URL, like https://github.com/owner/repo/issues/123.', 'error');
+        input.focus();
         return;
       }
-      startRun(value);
+      input.value = url;  // show what is run
+      startRun(url);
+    });
+
+    // "Try one": known-good issues, so a first run works. A click fills the input and does not
+    // start the run: the visitor still presses Run.
+    document.querySelectorAll('#try-line [data-issue]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const input = $('#issue-url');
+        input.value = button.dataset.issue;
+        clearNotice();
+        input.focus();
+      });
     });
 
     $('#judge-link').addEventListener('click', toggleJudgeForm);

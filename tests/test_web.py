@@ -183,6 +183,95 @@ def test_the_page_shows_the_new_name_and_never_the_old_one() -> None:
     assert "FixedYet" in html.split('class="brand"', 1)[1].split("</a>", 1)[0]
 
 
+TRY_ONE = {
+    "https://github.com/pallets/jinja/issues/2244": "open bug",
+    "https://github.com/dateutil/dateutil/issues/1588": "open bug",
+    "https://github.com/pallets/werkzeug/issues/3312": "fixed on main",
+}
+
+
+def test_the_page_offers_known_good_issues_that_fill_the_input() -> None:
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    line = html.split('id="try-line"', 1)[1].split("</p>", 1)[0]
+    offered = re.findall(r'<button type="button" class="linklike" data-issue="([^"]+)">', line)
+    assert offered == list(TRY_ONE)
+    for url, verdict in TRY_ONE.items():
+        assert parse_issue_url(url).url == url  # the server takes it as it is
+        assert f"({verdict})" in " ".join(line.split(url, 1)[1].split())
+    # a click fills the input and leaves the run to the Run button
+    handler = script.split("#try-line [data-issue]", 1)[1].split("});\n    });", 1)[0]
+    assert "input.value = button.dataset.issue" in handler and "startRun" not in handler
+
+
+def _readme_matrix() -> list[tuple[str, bool]]:
+    """(verdict, low confidence) for every row of the README's decision matrix."""
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    table = readme.split("### Decision matrix", 1)[1].split("\n\n", 2)[1]
+    rows = [line for line in table.splitlines() if line.startswith("|")][2:]  # no head, no rule
+    found = []
+    for row in rows:
+        verdict_cell = row.strip().strip("|").split("|")[-1]
+        found.append((re.search(r"`(\w+)`", verdict_cell)[1], "confidence low" in verdict_cell))
+    return found
+
+
+def test_the_page_shows_every_row_of_the_decision_matrix() -> None:
+    labels = {"Fixed on main": "fixed_on_main", "Open bug": "open_bug",
+              "Not reproduced": "not_reproduced", "Inconsistent": "inconsistent",
+              "Unsupported": "unsupported", "Needs info": "needs_info"}
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    body = html.split('<table class="matrix">', 1)[1].split("<tbody>", 1)[1].split("</tbody>")[0]
+    page = []
+    for row in re.findall(r"<tr>(.*?)</tr>", body):
+        badge = re.search(r'<span class="badge \w+">([^<]+)</span>', row)[1]
+        page.append((labels[badge], "low confidence" in row))
+    assert sorted(page) == sorted(_readme_matrix())
+    assert len(page) == 10
+
+
+def _contrast(a: str, b: str) -> float:
+    """WCAG contrast ratio of two #rrggbb colours."""
+
+    def luminance(colour: str) -> float:
+        channels = [int(colour[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_the_focus_ring_has_the_contrast_a_ui_component_needs() -> None:
+    css = (web.STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    colours = dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6});", css))
+    for background in ("bg", "surface", "surface-2"):
+        assert _contrast(colours["focus"], colours[background]) >= 3.0, background
+    rings = re.findall(r"outline:\s*\d+px solid ([^;]+);", css)
+    assert rings and set(rings) == {"var(--focus)"}  # every focus outline uses that colour
+
+
+def test_only_the_newest_progress_event_is_announced() -> None:
+    """The progress list is redrawn whole on every event; as a live region, a screen reader
+    would read all of it again each time."""
+    html = (web.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    timeline = re.search(r"<ol id=\"timeline\"[^>]*>", html)[0]
+    assert "aria-live" not in timeline
+    assert '<p id="progress-status" class="sr-only" role="status" aria-live="polite"></p>' in html
+    assert "this.announce(event)" in script
+    assert "$('#progress-status').textContent = text" in script
+
+
+def test_the_scripts_never_put_text_into_the_page_as_html() -> None:
+    """Report text keeps its brackets (a failure line can quote "<p>"), so the escaping is the
+    page's: every string goes in through textContent or a text node."""
+    for name in ("common.js", "app.js", "reports.js"):
+        script = (web.STATIC_DIR / name).read_text(encoding="utf-8")
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert sink not in script, f"{name} uses {sink}"
+
+
 def test_page_has_no_dark_background() -> None:
     css = (web.STATIC_DIR / "style.css").read_text(encoding="utf-8")
     assert "color-scheme: light" in css
@@ -247,6 +336,43 @@ async def test_error_bodies_point_at_the_prefixed_examples_url(
     assert res.json()["examples"] == "/fixedyet/api/examples"
 
 
+# --- behind the proxy on another VM -----------------------------------------------------
+
+DEPLOY_DIR = Path(__file__).resolve().parents[1] / "deploy"
+
+
+@pytest.mark.parametrize(("peer", "scheme"), [("proxy", "https"), ("10.9.9.9", "http")])
+async def test_behind_the_proxy_a_redirect_stays_on_https(
+    tmp_path: Path, peer: str, scheme: str
+) -> None:
+    """https://fixedyet.benlevin.fyi/reports/ redirects to /reports. uvicorn takes the scheme
+    from X-Forwarded-Proto only when the request comes from an address in FORWARDED_ALLOW_IPS,
+    which the Docker host's drop-in sets to the nginx VM; from anywhere else it is ignored."""
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    drop_in = (DEPLOY_DIR / "fixedyet-docker-host.conf").read_text(encoding="utf-8")
+    found = re.search(r"^Environment=FORWARDED_ALLOW_IPS=(\S+)$", drop_in, re.MULTILINE)
+    assert found, "the Docker host must trust the forwarded headers of the nginx VM"
+    proxy = found.group(1)
+    nginx = (DEPLOY_DIR / "fixedyet.nginx.conf").read_text(encoding="utf-8")
+    assert "proxy_set_header X-Forwarded-Proto $scheme;" in nginx
+    assert "proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;" in nginx
+
+    app = web.create_app(make_settings(tmp_path), examples_dir=tmp_path / "no-examples")
+    transport = httpx.ASGITransport(
+        app=ProxyHeadersMiddleware(app, trusted_hosts=proxy),
+        client=(proxy if peer == "proxy" else peer, 51000),
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://fixedyet.benlevin.fyi"
+    ) as client:
+        res = await client.get(
+            "/reports/", headers={"X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9"}
+        )
+    assert res.status_code in (307, 308)
+    assert res.headers["location"] == f"{scheme}://fixedyet.benlevin.fyi/reports"
+
+
 def test_route_path_strips_only_a_whole_leading_segment() -> None:
     assert web.route_path({"path": "/fixedyet/api/x", "root_path": "/fixedyet"}) == "/api/x"
     assert web.route_path({"path": "/fixedyet", "root_path": "/fixedyet"}) == "/"
@@ -264,8 +390,10 @@ def test_route_path_strips_only_a_whole_leading_segment() -> None:
         "",
         "   ",
         "not a url",
-        "http://github.com/psf/requests/issues/1",
+        "ftp://github.com/psf/requests/issues/1",
         "https://gitlab.com/psf/requests/issues/1",
+        "github.com.evil.example/psf/requests/issues/1",
+        "https://user@github.com/psf/requests/issues/1",
         "https://github.com.evil.example/psf/requests/issues/1",
         "https://github.com/psf/requests/pull/1",
         "https://github.com/psf/requests/issues/abc",
@@ -301,6 +429,54 @@ def test_parse_issue_url_normalises() -> None:
     assert ref.url == ISSUE
     assert parse_issue_url(f"{ISSUE}?notification_referrer_id=x").url == ISSUE
     assert parse_issue_url("https://github.com/a-b/c.d_e/issues/12").number == 12
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/psf/requests/issues/6000",
+        "github.com/psf/requests/issues/6000",
+        "www.github.com/psf/requests/issues/6000/",
+        "HTTPS://WWW.GitHub.Com/psf/requests/issues/6000",
+        "Http://GITHUB.COM/psf/requests/issues/6000?a=1#issuecomment-99",
+    ],
+)
+def test_parse_issue_url_takes_what_people_paste(url: str) -> None:
+    assert parse_issue_url(url).url == ISSUE
+
+
+def test_parse_issue_url_keeps_owner_and_repository_as_typed() -> None:
+    ref = parse_issue_url("github.com/PyCQA/isort/issues/2723")
+    assert ref.url == "https://github.com/PyCQA/isort/issues/2723"
+
+
+def test_the_page_accepts_the_same_url_prefixes_as_the_server() -> None:
+    """The page checks a URL before it sends it, so it must not turn away what the server takes."""
+    from fixedyet import web as web_package
+
+    script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    prefix = web_package._GITHUB_PREFIX
+    as_js = prefix.pattern.replace("/", "\\/")  # the same pattern as a JavaScript literal
+    assert prefix.flags & re.IGNORECASE
+    assert f"/{as_js}/i" in script
+    assert "startRun(url)" in script  # the plain https form is what is sent
+
+
+async def test_a_pasted_url_runs_as_its_plain_https_form(
+    client: httpx.AsyncClient, fake: Fake
+) -> None:
+    res = await start(client, "github.com/psf/requests/issues/6000/#issuecomment-1")
+    assert res.status_code == 202
+    assert (await wait_finished(client, res.json()["id"]))["issue_url"] == ISSUE
+    assert fake.calls == [ISSUE]
+
+
+async def test_a_pull_request_url_is_named_as_one(client: httpx.AsyncClient, fake: Fake) -> None:
+    res = await start(client, "https://github.com/psf/requests/pull/6001/files")
+    assert res.status_code == 400 and res.json()["error"] == "invalid_issue_url"
+    message = res.json()["message"]
+    assert "pull request URL" in message and "github.com/owner/repo/issues/123" in message
+    assert fake.calls == []
 
 
 # --- run lifecycle ----------------------------------------------------------------------

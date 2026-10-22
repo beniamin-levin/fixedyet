@@ -33,6 +33,7 @@ MAX_COMMENTS = 30
 MAX_RATE_LIMIT_WAIT_S = 15  # sleep and retry once if GitHub says "try again in <= 15 s"
 
 _ISSUE_PATH = re.compile(r"^/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/issues/(?P<number>\d+)/?$")
+_SCHEMELESS = re.compile(r"^(?:www\.)?github\.com/", re.IGNORECASE)
 
 
 class GitHubError(RuntimeError):
@@ -40,7 +41,12 @@ class GitHubError(RuntimeError):
 
 
 class GitHubNotFound(GitHubError):
-    """404: the issue does not exist, or it is in a private repository."""
+    """404 or 410: the issue does not exist (or was deleted), or it is in a private repository."""
+
+
+class GitHubNotAnIssue(GitHubError):
+    """The number belongs to a pull request. GitHub's issues API answers for pull requests too,
+    so without this check a pull request would be run as if it were a bug report."""
 
 
 class GitHubRateLimited(GitHubError):
@@ -58,8 +64,16 @@ def _comment(data: dict[str, Any]) -> str:
 
 
 def parse_issue_url(url: str) -> tuple[str, str, int]:
-    """'https://github.com/psf/requests/issues/6710' -> ('psf', 'requests', 6710)."""
-    parsed = urlparse(url.strip())
+    """'https://github.com/psf/requests/issues/6710' -> ('psf', 'requests', 6710).
+
+    Takes the URL as people paste it: http or no scheme at all, ``www.``, any case in the host,
+    a trailing slash, a query or an ``#issuecomment-...`` anchor. Owner and repository keep the
+    case they were typed in.
+    """
+    text = url.strip()
+    if _SCHEMELESS.match(text):
+        text = f"https://{text}"
+    parsed = urlparse(text)
     if parsed.scheme not in ("http", "https") or parsed.netloc.lower() not in (
         "github.com",
         "www.github.com",
@@ -137,8 +151,8 @@ class GitHubClient:
                 response = await self._client.get(path, params=params)
             except httpx.HTTPError as exc:
                 raise GitHubError(f"GitHub request failed: {exc}") from exc
-            if response.status_code == 404:
-                raise GitHubNotFound(f"GitHub returned 404 for {path}")
+            if response.status_code in (404, 410):  # 410: a deleted issue, or issues turned off
+                raise GitHubNotFound(f"GitHub returned {response.status_code} for {path}")
             wait = self._rate_limit_wait(response)
             if wait is not None:
                 if attempt == 1 and wait <= MAX_RATE_LIMIT_WAIT_S:
@@ -257,12 +271,26 @@ class GitHubClient:
 
     # -- issue ---------------------------------------------------------------------------
 
+    async def issue_data(self, owner: str, repo: str, number: int) -> dict[str, Any]:
+        """The issue as the REST API returns it, in one request. Raises GitHubNotFound when there
+        is no such issue and GitHubNotAnIssue when the number is a pull request's."""
+        data = await self._get(f"/repos/{owner}/{repo}/issues/{number}")
+        if not isinstance(data, dict):
+            raise GitHubError(f"GitHub returned no issue for {owner}/{repo}#{number}")
+        if data.get("pull_request"):
+            raise GitHubNotAnIssue(
+                f"{owner}/{repo}#{number} is a pull request, not an issue. FixedYet reproduces "
+                "bug reports: give it the URL of the issue the pull request is about."
+            )
+        return data
+
     async def fetch_issue(self, url: str) -> Issue:
-        """Issue, up to 30 comments, and the repository's default branch."""
+        """Issue, up to 30 comments, and the repository's default branch. A pull request's number
+        raises GitHubNotAnIssue."""
         owner, repo, number = parse_issue_url(url)
         base = f"/repos/{owner}/{repo}"
         data, comments, repo_info = await asyncio.gather(
-            self._get(f"{base}/issues/{number}"),
+            self.issue_data(owner, repo, number),
             self._get(f"{base}/issues/{number}/comments", {"per_page": MAX_COMMENTS}),
             self._get(base),
         )

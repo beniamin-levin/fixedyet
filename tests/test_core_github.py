@@ -7,6 +7,8 @@ import respx
 from fixedyet import github
 from fixedyet.github import (
     GitHubClient,
+    GitHubError,
+    GitHubNotAnIssue,
     GitHubNotFound,
     GitHubRateLimited,
     parse_issue_url,
@@ -32,6 +34,11 @@ def issue() -> Issue:
         "http://github.com/acme/widgets/issues/42/",
         "https://www.github.com/acme/widgets/issues/42",
         "  https://github.com/acme/widgets/issues/42  ",
+        "github.com/acme/widgets/issues/42",
+        "www.github.com/acme/widgets/issues/42/",
+        "HTTPS://GitHub.COM/acme/widgets/issues/42",
+        "https://github.com/acme/widgets/issues/42#issuecomment-1234567",
+        "https://github.com/acme/widgets/issues/42?notification_referrer_id=x#issuecomment-1",
     ],
 )
 def test_parse_issue_url_accepts(url: str) -> None:
@@ -44,6 +51,10 @@ def test_parse_issue_url_keeps_dots_and_dashes_in_names() -> None:
     )
 
 
+def test_parse_issue_url_keeps_owner_and_repository_as_typed() -> None:
+    assert parse_issue_url("GITHUB.com/PyCQA/isort/issues/2723") == ("PyCQA", "isort", 2723)
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -52,6 +63,8 @@ def test_parse_issue_url_keeps_dots_and_dashes_in_names() -> None:
         "https://github.com/acme/widgets/issues/abc",
         "https://github.com/acme/widgets",
         "https://github.com.evil.test/acme/widgets/issues/42",
+        "github.com.evil.test/acme/widgets/issues/42",
+        "evil.test/github.com/acme/widgets/issues/42",
         "ftp://github.com/acme/widgets/issues/42",
         "not a url",
     ],
@@ -124,6 +137,38 @@ async def test_fetch_issue_404_raises_not_found() -> None:
     async with GitHubClient() as gh:
         with pytest.raises(GitHubNotFound):
             await gh.fetch_issue("https://github.com/acme/widgets/issues/42")
+
+
+@respx.mock
+async def test_a_pull_request_number_is_not_fetched_as_an_issue() -> None:
+    """GitHub's issues endpoint answers for pull requests too; the ``pull_request`` key says so."""
+    respx.get(f"{API}/repos/acme/widgets/issues/43").respond(json={
+        "title": "Fix parse", "body": "Fixes #42",
+        "pull_request": {"url": f"{API}/repos/acme/widgets/pulls/43", "merged_at": None},
+    })
+    respx.get(f"{API}/repos/acme/widgets/issues/43/comments").respond(json=[])
+    respx.get(f"{API}/repos/acme/widgets").respond(json={})
+    async with GitHubClient() as gh:
+        with pytest.raises(GitHubNotAnIssue, match="is a pull request, not an issue") as caught:
+            await gh.fetch_issue("https://github.com/acme/widgets/issues/43")
+    assert isinstance(caught.value, GitHubError)  # callers that catch GitHubError still do
+    assert "acme/widgets#43" in str(caught.value)
+
+
+@respx.mock
+async def test_issue_data_is_one_request() -> None:
+    route = respx.get(f"{API}/repos/acme/widgets/issues/42").respond(json={"title": "t"})
+    async with GitHubClient() as gh:
+        assert (await gh.issue_data("acme", "widgets", 42))["title"] == "t"
+    assert route.call_count == 1 and len(respx.calls) == 1
+
+
+@respx.mock
+async def test_a_deleted_issue_is_not_found() -> None:
+    respx.get(f"{API}/repos/acme/widgets/issues/42").respond(410, json={"message": "deleted"})
+    async with GitHubClient() as gh:
+        with pytest.raises(GitHubNotFound, match="410"):
+            await gh.issue_data("acme", "widgets", 42)
 
 
 @respx.mock
