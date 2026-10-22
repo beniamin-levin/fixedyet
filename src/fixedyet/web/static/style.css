@@ -126,6 +126,7 @@ h1 { font-size: clamp(2rem, 6vw, 2.9rem); font-weight: 750; letter-spacing: -0.0
 .btn.small { font-size: 0.85rem; padding: 5px 12px; font-weight: 550; }
 
 .hint { margin: 10px 2px 0; font-size: 0.875rem; color: var(--muted); min-height: 1.4em; }
+.seen-one { margin: 0 2px 14px; font-size: 0.95rem; color: var(--text); }
 .try-line { margin: 10px 2px 0; font-size: 0.875rem; color: var(--muted); }
 .try-line .linklike { font-family: var(--mono); font-size: 0.85rem; }
 .try-line .sep { margin: 0 8px; }

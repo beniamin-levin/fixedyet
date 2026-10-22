@@ -438,6 +438,21 @@ async def test_a_failing_sandbox_backend_is_named_not_blamed_on_the_project(
     assert "You do not have permission" in line and "FIXEDYET_SANDBOX=docker" in line
 
 
+async def test_the_progress_names_the_model_behind_each_step(world) -> None:
+    """The hackathon judges asked to show which model does what."""
+    happy_script(world.llm)
+    await world.run()
+    said = {e.stage: [] for e in world.events}
+    for event in world.events:
+        said[event.stage].append(event.message)
+    small = world.settings.small_model.rsplit("/", 1)[-1]
+    main = world.settings.model.rsplit("/", 1)[-1]
+    assert any(m.startswith(f"{small} reads the thread") for m in said["intake"])
+    assert any(m.startswith(f"{main} writes the reproduction test") for m in said["agent"])
+    assert any(m.endswith("by the rules, no model") for m in said["verdict"])
+    assert any(m.startswith(f"{main} writes the root-cause note") for m in said["report"])
+
+
 async def test_a_malformed_issue_url_raises_value_error(settings) -> None:
     with pytest.raises(ValueError, match="issue"):
         await pipeline.reproduce("https://example.com/not/an/issue", settings=settings)

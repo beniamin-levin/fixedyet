@@ -349,6 +349,8 @@ async def _run(ctx: _Context, issue: Issue, started: float) -> Assessment:
 async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
     llm, repo_name = ctx.llm, f"{issue.owner}/{issue.repo}"
 
+    await ctx.say("intake", f"{model_label(llm.settings.small_model)} reads the thread and "
+                  "extracts the reproduction contract")
     contract = ctx.contract = await extract_contract(llm, issue)
     if not contract.runnable:
         await ctx.say("intake", "No runnable reproduction in the issue: needs info")
@@ -388,7 +390,8 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
     project_label = contract.package or issue.repo
     agent_packages = [*installed, *(f"{project_label}[{extra}]" for extra in extras_ok)]
 
-    await ctx.say("agent", "Writing the reproduction test")
+    await ctx.say("agent", f"{model_label(llm.settings.model)} writes the reproduction test; "
+                  "every tool call runs in a fork of the checkpoint")
     test_path, test_code, ctx.transcript = await write_repro_test(
         llm, sb, image, issue, contract, ctx.progress, installed_packages=agent_packages
     )
@@ -410,6 +413,12 @@ async def _decide_by_running(ctx: _Context, issue: Issue) -> Decision:
     )
 
     return decide(reported, fix, runnable=True, env_ok=True, thread=thread_text(issue))
+
+
+def model_label(model: str) -> str:
+    """'nemotron-3-super-120b-a12b' for 'nvidia/nemotron-3-super-120b-a12b': the progress names
+    the model behind each step, so a viewer sees which one does what."""
+    return model.rsplit("/", 1)[-1]
 
 
 def thread_text(issue: Issue) -> str:
@@ -490,7 +499,10 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
     if ctx.caveats and confidence is Confidence.HIGH:
         confidence = Confidence.LOW
     basis += ctx.caveats
-    await ctx.say("verdict", f"Verdict: {verdict.value} ({confidence.value} confidence)")
+    await ctx.say(
+        "verdict",
+        f"Verdict: {verdict.value} ({confidence.value} confidence), by the rules, no model",
+    )
 
     evidence = EvidenceResult()
     root_cause, next_actions = "", list(DEFAULT_NEXT_ACTIONS[verdict])
@@ -508,6 +520,8 @@ async def _conclude(ctx: _Context, issue: Issue, decision: Decision, started: fl
             except Exception:  # best effort, like the rest of the evidence
                 log.exception("bisect for the fixing commit failed")
         try:
+            await ctx.say("report", f"{model_label(ctx.settings.model)} writes the root-cause "
+                          "note (model text, not checked by the sandbox)")
             root_cause, next_actions, reason = await _write_analysis(
                 ctx, issue, verdict, confidence, basis, evidence, next_actions
             )
