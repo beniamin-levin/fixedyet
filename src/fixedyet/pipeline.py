@@ -57,7 +57,7 @@ from fixedyet.report import render_markdown
 from fixedyet.sandbox import get_sandbox
 from fixedyet.sandbox.base import Sandbox, SandboxError
 from fixedyet.untrusted import UNTRUSTED_RULE
-from fixedyet.verdict import RULES_VERSION, decide, issue_state_lines
+from fixedyet.verdict import RULES_VERSION, decide, failure_lines, issue_state_lines, last_run
 
 log = logging.getLogger(__name__)
 
@@ -330,9 +330,17 @@ async def _run(ctx: _Context, issue: Issue, started: float) -> Assessment:
         decision = (Verdict.UNSUPPORTED, Confidence.LOW, basis)
     except BudgetExceeded as exc:
         decision = (Verdict.UNSUPPORTED, Confidence.LOW, [str(exc), f"stopped during {ctx.stage}"])
-    except (envbuild.EnvBuildError, SandboxError) as exc:
+    except envbuild.EnvBuildError as exc:
         verdict, confidence, basis = decide(None, None, runnable=True, env_ok=False)
         decision = (verdict, confidence, [*basis, str(exc)[:500]])
+    except SandboxError as exc:  # the backend itself, not the project: say so, and how to switch
+        hint = (
+            " Set FIXEDYET_SANDBOX=docker to use a local Docker daemon."
+            if ctx.settings.sandbox == "nebius" else ""
+        )
+        basis = [f"the {ctx.settings.sandbox} sandbox failed (a problem of the sandbox, not of "
+                 f"the project): {str(exc)[:400]}.{hint}"]
+        decision = (Verdict.UNSUPPORTED, Confidence.LOW, basis)
     except (AgentError, LLMError) as exc:
         decision = (Verdict.UNSUPPORTED, Confidence.LOW, [f"stopped during {ctx.stage}: {exc}"])
     return await _conclude(ctx, issue, decision, started)
@@ -667,6 +675,16 @@ Answer with ONE JSON object and nothing else:
   "not_reproduced_reason": "only when the verdict is not_reproduced: environment, configuration,
                  not_an_issue or needs_info; otherwise null"
 }
+Read the failure lines before writing: the test asserts the CORRECT behaviour, so a failed
+assertion shows the value the code returned against the value it should return. Name which is
+which and keep the direction right; never describe the bug backwards.
+The next actions must fit the verdict:
+- fixed_on_main: the fix already exists on the fix side. Point to the fixing change or release, a
+  backport or closing the issue; never suggest reverting, re-fixing or investigating the code.
+- open_bug: where a fix would go and what it must make true; the reproduction test as its
+  regression test.
+- inconsistent: read the test first, it may be wrong; rerun it.
+- not_reproduced: what to ask the reporter for.
 """.replace("{UNTRUSTED_RULE}", UNTRUSTED_RULE)
 
 
@@ -690,8 +708,18 @@ async def _write_analysis(
         _data_block("issue", format_issue(issue, max_chars=4_000)),
         _data_block("test", truncate(rep.repro_test_code or "", 3_000)),
     ]
+    # The test writer's own account of the test (model text, unchecked, but it has read the code
+    # this call has not). The submit line of the transcript.
+    note = next(
+        (line.removeprefix("submitted: ") for line in ctx.transcript.splitlines()
+         if line.startswith("submitted: ")), "",
+    )
+    if note.strip():
+        sections.append(_data_block("test writer's note, unchecked", truncate(note, 1_200)))
     for label, side in (("reported", rep.reported_side), ("fix", rep.fix_side)):
         if side:
+            if detail := side.failure_detail or failure_lines(last_run(side.log_excerpt)):
+                sections.append(_data_block(f"{label}-side failure lines", truncate(detail, 1_200)))
             log_text = truncate(side.log_excerpt, 1_500, keep_tail=True)
             sections.append(_data_block(f"{label}-side log ({_outcomes(side)})", log_text))
     if evidence.evidence:
@@ -703,7 +731,9 @@ async def _write_analysis(
             {"role": "system", "content": ANALYSIS_SYSTEM},
             {"role": "user", "content": "\n\n".join(sections)},
         ],
-        max_tokens=1_500, thinking=False, temperature=0.2,
+        # With reasoning: without it the write-up of a demo report described the bug backwards
+        # (the inverse of what the failed assertion shows). The reasoning shares max_tokens.
+        max_tokens=6_000, temperature=0.2,
     )
     data = parse_json_object(result.content) or {}
 

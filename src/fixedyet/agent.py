@@ -180,6 +180,7 @@ async def extract_contract(llm: LLM, issue: Issue) -> ReproContract:
     models = [llm.settings.small_model]
     if llm.settings.model != llm.settings.small_model:
         models.append(llm.settings.model)
+    not_runnable: ReproContract | None = None
     for model in models:
         result = await llm.chat(
             messages, model=model, max_tokens=1_500, thinking=False, temperature=0.2
@@ -189,9 +190,20 @@ async def extract_contract(llm: LLM, issue: Issue) -> ReproContract:
             log.info("contract: %s returned no JSON object", model)
             continue
         try:
-            return ReproContract.model_validate(_clean_contract(data))
+            contract = ReproContract.model_validate(_clean_contract(data))
         except ValidationError as exc:
             log.info("contract: %s returned an invalid contract: %s", model, exc.error_count())
+            continue
+        if contract.runnable or model == models[-1]:
+            return contract
+        # "Not runnable" ends the run as needs_info before any sandbox work, so the small model's
+        # no is checked once by the main model (one call, only on this path). The small model
+        # gave it to an issue whose fragment and symptoms were enough for a test (SWE-bench
+        # requests-2317, run C).
+        log.info("contract: %s found no runnable reproduction; asking %s", model, models[-1])
+        not_runnable = contract
+    if not_runnable is not None:
+        return not_runnable
     raise ContractError("neither model returned a valid reproduction contract")
 
 
@@ -466,6 +478,15 @@ def api_crash_note(output: str, thread: str) -> str | None:
     return None
 
 
+PASSED_NOTE = (
+    "NOTE: the test PASSED at the reported version, where the issue says the bug is present, so "
+    "it does not reproduce the report yet. Check that it runs the code path the issue describes, "
+    "with the reporter's input, and that what it asserts on exists at this version: an assertion "
+    "that a message id, name or text is absent passes whenever that text never appears, for any "
+    "reason. Find the real names with search_code before relying on them."
+)
+
+
 def failure_notes(exit_code: int, output: str, thread: str) -> str | None:
     """What the model should know about a failed run before it reads the output, or None."""
     if exit_code != 1 or not _PYTEST_SUMMARY.search(output):
@@ -536,7 +557,9 @@ class ReproAgent:
         self.last_code: str | None = None
         self.last_exit: int | None = None
         self.last_output = ""
+        self.last_timed_out = False
         self.symptom_checked = False  # the observed-behaviour check sends a test back once only
+        self.outcome_checked = False  # so does the check that the last run failed at all
         self.thread = "\n\n".join([issue.title, issue.body, *issue.comments])
         self.submitted: tuple[str, str] | None = None  # (code, rationale)
         self.steps: list[str] = []
@@ -552,7 +575,19 @@ class ReproAgent:
             {"role": "system", "content": AGENT_SYSTEM},
             {"role": "user", "content": self._first_message()},
         ]
+        first_run_by = max(4, self.max_turns * 2 // 5)
         for turn in range(1, self.max_turns + 1):
+            if turn == first_run_by and self.last_code is None:
+                # Reading without running wastes the turn limit: on SWE-bench pylint-4970 (run C)
+                # the first and only test ran on turn 20 of 20, and it passed.
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"{turn - 1} of {self.max_turns} turns used and no test run "
+                        "yet. Write your first test now and run it with run_test; read more "
+                        "code after you have seen how it fails.",
+                    }
+                )
             if self.max_turns - turn < 2 and turn > 1:
                 left = self.max_turns - turn + 1
                 messages.append(
@@ -738,10 +773,13 @@ class ReproAgent:
         text = self.last_output = self._text(result)
         output = f"pytest exit code {result.exit_code}: {status}\n\n{text}"
         label = f"run_test -> {status.split(' (')[0]}"
+        self.last_timed_out = result.timed_out
         note = None if result.timed_out else explain_run(result.exit_code, text)
         if note is None:
             self._setup_errors = 0
-            if hints := failure_notes(result.exit_code, text, self.thread):
+            passed = result.exit_code == 0 and not result.timed_out
+            hints = PASSED_NOTE if passed else failure_notes(result.exit_code, text, self.thread)
+            if hints:
                 # first, like the notes below: a long output is cut in the middle
                 output = f"pytest exit code {result.exit_code}: {status}\n\n{hints}\n\n{text}"
                 label += " (with a note)"
@@ -772,7 +810,17 @@ class ReproAgent:
                 "check the failure, then submit exactly that code.",
                 "submit rejected (code differs from the last run)",
             )
-        if not self.symptom_checked and self.last_exit == 1:
+        failed = self.last_exit == 1 and bool(_PYTEST_SUMMARY.search(self.last_output))
+        # A last run that passed, or stopped before its assertions for the test's own reason,
+        # cannot reproduce anything: the two verdict runs would end the same way. Sent back
+        # once; a setup error is the sandbox's, and the harness reports it.
+        if not failed and not self.outcome_checked and self._setup_errors == 0:
+            self.outcome_checked = True
+            status = describe_pytest_exit(self.last_exit or 0, self.last_timed_out)
+            return self._outcome_feedback(status), (
+                f"submit returned once: the last run {status.split(' (')[0]}"
+            )
+        if not self.symptom_checked and failed:
             self.symptom_checked = True
             missing = missing_symptoms(self.contract.observed_behaviour, self.last_output)
             if missing:
@@ -781,6 +829,26 @@ class ReproAgent:
                 )
         self.submitted = (code, rationale)
         return "submitted", "submit"
+
+    def _outcome_feedback(self, status: str) -> str:
+        if self.last_exit == 0 and not self.last_timed_out:
+            problem = (
+                "your last run PASSED at the reported version, where the issue says the bug is "
+                "present, so the test does not reproduce the report. Check that it runs the code "
+                "path the issue describes and that what it asserts on exists at this version"
+            )
+        else:
+            reason = error_reason(self.last_output) or status
+            problem = (
+                f"your last run did not reach its assertions ({reason}). The two runs that decide "
+                "the verdict would stop the same way, so the report could say nothing. Fix the "
+                "test so that it runs"
+            )
+        return (
+            f"submit returned (once): {problem}, then run it again. If it cannot be done at this "
+            "version, call submit again with the same code and say why in the rationale: the "
+            "second submit is accepted."
+        )
 
     def _symptom_feedback(self, missing: list[str]) -> str:
         first = (failure_lines(self.last_output) or "").splitlines()

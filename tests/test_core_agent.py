@@ -198,6 +198,32 @@ async def test_contract_tolerates_the_usual_schema_slips(fake_llm, sample_issue)
     assert contract.setup_steps == ["pip install extras"] and contract.expected_behaviour == ""
 
 
+async def test_a_not_runnable_contract_is_checked_by_the_main_model(fake_llm, sample_issue) -> None:
+    """SWE-bench requests-2317 (run C): the small model called a fragment plus exact symptoms
+    not runnable, which ends the run as needs_info before any sandbox work."""
+    fake_llm.queue({**VALID_CONTRACT, "runnable": False}, VALID_CONTRACT)
+    contract = await extract_contract(fake_llm, sample_issue)
+    assert contract.runnable is True
+    assert [c["model"] for c in fake_llm.calls] == [
+        fake_llm.settings.small_model, fake_llm.settings.model,
+    ]
+
+
+@pytest.mark.parametrize("second", [{**VALID_CONTRACT, "runnable": False}, "no JSON at all"])
+async def test_a_not_runnable_contract_stands_unless_the_main_model_finds_one(
+    fake_llm, sample_issue, second: Any
+) -> None:
+    fake_llm.queue({**VALID_CONTRACT, "runnable": False, "package": "small"}, second)
+    contract = await extract_contract(fake_llm, sample_issue)
+    assert contract.runnable is False and len(fake_llm.calls) == 2
+
+
+async def test_a_runnable_contract_is_not_checked_again(fake_llm, sample_issue) -> None:
+    fake_llm.queue(VALID_CONTRACT)
+    await extract_contract(fake_llm, sample_issue)
+    assert len(fake_llm.calls) == 1
+
+
 async def test_contract_with_one_model_configured_asks_once(fake_llm, sample_issue) -> None:
     fake_llm.settings.small_model = fake_llm.settings.model
     fake_llm.queue("garbage")
@@ -278,7 +304,9 @@ async def test_tool_output_is_truncated_to_8000_characters(
     fake_llm, fake_sandbox, sample_issue
 ) -> None:
     fake_sandbox.on("ls -la", ExecResult(exit_code=0, stdout="x" * 60_000))
-    fake_sandbox.on("pytest", ExecResult(exit_code=1, stdout="E   boom\n" + "y" * 60_000 + "\nEND"))
+    fake_sandbox.on(
+        "pytest", ExecResult(exit_code=1, stdout="E   boom\n" + "y" * 60_000 + "\n1 failed\nEND")
+    )
     fake_llm.queue(
         fake_llm.tool("list_dir", path="."),
         fake_llm.tool("run_test", code=GOOD_TEST),
@@ -564,6 +592,85 @@ async def test_an_error_in_the_models_own_test_is_not_a_setup_error(
     assert "turn limit (3) reached" in summary  # three of them, none stopped the loop early
     (shown, *_) = [m["content"] for m in tool_messages(fake_llm) if m["name"] == "run_test"]
     assert "ERROR before any assertion ran" in shown and "SETUP ERROR" not in shown
+
+
+PYTEST_PASS = ExecResult(exit_code=0, stdout=".\n1 passed in 0.01s\n")
+
+
+async def test_a_pass_at_the_reported_version_gets_a_note_and_a_submit_is_sent_back_once(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    """SWE-bench pylint-4970 (run C): the only test asserted on a message id that never appears,
+    passed at the reported version, and became not_reproduced."""
+    fake_sandbox.on("pytest", PYTEST_PASS)
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="first"),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="it cannot fail here"),
+    )
+    _, code, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    run, first = (m["content"] for m in tool_messages(fake_llm))  # the last call saw these two
+    assert run.split("\n\n")[1].startswith("NOTE: the test PASSED at the reported version")
+    assert first.startswith("submit returned (once): your last run PASSED")
+    assert "submit returned once: the last run PASSED" in summary
+    assert code == GOOD_TEST and "submitted: it cannot fail here" in summary
+
+
+async def test_a_submit_after_the_tests_own_error_is_sent_back_once(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    """SWE-bench pylint-4604 (run C): the submitted test named a class that does not exist, so
+    both verdict runs stopped at collection and the result was unsupported."""
+    fake_sandbox.on("pytest", COLLECTION_ERROR)
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="first"),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="second"),
+    )
+    _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    first = [m["content"] for m in tool_messages(fake_llm) if m["name"] == "submit"][0]
+    assert "did not reach its assertions" in first and "widgets_extra" in first
+    assert "submitted: second" in summary
+
+
+async def test_a_submit_after_a_setup_error_is_not_sent_back(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", CONFTEST_CRASH)
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="the sandbox's problem"),
+    )
+    _, _, summary = await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    assert "submitted: the sandbox's problem" in summary and "returned" not in summary
+
+
+async def test_a_model_that_only_reads_is_told_to_run_a_test(
+    fake_llm, fake_sandbox, sample_issue
+) -> None:
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    fake_llm.settings.max_turns = 10  # the nudge comes before turn 4 (two fifths of the turns)
+    fake_llm.queue(
+        *[fake_llm.tool("list_dir", path=".") for _ in range(3)],
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="r"),
+    )
+    await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    nudge = "3 of 10 turns used and no test run yet"
+    seen = [any(nudge in str(m["content"]) for m in call["messages"]) for call in fake_llm.calls]
+    assert seen == [False, False, False, True, True]
+
+
+async def test_no_nudge_once_a_test_has_run(fake_llm, fake_sandbox, sample_issue) -> None:
+    fake_sandbox.on("pytest", PYTEST_FAIL)
+    fake_llm.settings.max_turns = 10
+    fake_llm.queue(
+        fake_llm.tool("run_test", code=GOOD_TEST),
+        *[fake_llm.tool("list_dir", path=".") for _ in range(4)],
+        fake_llm.tool("submit", code=GOOD_TEST, rationale="r"),
+    )
+    await write_repro_test(fake_llm, fake_sandbox, "img", sample_issue, CONTRACT)
+    assert not any("no test run yet" in str(m["content"]) for m in fake_llm.calls[-1]["messages"])
 
 
 async def test_an_empty_code_argument_names_what_the_model_sent(

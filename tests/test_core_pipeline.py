@@ -204,24 +204,25 @@ async def test_open_bug(world) -> None:
     assert a.reproduction.fixing_commit is None and a.reproduction.fixed_in_release is None
 
 
-async def test_needs_info_makes_one_model_call_and_needs_no_sandbox(
+async def test_needs_info_makes_two_model_calls_and_needs_no_sandbox(
     world, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def must_not_be_called(*_: Any) -> None:
         raise AssertionError("a needs_info run must not create a sandbox")
 
     monkeypatch.setattr(pipeline, "get_sandbox", must_not_be_called)
-    world.llm.queue({**CONTRACT, "runnable": False, "code_snippet": None})
+    not_runnable = {**CONTRACT, "runnable": False, "code_snippet": None}
+    world.llm.queue(not_runnable, not_runnable)  # the small model's no, checked by the main one
     a = await pipeline.reproduce(
         ISSUE_URL, settings=world.settings, llm=world.llm, github=world.github,
         progress=world.events.append,
     )
     assert (a.verdict, a.confidence) == (Verdict.NEEDS_INFO, Confidence.LOW)
-    assert len(world.llm.calls) == 1
+    assert len(world.llm.calls) == 2
     assert world.sandbox.calls == [] and world.env.build_calls == []
     assert a.reproduction.repro_test_code is None
     assert any("snippet" in action for action in a.next_actions)
-    assert a.usage.llm_calls == 1 and a.usage.sandbox_runs == 0
+    assert a.usage.llm_calls == 2 and a.usage.sandbox_runs == 0
 
 
 async def test_environment_failure_is_an_unsupported_assessment_not_an_exception(world) -> None:
@@ -401,6 +402,40 @@ async def test_github_failure_at_intake_is_unsupported(world) -> None:
     assert a.verdict is Verdict.UNSUPPORTED and a.title == "(issue could not be fetched)"
     assert any("rate limit" in line for line in a.confidence_basis)
     assert world.llm.calls == []
+
+
+async def test_the_analysis_reads_the_failure_lines_and_the_test_writers_note(world) -> None:
+    """A demo report's write-up described the bug backwards: the call had neither the failed
+    assertion on its own nor the agent's account of the test, and reasoning was off."""
+    happy_script(world.llm)
+    await world.run()
+    call = world.llm.calls[-1]
+    prompt = call["messages"][1]["content"]
+    assert '<data kind="test writer\'s note, unchecked">\nparse loses the last item' in prompt
+    assert '<data kind="reported-side failure lines">' in prompt
+    assert call["thinking"] is None and call["max_tokens"] >= 4_000
+    system = call["messages"][0]["content"]
+    assert "never describe the bug backwards" in system
+    assert "never suggest reverting" in system
+
+
+async def test_a_failing_sandbox_backend_is_named_not_blamed_on_the_project(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fixedyet import envbuild
+    from fixedyet.sandbox.base import SandboxError
+
+    async def no_access(*_: Any, **__: Any) -> Any:
+        raise SandboxError("could not import python:3.12: You do not have permission")
+
+    monkeypatch.setattr(envbuild, "build_baseline", no_access)
+    world.settings.sandbox = "nebius"
+    world.llm.queue(CONTRACT)
+    a = await world.run()
+    assert (a.verdict, a.confidence) == (Verdict.UNSUPPORTED, Confidence.LOW)
+    (line,) = a.confidence_basis
+    assert line.startswith("the nebius sandbox failed (a problem of the sandbox, not of the")
+    assert "You do not have permission" in line and "FIXEDYET_SANDBOX=docker" in line
 
 
 async def test_a_malformed_issue_url_raises_value_error(settings) -> None:
