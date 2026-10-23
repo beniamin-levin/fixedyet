@@ -127,7 +127,8 @@ SECURITY_HEADERS = [
     (
         b"content-security-policy",
         b"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-        b"connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        b"connect-src 'self'; frame-src https://www.youtube-nocookie.com; base-uri 'none'; "
+        b"form-action 'self'; frame-ancestors 'none'",
     ),
 ]
 

@@ -251,6 +251,23 @@
     setTimeout(() => box.querySelectorAll('.example').forEach((n) => n.classList.remove('attention')), 2500);
   }
 
+  // The video loads YouTube only when asked to play; until then the poster is a plain link to it.
+  // YouTube needs the page's origin as referrer, which the page's own no-referrer policy would drop.
+  function playVideo(event) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    event.preventDefault();
+    const frame = document.createElement('div');
+    frame.className = 'video-frame';
+    const iframe = document.createElement('iframe');
+    iframe.src = `https://www.youtube-nocookie.com/embed/${event.currentTarget.dataset.videoId}?autoplay=1&rel=0`;
+    iframe.title = 'FixedYet demo video';
+    iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+    frame.append(iframe);
+    event.currentTarget.replaceWith(frame);
+  }
+
   // ---------- running ----------
 
   let source = null;
@@ -459,6 +476,7 @@
     });
 
     $('#judge-link').addEventListener('click', toggleJudgeForm);
+    $('#video-facade').addEventListener('click', playVideo);
     $('#judge-form').addEventListener('submit', submitJudgeCode);
     $('#judge-cancel').addEventListener('click', () => { $('#judge-form').hidden = true; $('#judge-code').value = ''; });
 

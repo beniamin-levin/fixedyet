@@ -4,9 +4,11 @@
 
 Built for the Nebius x NVIDIA Global AI Hackathon 2026, Coding and Agentic Engineering track. MIT licensed.
 
+[![The FixedYet demo video, 2:54: an open Jinja bug reproduced and fixed, a live run in Nebius Sandboxes, the Black pull request, a backport, the MCP server and the numbers](docs/img/video.jpg)](https://www.youtube.com/watch?v=lB7mk7QRPWQ)
+
 ## For judges
 
-- **Live demo:** https://fixedyet.benlevin.fyi/, and every saved report at https://fixedyet.benlevin.fyi/reports. **Video (3 min):** _link added on submission_.
+- **Live demo:** https://fixedyet.benlevin.fyi/, and every saved report at https://fixedyet.benlevin.fyi/reports. **Video (2:54):** https://www.youtube.com/watch?v=lB7mk7QRPWQ
 - **Start here:** the [jinja#2244 report](https://fixedyet.benlevin.fyi/reports#real-pallets-jinja-2244). An open bug, then a one-line fix that FixedYet verified in the sandbox (911 tests pass with and without it): the same check the jinja maintainer asked for in the open upstream pull request.
 - **Run one yourself:** paste an issue from a pure-Python project tested with pytest. The judge code in the Devpost testing instructions gives judges their own daily runs.
 - **Measured:** on SWE-bench Verified, the final agent reproduced **13, 12 and 11 of 15** issues in three full runs (36 of 45, 80%), and **14 of the 15** in at least one run, at **about $0.03 and 80 seconds per issue**. Ten recent real issues, rerun live on the demo with the same agent, gave **8 of 10** correct verdicts; the other 2 are flagged at low confidence with the reason, and none is wrong at high confidence. Every run, the misses and the development runs included, is in [Evaluation](#evaluation).
